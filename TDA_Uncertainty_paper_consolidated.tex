@@ -1,0 +1,113 @@
+% Uncertainty Estimation via Topological Analysis of Attention Matrices (EACL 2023)
+% Authors: Elizaveta Kostenok, Daniil Cherniavskii, Alexey Zaytsev
+% Consolidated technical content
+
+\section{Abstract}
+Existing uncertainty estimation (UE) techniques for Transformers either offer minimal improvements over basic heuristics or rely on costly ensemble models. We harness the geometry of attention maps across multiple heads and layers to assess model confidence using Topological Data Analysis (TDA). Our method extracts topological features providing low-dimensional, interpretable representation of model's internal dynamics. We also introduce features to compare attention patterns across heads and layers.
+
+\section{Motivation}
+- Softmax outputs differ from true probabilities (overconfident on OOD samples)
+- MC Dropout and Deep Ensembles are computationally expensive for LLMs
+- Hidden representations can capture uncertainty, but require many features
+- Key insight: Attention mechanism captures token relationships as directed weighted graphs
+
+\section{Methodology}
+
+\subsection{Attention as Graphs}
+For each input sentence, generate $N_l \times N_h$ attention graphs:
+- Vertices: tokens in input sequence
+- Edge weights: attention weights between token pairs
+
+\subsection{Types of Topological Features}
+
+\textbf{1. Graph Statistics (graph features):}
+- Number of vertices, edges, connected components
+- Number of simple cycles
+- Average vertex degree, Betti numbers
+
+\textbf{2. Barcode Features (from filtration):}
+Filtration: family of graphs $\{G^{\tau_i}\}$ obtained by removing edges below threshold $\tau_i$
+- Track appearance ($t_{birth}$) and disappearance ($t_{death}$) of properties
+- Barcode = set of intervals between birth/death times
+- Extract: sum, mean, variance, entropy of barcode lengths
+
+\textbf{3. Template Features:}
+Attention patterns categorized as:
+- Attention to current/previous/next tokens
+- Attention to [SEP] and [CLS] tokens
+Feature = Frobenius norm of difference between attention matrix and pattern incidence matrix
+
+\textbf{4. Cross-Barcode Features (NEW - PairedAttention):}
+Compare attention weight distributions across different layers/heads:
+- For graphs $G^w$ and $G^{w'}$ with weights $w$ and $w'$
+- Compute $M = \min(w, w')$
+- Build filtration on composite graph
+- Captures properties that appeared in one graph but not other
+
+\subsection{Feature Categories}
+- SingleAttention: computed independently per attention matrix (types 1-3)
+- PairedAttention: computed for matrix pairs (type 4)
+
+\subsection{Score Predictor Model}
+Lightweight MLP trained to predict confidence:
+\begin{equation}
+s(x) = s_\theta(\text{Topology}(\text{Attention}(x))) \in [0, 1]
+\end{equation}
+
+\textbf{Loss Function:}
+Cannot directly supervise confidence, so use calibration term:
+\begin{equation}
+L = -\sum_{i=1}^{2} y_i \log(p'_i) - \lambda \log(s)
+\end{equation}
+where $p'_i = s \cdot p_i + (1-s) \cdot y_i$ is confidence-calibrated prediction.
+
+\subsection{Evaluation: Accuracy Rejection Curve}
+1. Rank samples by confidence (ascending)
+2. Iteratively remove least confident samples
+3. Recalculate accuracy on remaining samples
+4. Plot accuracy vs fraction removed
+5. Metric: Area Under Curve (larger = better)
+
+\section{Experiments}
+
+\subsection{Datasets}
+- CoLA (English, Italian, Russian): acceptability judgments
+- WebText & GPT-2: artificial text detection
+
+\subsection{Feature Selection}
+\textbf{SingleAttention:}
+- Raw: $(12, 12, N_f)$ features per input
+- Selection via Shapley values outperforms averaging
+- Last layer features most informative
+
+\textbf{PairedAttention (Cross-barcodes):}
+- Most informative pairs concentrated in last layers
+- Select up to 5 most informative cross-barcodes
+- Best pair example: $A_{10,11}$ and $A_{11,8}$
+
+\subsection{Results (Area Under Accuracy Rejection Curve)}
+
+| Method | En-CoLA | Ita-CoLA | Ru-CoLA | ATD |
+|--------|---------|----------|---------|-----|
+| Softmax Response | 0.068 | 0.085 | 0.073 | 0.122 |
+| MC Dropout | 0.071 | 0.084 | 0.076 | 0.123 |
+| Mahalanobis | 0.083 | 0.091 | 0.080 | 0.135 |
+| Topo (no cross) | 0.087 | 0.092 | 0.080 | 0.132 |
+| Topo (with cross) | 0.098 | 0.099 | 0.085 | 0.139 |
+| Oracle Upper Bound | 0.124 | 0.121 | 0.118 | 0.156 |
+
+\textbf{Key findings:}
+- Topological methods outperform all baselines
+- Cross-barcodes provide significant improvement (up to 12% for English)
+- Effect most pronounced for English, least for Russian
+
+\section{Key Contributions}
+1. First to use geometry of attention mechanism for uncertainty estimation
+2. Introduction of PairedAttention (cross-barcode) features for NLP
+3. Lightweight Score Predictor trained on topological features
+4. Up to 16% improvement over baselines on benchmarks
+
+\section{Interpretation}
+- Attention heads form clusters in 2D projection
+- Most informative cross-barcode pairs within same cluster
+- Last layer features most important (likely due to fine-tuning affecting these weights most)

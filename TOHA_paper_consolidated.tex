@@ -1,0 +1,87 @@
+% TOHA: Topology-based Hallucination Detection for RAG
+% Authors: Alexandra Bazarova et al. (Applied AI Institute, SB AI Lab, CNRS)
+% Consolidated technical content
+
+\section{Abstract}
+We introduce TOHA (TOpology-based HAllucination detector), a training-free method for RAG scenarios that leverages topological divergence metric to quantify structural properties of graphs induced by attention maps. Higher divergence values in specific attention heads correlate with hallucinated outputs, independent of dataset. Achieves SOTA or competitive results on QA and summarization benchmarks while requiring minimal annotated data and computational resources.
+
+\section{Core Insight}
+The structure of prompt-response interconnections within an LLM's attention mechanism should be indicative of hallucination presence. TOHA formalizes this by analyzing attention graphs using Topological Data Analysis (TDA).
+
+\section{Methodology}
+
+\subsection{Attention Graph Construction}
+From attention map, construct complete weighted graph $G$:
+- Vertices: tokens (prompt tokens $P$ and response tokens $R$)
+- Edge weights: attention scores
+
+\subsection{MTop-Div: Manifold Topology Divergence for Graphs}
+Adaptation of Manifold Topology Divergence for graph setting:
+
+$\operatorname{MTop-Div}_G(R, P)$ quantifies dissimilarity between prompt and response token sets in attention graph.
+
+\textbf{Computation:}
+1. Construct minimum spanning forest attaching response tokens $R$ to prompt tokens $P$
+2. Compute topological divergence from this structure
+
+\textbf{Key property:} This score characterizes the NOVELTY of response with respect to prompt - well-suited for hallucination detection in RAG.
+
+\subsection{Hallucination-Aware Attention Heads}
+Critical discovery: There exists a subset of attention heads that consistently yield greater divergence values for hallucinated samples, IRRESPECTIVE of dataset.
+
+Some of these heads are associated with copying behavior (aligned with prior findings).
+
+\subsection{TOHA Algorithm}
+1. For input prompt+response, extract attention maps
+2. For each selected "hallucination-aware" head, compute $\operatorname{MTop-Div}_G(R, P)$
+3. Final hallucination score = average divergence across selected heads
+
+\textbf{Key advantage:} Only need ~10 heads for robust detection.
+
+\section{Properties of MTop-Div}
+
+\subsection{Novelty Characterization}
+The score reflects both:
+- Geometry of attention structure
+- Informational novelty of response relative to prompt
+
+\subsection{Cross-Domain Transferability}
+Hallucination-aware heads identified on one dataset work across different datasets. This enables:
+- Minimal annotated data requirement
+- Efficient transfer to new domains
+
+\section{Comparison with Other Methods}
+
+Unlike existing attention-based methods that:
+- Treat all attention heads equally
+- Ignore geometric structure of attention maps
+
+TOHA:
+- Leverages small SET of attention heads selected by topological criterion
+- Exploits geometric structure via TDA
+
+\section{Experiments}
+
+\subsection{Tasks}
+- Question Answering
+- Summarization
+
+\subsection{Models}
+Open-source LLMs: 7B and 13B parameter models (LLaMA, Mistral families)
+
+\subsection{Key Results}
+- SOTA or competitive on multiple benchmarks
+- Up to 10x faster than methods of comparable quality
+- Requires minimal annotated data
+- Averaging MTop-Div for just 10 heads is enough
+
+\section{Contributions Summary}
+1. Training-free framework using attention graph topology
+2. MTop-Div adaptation for graphs measuring prompt-response dissimilarity
+3. Discovery of hallucination-aware attention heads (dataset-independent)
+4. Efficient and transferable hallucination detection
+
+\section{Limitations}
+1. Model-specific dependencies - hallucination-aware heads may vary across architectures
+2. Needs validation on proprietary/larger models (GPT-4, Claude)
+3. Currently text-only - multimodal extension would require redefining attention graphs

@@ -1,0 +1,144 @@
+% SAR: Shifting Attention to Relevance for Uncertainty Quantification in LLMs
+% Consolidated from sections/ directory
+
+\section{Abstract}
+Large Language Models (LLMs) show promising results in language generation and instruction following but frequently "hallucinate", making their outputs less reliable. Despite Uncertainty Quantification's (UQ) potential solutions, implementing it accurately within LLMs is challenging. Our research introduces a simple heuristic: not all tokens in auto-regressive LLM text equally represent the underlying meaning, as "linguistic redundancy" often allows a few keywords to convey the essence of long sentences. However, current methods underestimate this inequality when assessing uncertainty, causing tokens with limited semantics to be equally or excessively weighted in UQ. To correct this, we propose Shifting Attention to more Relevant (SAR) components at both token- and sentence-levels for better UQ.
+
+\section{Introduction}
+LLMs are vulnerable to reliability issues such as hallucination and factual errors. Uncertainty quantification (UQ) is one of the most popular approaches to answering when humans can trust the generations of LLMs.
+
+Our motivation is derived from an intuitive fact: tokens are created unequally in presenting semantics. Some tokens (e.g., nouns, verbs) are more meaningful than other tokens (e.g., definite articles). We term the former as "relevant tokens" and the rest as "irrelevant tokens". Prior works treat each token equally when estimating uncertainty, which is counter-intuitive.
+
+Key question: Are relevant tokens more critical than irrelevant tokens in uncertainty quantification?
+
+\subsection{Contributions}
+\begin{itemize}
+\item We disclose that uncertainty quantification is significantly affected by token- and sentence-level generative inequality
+\item We mitigate these biases by Shifting Attention to Relevance (SAR)
+\item Experiments over "off-the-shelf" LLMs demonstrate superior performance
+\end{itemize}
+
+\section{Generative Inequality in Uncertainty Quantification}
+
+\subsection{Preliminaries}
+LLMs output generations in a free-form and auto-regressive manner. For a given LLM, the probability of generating $z_i$ as the $i$-th token is $p(z_i|s_{<i}, x)$.
+
+\textbf{Baseline - Predictive Entropy (PE):}
+\begin{equation}
+PE(s, x) = -\log p(s|x) = \sum_{i}{-\log p(z_i|s_{<i}, x)}
+\end{equation}
+
+\subsection{Token-Level Generative Inequality}
+For a given prompt $x$ and sentence $s$ with $N$ tokens:
+
+\textbf{Relevance:} Measures how important $z_i$ is in reflecting semantics:
+\begin{equation}
+R_T(z_i, s, x) = 1 - |g(x \cup s, x \cup s \setminus \{z_i\})|
+\end{equation}
+where $g(\cdot, \cdot)$ calculates semantic similarity between two sentences.
+
+\textbf{Uncertainty Proportion:}
+\begin{equation}
+UP_T(z_i, s, x) = \frac{-\log p(z_i|s_{<i}, x)}{PE(s, x)}
+\end{equation}
+
+\subsection{Sentence-Level Generative Inequality}
+For sentence $s_i$, the sentence-level relevance is probability-weighted semantic similarity with other sentences:
+\begin{equation}
+R_S(s_i, S, x) = \sum_{j \neq i}{g(s_i, s_j)p(s_j|x)}
+\end{equation}
+
+Sentence-level uncertainty proportion:
+\begin{equation}
+UP_S(s_i, S, x) = \frac{PE(s_i, x)}{\sum_k{PE(s_k, x)}}
+\end{equation}
+
+\subsection{Analytical Insights}
+Key findings:
+\begin{itemize}
+\item Most tokens are irrelevant tokens (low relevance scores) - linguistic redundancy exists widely
+\item Irrelevant tokens/sentences commit significantly more uncertainty than relevant ones
+\item Uncertainty quantification is highly affected by these inequalities
+\end{itemize}
+
+\section{Shifting Attention to Relevance (SAR)}
+
+\subsection{Token-Level Shifting}
+Normalized relevance score:
+\begin{equation}
+\tilde{R}_T(z_i, s_j, x) = \frac{R_T(z_i, s_j, x)}{\sum_n^{N_j}{R_T(z_n, s_j, x)}}
+\end{equation}
+
+Re-weighted token entropy:
+\begin{equation}
+E_T(z_i, s_j, x) = -\log p(z_i|s_{<i}, x) \tilde{R}_T(z_i, s_j, x)
+\end{equation}
+
+Token-level shifted predictive entropy:
+\begin{equation}
+\text{token-SAR}(s_j, x) = \sum_i^{N_j}{E_T(z_i, s_j, x)}
+\end{equation}
+
+\subsection{Sentence-Level Shifting}
+Reduce sentence uncertainty by enlarging generative probability with relevance-controlled quantity:
+\begin{equation}
+E_S(s_j, S, x) = -\log(p(s_j|x) + \frac{\sum_{k \neq j}{g(s_j, s_k)p(s_k|x)}}{t})
+\end{equation}
+where $t$ is temperature controlling scale of shifting.
+
+Sentence-level shifted predictive entropy:
+\begin{equation}
+\text{sent-SAR}(S, x) = \frac{1}{K}\sum_k{E_S(s_k, S, x)}
+\end{equation}
+
+\subsection{Combined SAR}
+Replace generative probabilities with token-shifted probability:
+$p'(s_i|x) = e^{-\text{token-SAR}(s_i, x)}$
+
+Combined measurement:
+\begin{equation}
+E_{T,S}(s_j, S, x) = -\log(p'(s_i|x) + \frac{\sum_{k \neq j}{g(s_j, s_k)p'(s_j|x)}}{t})
+\end{equation}
+
+Final SAR: $\text{SAR} = \frac{1}{K}\sum_k E_{T,S}(s_k, S, x)$
+
+\section{Experiments}
+
+\subsection{Settings}
+\textbf{Baselines:} Lexical Similarity, Semantic Entropy (SE), Predictive Entropy (PE), Length-normalized PE (LN-PE)
+
+\textbf{Models:} Instruction-tuned (Vicuna, LLaMA-2-chat, WizardLM) and pre-trained (OPT, LLaMA) up to 33B parameters
+
+\textbf{Datasets:} CoQA, TriviaQA, SciQ, MedQA, MedMCQA
+
+\textbf{Evaluation:} AUROC for predicting correctness of generations
+
+\subsection{Results}
+
+\textbf{Pre-trained LLMs:}
+\begin{itemize}
+\item SAR outperforms other methods by up to 3.6\% AUROC on CoQA
+\item Synergy of token-SAR and sent-SAR achieves remarkable improvements (e.g., 0.723 individually to 0.748 combined on OPT-30b-CoQA)
+\end{itemize}
+
+\textbf{Instruction-Tuned LLMs:}
+\begin{itemize}
+\item SAR consistently beats baseline methods
+\item SAR outperforms SE by 7.1\% AUROC on average
+\end{itemize}
+
+\textbf{Ablation Studies:}
+\begin{itemize}
+\item SAR is generation-efficient: achieves 0.750 AUROC with only 5 generations
+\item General-purpose sentence similarity models are more effective than target LLMs
+\item 2-generation sent-SAR surpasses 5-generation baselines while consuming less than half the time
+\end{itemize}
+
+\section{Conclusion}
+We disclose the generative inequality observation in uncertainty quantification: tokens and generations are created unequally in reflecting semantics yet they are treated equally when estimating uncertainty. SAR tackles these inequalities from both token-level and sentence-level, demonstrating superior performance across off-the-shelf LLMs.
+
+\subsection{Limitations}
+\begin{itemize}
+\item Introduces sentence similarity calculations adding latency
+\item Requires access to token logits (may restrict black-box scenarios)
+\end{itemize}
