@@ -1,0 +1,40 @@
+# Build artifacts
+*.egg-info/
+.pytest_cache/
+__pycache__/
+*.pyc
+build/
+dist/
+
+# Results (reproducible, not versioned)
+results/
+
+# IDE/Editor
+.claude/
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (too large)
+data/
+*.bin
+*.pt
+
+# Python
+.eggs/
+*.egg
+.python-version
+pip-log.txt
+
+# Testing
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Type checking
+.mypy_cache/

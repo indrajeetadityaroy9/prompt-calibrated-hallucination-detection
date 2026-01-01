@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ag-sar"
+version = "0.1.0"
+description = "Attention-Graph Shifting Attention to Relevance for LLM Uncertainty Quantification"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Indrajeet Aditya Roy", email = "roy.indrajeet009@gmail.com"}
+]
+keywords = ["llm", "uncertainty", "hallucination", "attention", "transformers"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.30",
+    "numpy>=1.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+eval = [
+    "rouge-score>=0.1.2",
+    "bert-score>=0.3.13",
+    "evaluate>=0.4.0",
+    "datasets>=2.0",
+    "nltk>=3.8",
+    "spacy>=3.5",
+    "scipy>=1.10",
+    "scikit-learn>=1.2",
+    "matplotlib>=3.7",
+    "seaborn>=0.12",
+    "tqdm>=4.65",
+]
+all = [
+    "ag-sar[dev,eval]",
+]
+
+[project.urls]
+Homepage = "https://github.com/indrajeetadityaroy9/AG-SAR"
+Repository = "https://github.com/indrajeetadityaroy9/AG-SAR"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ag_sar*", "eval*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
