@@ -5,8 +5,10 @@ Compares Tokens Per Second (TPS) across:
 1. Vanilla GPT-2 (no uncertainty)
 2. AG-SAR (internal graph)
 3. Original SAR (GPT-2 + RoBERTa perturbation - O(N) passes)
+4. Multi-GPU AG-SAR (linear scaling validation)
 
 Expected: AG-SAR TPS ≈ Vanilla TPS >> Original SAR TPS
+Multi-GPU scaling efficiency should be >80% for 2 GPUs.
 """
 
 from typing import Dict, Optional
@@ -15,7 +17,7 @@ import json
 import torch
 
 from ..config import EvalConfig
-from ..profiling.throughput import ThroughputBenchmark, compute_speedup
+from ..profiling.throughput import ThroughputBenchmark, MultiGPUBenchmark, compute_speedup
 
 
 def run_throughput_experiment(
@@ -132,6 +134,112 @@ def run_throughput_experiment(
     return results
 
 
+def run_multi_gpu_scaling_experiment(
+    single_ag_sar,
+    multi_ag_sar,
+    tokenizer,
+    config: EvalConfig,
+    num_samples: int = 100,
+    save_results: bool = True
+) -> Dict:
+    """
+    Benchmark multi-GPU scaling efficiency.
+
+    Tests how well throughput scales from 1 GPU to N GPUs.
+    Target: >80% scaling efficiency for 2 GPUs.
+
+    Args:
+        single_ag_sar: Single-GPU AGSAR instance
+        multi_ag_sar: MultiGPUAGSAR instance
+        tokenizer: Tokenizer for token counting
+        config: Evaluation configuration
+        num_samples: Number of samples for benchmarking
+        save_results: Whether to save results
+
+    Returns:
+        Dict with scaling results
+    """
+    print("=" * 60)
+    print("Experiment 6b: Multi-GPU Scaling Benchmark")
+    print("=" * 60)
+    print(f"Number of GPUs: {multi_ag_sar.num_gpus}")
+
+    # Generate test samples
+    prompts = [f"Question {i}: What is the capital of country number " for i in range(num_samples)]
+    responses = ["The capital is a beautiful city with rich history and culture." for _ in range(num_samples)]
+
+    # Initialize benchmark
+    benchmark = MultiGPUBenchmark(
+        tokenizer=tokenizer,
+        warmup_samples=config.warmup_runs
+    )
+
+    # Run scaling test
+    print("\nRunning scaling benchmark...")
+    scaling_results = benchmark.run_scaling_test(
+        single_ag_sar=single_ag_sar,
+        multi_ag_sar=multi_ag_sar,
+        prompts=prompts,
+        responses=responses
+    )
+
+    # Format results
+    results = {
+        'experiment': 'multi_gpu_scaling',
+        'num_samples': num_samples,
+        'num_gpus': scaling_results['num_gpus'],
+        'single_gpu': {
+            'tokens_per_second': scaling_results['single_gpu'].tokens_per_second,
+            'samples_per_second': scaling_results['single_gpu'].samples_per_second,
+            'total_time_seconds': scaling_results['single_gpu'].total_time_seconds,
+        },
+        'multi_gpu': {
+            'tokens_per_second': scaling_results['multi_gpu'].tokens_per_second,
+            'samples_per_second': scaling_results['multi_gpu'].samples_per_second,
+            'total_time_seconds': scaling_results['multi_gpu'].total_time_seconds,
+        },
+        'ideal_speedup': scaling_results['ideal_speedup'],
+        'actual_speedup': scaling_results['actual_speedup'],
+        'scaling_efficiency': scaling_results['scaling_efficiency'],
+    }
+
+    # Print results
+    print("\n" + "=" * 60)
+    print("RESULTS:")
+    print("=" * 60)
+    print(f"{'Configuration':<25} {'TPS':>12} {'Samples/s':>12}")
+    print("-" * 60)
+    print(f"{'Single GPU':<25} {results['single_gpu']['tokens_per_second']:>12.1f} "
+          f"{results['single_gpu']['samples_per_second']:>12.2f}")
+    num_gpus = results['num_gpus']
+    multi_gpu_label = f'Multi-GPU ({num_gpus}x)'
+    print(f"{multi_gpu_label:<25} {results['multi_gpu']['tokens_per_second']:>12.1f} "
+          f"{results['multi_gpu']['samples_per_second']:>12.2f}")
+    print("-" * 60)
+    print(f"{'Ideal Speedup':<25} {results['ideal_speedup']:>12.1f}x")
+    print(f"{'Actual Speedup':<25} {results['actual_speedup']:>12.2f}x")
+    print(f"{'Scaling Efficiency':<25} {results['scaling_efficiency']:>12.1%}")
+
+    # Success criteria: >80% scaling efficiency
+    success = results['scaling_efficiency'] > 0.80
+    results['success'] = success
+    results['success_criteria'] = 'Scaling efficiency > 80%'
+
+    print(f"\n{'=' * 60}")
+    print(f"RESULT: {'PASS' if success else 'FAIL'}")
+    print(f"Scaling efficiency: {results['scaling_efficiency']:.1%} (threshold: 80%)")
+    print(f"{'=' * 60}")
+
+    # Save results
+    if save_results:
+        results_path = config.results_dir / 'exp6b_multi_gpu_scaling.json'
+        with open(results_path, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"\nResults saved to: {results_path}")
+
+    return results
+
+
 def plot_throughput_comparison(
     results: Dict,
     save_path: Optional[Path] = None
@@ -192,14 +300,14 @@ def plot_throughput_comparison(
 
 
 if __name__ == "__main__":
-    from transformers import GPT2LMHeadModel, GPT2Tokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer
     from ag_sar import AGSAR
     from eval.baselines import PredictiveEntropy, OriginalSAR
 
     # Load model
     print("Loading GPT-2...")
-    model = GPT2LMHeadModel.from_pretrained('gpt2')
-    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+    model = AutoModelForCausalLM.from_pretrained('gpt2')
+    tokenizer = AutoTokenizer.from_pretrained('gpt2')
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)

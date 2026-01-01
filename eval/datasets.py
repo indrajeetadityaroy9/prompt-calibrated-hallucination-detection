@@ -62,6 +62,172 @@ def load_truthfulqa(
     return samples
 
 
+def load_triviaqa(
+    split: str = "validation",
+    max_samples: Optional[int] = None
+) -> List[EvalSample]:
+    """
+    Load TriviaQA dataset for hallucination detection sanity check.
+
+    TriviaQA is a reading comprehension dataset with factual Q&A pairs.
+    Unlike TruthfulQA (designed to trick models), TriviaQA should yield
+    AUROC ~0.75+ since it measures genuine factual knowledge.
+
+    Args:
+        split: Dataset split to load ("train" or "validation")
+        max_samples: Maximum number of samples (None = all)
+
+    Returns:
+        List of EvalSample with prompt, response, and factuality label
+    """
+    from datasets import load_dataset
+
+    # Load TriviaQA RC (reading comprehension) task
+    dataset = load_dataset("trivia_qa", "rc", split=split)
+
+    samples = []
+    for i, item in enumerate(dataset):
+        if max_samples and i >= max_samples:
+            break
+
+        question = item['question']
+        # Get answer aliases (multiple correct spellings)
+        answer_dict = item.get('answer', {})
+        aliases = answer_dict.get('aliases', [])
+        normalized_aliases = answer_dict.get('normalized_aliases', [])
+        value = answer_dict.get('value', '')
+
+        # Use primary answer value, fall back to first alias
+        correct_answer = value if value else (aliases[0] if aliases else '')
+        if not correct_answer:
+            continue
+
+        # Add factual sample (correct answer)
+        samples.append(EvalSample(
+            prompt=f"Question: {question}\nAnswer:",
+            response=f" {correct_answer}",
+            label=True,
+            metadata={
+                'source': 'triviaqa',
+                'type': 'factual',
+                'aliases': aliases,
+                'normalized_aliases': normalized_aliases
+            }
+        ))
+
+        # Generate hallucination samples by using wrong answers from other questions
+        # We'll add these in a second pass to avoid data leakage within same item
+
+    # Second pass: create hallucination samples by shuffling answers
+    if len(samples) > 1:
+        import random
+        correct_answers = [s.response.strip() for s in samples]
+        num_correct = len(correct_answers)
+
+        for i, sample in enumerate(list(samples)):  # Iterate over copy
+            # Pick a random wrong answer from another question
+            offset = random.randint(1, num_correct - 1)
+            wrong_idx = (i + offset) % num_correct
+            wrong_answer = correct_answers[wrong_idx]
+
+            # Avoid accidental matches
+            if wrong_answer.lower() != sample.response.strip().lower():
+                samples.append(EvalSample(
+                    prompt=sample.prompt,
+                    response=f" {wrong_answer}",
+                    label=False,
+                    metadata={
+                        'source': 'triviaqa',
+                        'type': 'hallucination',
+                        'original_correct': sample.response.strip()
+                    }
+                ))
+
+    return samples
+
+
+def load_coqa(
+    split: str = "validation",
+    max_samples: Optional[int] = None
+) -> List[EvalSample]:
+    """
+    Load CoQA dataset for conversational QA hallucination detection.
+
+    CoQA tests conversational reasoning - the model must attend to context
+    (story) rather than just internal knowledge. This is a domain generalization
+    test beyond fact retrieval (TriviaQA).
+
+    Args:
+        split: Dataset split ("train" or "validation")
+        max_samples: Maximum number of samples (None = all)
+
+    Returns:
+        List of EvalSample with prompt, response, and factuality label
+    """
+    from datasets import load_dataset
+    import random
+
+    # Load CoQA dataset
+    dataset = load_dataset("coqa", split=split)
+
+    samples = []
+    all_answers = []  # Collect answers for hallucination generation
+
+    for i, item in enumerate(dataset):
+        if max_samples and i >= max_samples:
+            break
+
+        story = item['story']
+        questions = item['questions']
+        answers = item['answers']
+
+        # Use first Q&A pair for simplicity (full eval would use all)
+        if len(questions) > 0 and len(answers['input_text']) > 0:
+            question = questions[0]
+            answer = answers['input_text'][0]
+
+            # Truncate story if too long (keep first 500 chars for efficiency)
+            story_truncated = story[:500] + "..." if len(story) > 500 else story
+
+            prompt = f"Story: {story_truncated}\n\nQuestion: {question}\nAnswer:"
+
+            # Add factual sample
+            samples.append(EvalSample(
+                prompt=prompt,
+                response=f" {answer}",
+                label=True,
+                metadata={
+                    'source': 'coqa',
+                    'type': 'factual',
+                    'story_id': i
+                }
+            ))
+            all_answers.append(answer)
+
+    # Second pass: create hallucination samples
+    if len(samples) > 1 and len(all_answers) > 1:
+        for i, sample in enumerate(list(samples)):
+            # Pick a random wrong answer from another story
+            offset = random.randint(1, len(all_answers) - 1)
+            wrong_idx = (i + offset) % len(all_answers)
+            wrong_answer = all_answers[wrong_idx]
+
+            # Avoid accidental matches
+            if wrong_answer.lower() != sample.response.strip().lower():
+                samples.append(EvalSample(
+                    prompt=sample.prompt,
+                    response=f" {wrong_answer}",
+                    label=False,
+                    metadata={
+                        'source': 'coqa',
+                        'type': 'hallucination',
+                        'original_correct': sample.response.strip()
+                    }
+                ))
+
+    return samples
+
+
 def load_wikitext(
     name: str = "wikitext-103-v1",
     split: str = "test",

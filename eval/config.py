@@ -48,6 +48,14 @@ class EvalConfig:
     rouge_threshold: float = 0.3  # ROUGE-L threshold for factual label
     ece_num_bins: int = 10
 
+    # NLI-based ground truth labeling (NeurIPS-grade)
+    use_nli_labeling: bool = False
+    nli_model_name: str = "cross-encoder/nli-deberta-v3-large"
+    nli_threshold: float = 0.5  # Entailment threshold for factuality
+
+    # Multi-seed for statistical significance
+    seeds: List[int] = field(default_factory=lambda: [42])
+
     # Ablation flags
     ablation_configs: List[str] = field(default_factory=lambda: [
         "full",

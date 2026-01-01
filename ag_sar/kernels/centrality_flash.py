@@ -10,7 +10,7 @@ Key Features:
 - O(N) memory complexity (vs O(N^2) for explicit attention)
 - Causal masking (j <= i) built-in
 - Float32 accumulators for numerical stability with bfloat16 inputs
-- Optimized for H100 with configurable block sizes
+- Autotuned for H100 (132 SMs, large register file)
 """
 
 import math
@@ -21,6 +21,68 @@ import triton
 import triton.language as tl
 
 
+def _get_autotune_configs():
+    """
+    Generate autotune configurations optimized for H100.
+
+    H100 specifications:
+    - 132 SMs (vs 108 on A100)
+    - Larger register file per SM
+    - Higher memory bandwidth (3.35 TB/s HBM3)
+
+    Block size considerations:
+    - Larger blocks = better memory coalescing, fewer kernel launches
+    - Smaller blocks = better occupancy for short sequences
+    - num_warps: 4-8 warps typically optimal for compute-bound kernels
+    - num_stages: 2-4 for pipelining memory loads
+    """
+    return [
+        # Small sequences (S < 256): prioritize occupancy
+        triton.Config(
+            {'BLOCK_M': 32, 'BLOCK_N': 32},
+            num_warps=4,
+            num_stages=3,
+        ),
+        # Medium sequences: balanced
+        triton.Config(
+            {'BLOCK_M': 64, 'BLOCK_N': 64},
+            num_warps=4,
+            num_stages=3,
+        ),
+        triton.Config(
+            {'BLOCK_M': 64, 'BLOCK_N': 64},
+            num_warps=8,
+            num_stages=2,
+        ),
+        # Large sequences: maximize throughput with larger blocks
+        triton.Config(
+            {'BLOCK_M': 128, 'BLOCK_N': 64},
+            num_warps=8,
+            num_stages=3,
+        ),
+        triton.Config(
+            {'BLOCK_M': 64, 'BLOCK_N': 128},
+            num_warps=8,
+            num_stages=3,
+        ),
+        triton.Config(
+            {'BLOCK_M': 128, 'BLOCK_N': 128},
+            num_warps=8,
+            num_stages=2,
+        ),
+        # Very large sequences: maximum block sizes for H100
+        triton.Config(
+            {'BLOCK_M': 128, 'BLOCK_N': 128},
+            num_warps=16,
+            num_stages=2,
+        ),
+    ]
+
+
+@triton.autotune(
+    configs=_get_autotune_configs(),
+    key=['S', 'D'],  # Autotune based on sequence length and head dim
+)
 @triton.jit
 def _centrality_flash_kernel(
     # Pointers to matrices
@@ -160,6 +222,7 @@ def centrality_flash_fwd(
         - Uses Flash Attention-style online softmax for O(N) memory
         - Accumulators use float32 for numerical stability
         - Causal masking is built-in (j <= i)
+        - Autotuned for H100 with multiple block size configurations
     """
     # Validate inputs
     B, H, S, D = Q.shape
@@ -172,16 +235,15 @@ def centrality_flash_fwd(
     # Allocate output
     out = torch.empty((B, H, S), device=Q.device, dtype=Q.dtype)
 
-    # Block sizes (tuned for H100)
-    # BLOCK_M: queries per program, BLOCK_N: keys per iteration, BLOCK_D: head dim
-    BLOCK_M = 64
-    BLOCK_N = 64
+    # BLOCK_D must be power of 2 for efficient memory access
     BLOCK_D = triton.next_power_of_2(D)
 
-    # Grid: (batch, heads, query_blocks)
-    grid = (B, H, triton.cdiv(S, BLOCK_M))
+    # Grid function for autotuned kernel
+    # The grid depends on BLOCK_M which is determined by autotune
+    def grid(meta):
+        return (B, H, triton.cdiv(S, meta['BLOCK_M']))
 
-    # Launch kernel
+    # Launch autotuned kernel
     _centrality_flash_kernel[grid](
         Q, K, v, out,
         # Q strides
@@ -192,10 +254,10 @@ def centrality_flash_fwd(
         v.stride(0), v.stride(1) if v.dim() > 1 else 1,
         # Out strides
         out.stride(0), out.stride(1), out.stride(2),
-        # Dimensions
+        # Dimensions (used as autotune keys)
         S=S, D=D,
-        # Block sizes
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_D=BLOCK_D,
+        # Block size for head dimension
+        BLOCK_D=BLOCK_D,
     )
 
     return out

@@ -4,16 +4,50 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
+# Global flag to track if TF32 has been enforced
+_TF32_ENFORCED = False
+
 
 def enable_tf32() -> None:
     """
     Enable TF32 for matmul operations on H100/A100 Tensor Cores.
 
-    TF32 provides significant speedup with minimal precision loss
+    TF32 provides significant speedup (~3x) with minimal precision loss
     for matrix multiplications. Recommended for H100 GPUs.
+
+    This function enforces TF32 at multiple levels:
+    1. CUDA matmul backend
+    2. cuDNN backend
+    3. PyTorch 2.0+ float32 matmul precision
     """
+    global _TF32_ENFORCED
+
+    if _TF32_ENFORCED:
+        return
+
+    # Enable TF32 for CUDA matmul operations
     torch.backends.cuda.matmul.allow_tf32 = True
+
+    # Enable TF32 for cuDNN operations
     torch.backends.cudnn.allow_tf32 = True
+
+    # PyTorch 2.0+: Set float32 matmul precision to 'high' (uses TF32)
+    # Options: 'highest' (FP32), 'high' (TF32), 'medium' (BF16)
+    if hasattr(torch, 'set_float32_matmul_precision'):
+        torch.set_float32_matmul_precision('high')
+
+    # Enable cudnn benchmark for optimal algorithm selection
+    torch.backends.cudnn.benchmark = True
+
+    _TF32_ENFORCED = True
+
+
+def is_tf32_enabled() -> bool:
+    """Check if TF32 is currently enabled."""
+    return (
+        torch.backends.cuda.matmul.allow_tf32 and
+        torch.backends.cudnn.allow_tf32
+    )
 
 
 def get_model_dtype(model: nn.Module) -> torch.dtype:

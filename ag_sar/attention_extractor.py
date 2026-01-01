@@ -1,8 +1,18 @@
 """
-Attention extraction for GPT-2 models.
+Attention extraction for GPT-2 and Llama-3 models.
 
-CRITICAL: GPT-2 uses a fused QKV layer (c_attn) unlike Llama which has
-separate q_proj, k_proj, v_proj. We must hook c_attn and split the output.
+Supports:
+1. GPT-2: Fused QKV layer (c_attn), no RoPE
+2. Llama-3: Separate q_proj, k_proj, v_proj with RoPE and GQA
+
+CRITICAL (Llama-3 RoPE):
+    In Llama-3, q_proj and k_proj output UN-ROTATED vectors. RoPE is applied
+    AFTER projection but BEFORE attention. We MUST capture post-RoPE vectors
+    by monkey-patching LlamaAttention.forward, NOT by hooking q_proj/k_proj.
+
+CRITICAL (Llama-3 GQA):
+    Llama-3-8B uses Grouped Query Attention: 32 Q-heads but only 8 KV-heads.
+    We expand K from (B, 8, S, D) -> (B, 32, S, D) via repeat_interleave.
 
 SDPA/Flash Attention Compatibility:
     Flash Attention doesn't materialize the NxN attention matrix, so we can't
@@ -15,7 +25,8 @@ SDPA/Flash Attention Compatibility:
     post-processing cost only for the layers we analyze.
 """
 
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Callable
+import types
 import math
 import torch
 import torch.nn as nn
@@ -24,18 +35,27 @@ import torch.nn.functional as F
 
 class AttentionExtractor:
     """
-    Hook-based attention weight and value norm extraction for GPT-2.
+    Hook-based attention weight and value norm extraction for GPT-2 and Llama-3.
+
+    Supports:
+        - GPT-2: Hooks c_attn (fused QKV), no RoPE needed
+        - Llama-3: Monkey-patches LlamaAttention.forward to capture POST-RoPE Q/K
 
     GPT-2 Architecture Note:
         GPT-2 uses a single c_attn (Conv1D) layer that outputs 3 * hidden_dim.
         This is split into Q, K, V internally. We hook c_attn to extract V norms.
 
+    Llama-3 Architecture Note:
+        Llama-3 uses separate q_proj, k_proj, v_proj followed by RoPE.
+        We MUST capture Q/K AFTER RoPE application (inside patched forward).
+        Llama-3-8B uses GQA: 32 Q-heads, 8 KV-heads (4 Q per KV group).
+
     Example:
-        >>> from transformers import GPT2LMHeadModel
-        >>> model = GPT2LMHeadModel.from_pretrained('gpt2')
+        >>> from transformers import AutoModelForCausalLM
+        >>> model = AutoModelForCausalLM.from_pretrained('gpt2')
         >>> extractor = AttentionExtractor(model)
         >>> extractor.register_hooks()
-        >>> attn_weights, value_norms, output = extractor.extract(input_ids)
+        >>> Q, K, value_norms, output = extractor.extract_semantic_qk(input_ids)
         >>> extractor.remove_hooks()
     """
 
@@ -43,33 +63,56 @@ class AttentionExtractor:
         self,
         model: nn.Module,
         layers: Optional[List[int]] = None,
-        dtype: Optional[torch.dtype] = None
+        dtype: Optional[torch.dtype] = None,
+        architecture: str = "auto"
     ):
         """
-        Initialize attention extractor for GPT-2.
+        Initialize attention extractor.
 
         Args:
-            model: GPT-2 model (GPT2Model or GPT2LMHeadModel)
+            model: Language model (GPT-2, Llama-3, etc.)
             layers: Layer indices to extract from (default: all layers)
             dtype: Tensor dtype (default: model's dtype)
+            architecture: "auto", "gpt2", or "llama"
         """
         self.model = model
         self.dtype = dtype or next(model.parameters()).dtype
         self.device = next(model.parameters()).device
 
-        # Detect model structure (GPT2LMHeadModel vs GPT2Model)
-        if hasattr(model, 'transformer'):
-            self.transformer = model.transformer
+        # Detect architecture
+        self.architecture = self._detect_architecture(model, architecture)
+
+        # Get model backbone and config based on architecture
+        if self.architecture == "gpt2":
+            if hasattr(model, 'transformer'):
+                self.transformer = model.transformer
+            else:
+                self.transformer = model
+            self.num_layers = len(self.transformer.h)
+            self.num_heads = self.transformer.config.n_head
+            self.hidden_size = self.transformer.config.n_embd
+            self.head_dim = self.hidden_size // self.num_heads
+            # GPT-2 has no GQA
+            self.num_kv_heads = self.num_heads
+            self.heads_per_group = 1
+        elif self.architecture == "llama":
+            if hasattr(model, 'model'):
+                self.transformer = model.model
+            else:
+                self.transformer = model
+            self.num_layers = len(self.transformer.layers)
+            self.num_heads = self.transformer.config.num_attention_heads
+            self.hidden_size = self.transformer.config.hidden_size
+            self.head_dim = self.hidden_size // self.num_heads
+            # Llama-3 GQA: fewer KV heads than Q heads
+            self.num_kv_heads = getattr(
+                self.transformer.config, 'num_key_value_heads', self.num_heads
+            )
+            self.heads_per_group = self.num_heads // self.num_kv_heads
         else:
-            self.transformer = model
+            raise ValueError(f"Unknown architecture: {self.architecture}")
 
-        self.num_layers = len(self.transformer.h)
         self.layers = layers if layers is not None else list(range(self.num_layers))
-
-        # Get model config
-        self.num_heads = self.transformer.config.n_head
-        self.hidden_size = self.transformer.config.n_embd
-        self.head_dim = self.hidden_size // self.num_heads
 
         # Storage for extracted data (cleared after each forward)
         self._attention_weights: Dict[int, torch.Tensor] = {}
@@ -77,7 +120,57 @@ class AttentionExtractor:
         # Q/K storage for post-hoc attention reconstruction (SDPA compatibility)
         self._query_states: Dict[int, torch.Tensor] = {}
         self._key_states: Dict[int, torch.Tensor] = {}
+        # Pre-RoPE Q/K for Llama/Qwen/Mistral (RoPE applied post-hoc)
+        self._query_states_pre_rope: Dict[int, torch.Tensor] = {}
+        self._key_states_pre_rope: Dict[int, torch.Tensor] = {}
         self._hooks: List[torch.utils.hooks.RemovableHandle] = []
+
+        # Llama-specific: store original forward methods for cleanup (legacy)
+        self._original_forwards: Dict[int, Callable] = {}
+        self._llama_patched: bool = False
+
+    def _detect_architecture(self, model: nn.Module, hint: str = "auto") -> str:
+        """
+        Detect model architecture from structure.
+
+        Supports:
+            - GPT-2: transformer.h[i].attn.c_attn (fused QKV, no RoPE)
+            - Llama/Qwen/Mistral: model.layers[i].self_attn.q_proj (RoPE + GQA)
+
+        Args:
+            model: The language model
+            hint: "auto", "gpt2", or "llama"
+
+        Returns:
+            "gpt2" or "llama" (llama also covers Qwen, Mistral, and similar)
+        """
+        if hint != "auto":
+            return hint
+
+        # Check for GPT-2 structure
+        if hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
+            # Verify it's GPT-2 style (has c_attn)
+            if hasattr(model.transformer.h[0].attn, 'c_attn'):
+                return "gpt2"
+
+        # Check for Llama/Qwen/Mistral structure (all use model.layers + q_proj)
+        if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+            # Verify it's Llama-style (has q_proj in self_attn)
+            if hasattr(model.model.layers[0].self_attn, 'q_proj'):
+                return "llama"
+
+        # Fallback: check model_type from config
+        model_type = getattr(model.config, 'model_type', '').lower()
+        if 'gpt2' in model_type:
+            return "gpt2"
+        # Llama, Qwen, Qwen2, Mistral all use "llama" architecture
+        if any(arch in model_type for arch in ['llama', 'qwen', 'mistral']):
+            return "llama"
+
+        raise ValueError(
+            f"Could not detect model architecture for model_type='{model_type}'. "
+            f"Set architecture='gpt2' or architecture='llama' explicitly."
+        )
 
     def _make_c_attn_hook(self, layer_idx: int):
         """
@@ -137,30 +230,307 @@ class AttentionExtractor:
 
         return hook_fn
 
+    def _patch_qwen2_attention(self, layer_idx: int) -> None:
+        """
+        Copy-paste patch for Qwen2Attention.forward with POST-RoPE capture.
+
+        This copies the exact model code and inserts capture lines after RoPE.
+        No math re-computation - we just grab the already-computed variables.
+        """
+        import warnings
+        from transformers.models.qwen2.modeling_qwen2 import (
+            apply_rotary_pos_emb,
+            repeat_kv,
+        )
+
+        layer = self.transformer.layers[layer_idx]
+        attn = layer.self_attn
+        original_forward = attn.forward
+        self._original_forwards[layer_idx] = original_forward
+        extractor = self
+
+        # Copy-paste of Qwen2Attention.forward with capture inserted
+        def patched_forward(
+            hidden_states: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.Tensor] = None,
+            past_key_value: Optional[Any] = None,
+            output_attentions: bool = False,
+            use_cache: bool = False,
+            **kwargs,
+        ):
+            if "padding_mask" in kwargs:
+                warnings.warn(
+                    "Passing `padding_mask` is deprecated. Please use `attention_mask` instead."
+                )
+            bsz, q_len, _ = hidden_states.size()
+
+            query_states = attn.q_proj(hidden_states)
+            key_states = attn.k_proj(hidden_states)
+            value_states = attn.v_proj(hidden_states)
+
+            query_states = query_states.view(bsz, q_len, attn.num_heads, attn.head_dim).transpose(1, 2)
+            key_states = key_states.view(bsz, q_len, attn.num_key_value_heads, attn.head_dim).transpose(1, 2)
+            value_states = value_states.view(bsz, q_len, attn.num_key_value_heads, attn.head_dim).transpose(1, 2)
+
+            kv_seq_len = key_states.shape[-2]
+            if past_key_value is not None:
+                if attn.layer_idx is None:
+                    raise ValueError("Cache requires layer index")
+                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, attn.layer_idx)
+
+            # RoPE application - using Qwen2's exact signature
+            cos, sin = attn.rotary_emb(value_states, seq_len=kv_seq_len)
+            query_states, key_states = apply_rotary_pos_emb(
+                query_states, key_states, cos, sin, position_ids
+            )
+
+            # ★★★ CAPTURE POST-ROPE Q/K HERE ★★★
+            extractor._query_states[layer_idx] = query_states.detach().to(extractor.dtype)
+            extractor._key_states[layer_idx] = key_states.detach().to(extractor.dtype)
+            # Compute V norms
+            v_norms = torch.norm(value_states, dim=-1, p=2)
+            extractor._value_norms[layer_idx] = v_norms.detach().to(extractor.dtype)
+            # ★★★ END CAPTURE ★★★
+
+            if past_key_value is not None:
+                cache_kwargs = {"sin": sin, "cos": cos}
+                key_states, value_states = past_key_value.update(
+                    key_states, value_states, attn.layer_idx, cache_kwargs
+                )
+
+            # Repeat K/V for GQA
+            key_states = repeat_kv(key_states, attn.num_key_value_groups)
+            value_states = repeat_kv(value_states, attn.num_key_value_groups)
+
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(attn.head_dim)
+
+            if attention_mask is not None:
+                attn_weights = attn_weights + attention_mask
+
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = F.dropout(attn_weights, p=attn.attention_dropout, training=attn.training)
+            attn_output = torch.matmul(attn_weights, value_states)
+
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.reshape(bsz, q_len, attn.hidden_size)
+            attn_output = attn.o_proj(attn_output)
+
+            if not output_attentions:
+                attn_weights = None
+
+            return attn_output, attn_weights, past_key_value
+
+        attn.forward = patched_forward
+        self._llama_patched = True
+
+    def _patch_mistral_attention(self, layer_idx: int) -> None:
+        """
+        Copy-paste patch for MistralAttention.forward with POST-RoPE capture.
+
+        Mistral architecture is nearly identical to Llama regarding RoPE.
+        The main difference is the sliding window attention, but we don't
+        need to modify that - we just capture Q/K after RoPE.
+        """
+        import warnings
+        from transformers.models.mistral.modeling_mistral import (
+            apply_rotary_pos_emb,
+            repeat_kv,
+        )
+
+        layer = self.transformer.layers[layer_idx]
+        attn = layer.self_attn
+        original_forward = attn.forward
+        self._original_forwards[layer_idx] = original_forward
+        extractor = self
+
+        # Full copy-paste of MistralAttention.forward with capture inserted
+        def patched_forward(
+            hidden_states: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.Tensor] = None,
+            past_key_value: Optional[Any] = None,
+            output_attentions: bool = False,
+            use_cache: bool = False,
+            **kwargs,
+        ):
+            if "padding_mask" in kwargs:
+                warnings.warn(
+                    "Passing `padding_mask` is deprecated. Please use `attention_mask` instead."
+                )
+            bsz, q_len, _ = hidden_states.size()
+
+            query_states = attn.q_proj(hidden_states)
+            key_states = attn.k_proj(hidden_states)
+            value_states = attn.v_proj(hidden_states)
+
+            query_states = query_states.view(bsz, q_len, attn.num_heads, attn.head_dim).transpose(1, 2)
+            key_states = key_states.view(bsz, q_len, attn.num_key_value_heads, attn.head_dim).transpose(1, 2)
+            value_states = value_states.view(bsz, q_len, attn.num_key_value_heads, attn.head_dim).transpose(1, 2)
+
+            # Mistral RoPE - uses seq_len keyword
+            kv_seq_len = key_states.shape[-2]
+            if past_key_value is not None:
+                if attn.layer_idx is None:
+                    raise ValueError("Cache requires layer index")
+                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, attn.layer_idx)
+            cos, sin = attn.rotary_emb(value_states, seq_len=kv_seq_len)
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+
+            # ★★★ CAPTURE POST-ROPE Q/K HERE ★★★
+            extractor._query_states[layer_idx] = query_states.detach().to(extractor.dtype)
+            extractor._key_states[layer_idx] = key_states.detach().to(extractor.dtype)
+            v_norms = torch.norm(value_states, dim=-1, p=2)
+            extractor._value_norms[layer_idx] = v_norms.detach().to(extractor.dtype)
+            # ★★★ END CAPTURE ★★★
+
+            if past_key_value is not None:
+                cache_kwargs = {"sin": sin, "cos": cos}
+                key_states, value_states = past_key_value.update(
+                    key_states, value_states, attn.layer_idx, cache_kwargs
+                )
+
+            # Repeat K/V for GQA
+            key_states = repeat_kv(key_states, attn.num_key_value_groups)
+            value_states = repeat_kv(value_states, attn.num_key_value_groups)
+
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(attn.head_dim)
+
+            if attention_mask is not None:
+                attn_weights = attn_weights + attention_mask
+
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = F.dropout(attn_weights, p=attn.attention_dropout, training=attn.training)
+            attn_output = torch.matmul(attn_weights, value_states)
+
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.reshape(bsz, q_len, attn.hidden_size)
+            attn_output = attn.o_proj(attn_output)
+
+            if not output_attentions:
+                attn_weights = None
+
+            return attn_output, attn_weights, past_key_value
+
+        attn.forward = patched_forward
+        self._llama_patched = True
+
+    def _patch_llama_attention(self, layer_idx: int) -> None:
+        """
+        Copy-paste patch for LlamaAttention.forward with POST-RoPE capture.
+        """
+        from transformers.models.llama.modeling_llama import (
+            apply_rotary_pos_emb,
+            repeat_kv,
+        )
+
+        layer = self.transformer.layers[layer_idx]
+        attn = layer.self_attn
+        original_forward = attn.forward
+        self._original_forwards[layer_idx] = original_forward
+        extractor = self
+
+        def patched_forward(
+            hidden_states: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.Tensor] = None,
+            past_key_value: Optional[Any] = None,
+            output_attentions: bool = False,
+            use_cache: bool = False,
+            cache_position: Optional[torch.Tensor] = None,
+            **kwargs,
+        ):
+            bsz, q_len, _ = hidden_states.size()
+
+            query_states = attn.q_proj(hidden_states)
+            key_states = attn.k_proj(hidden_states)
+            value_states = attn.v_proj(hidden_states)
+
+            query_states = query_states.view(bsz, q_len, attn.num_heads, attn.head_dim).transpose(1, 2)
+            key_states = key_states.view(bsz, q_len, attn.num_key_value_heads, attn.head_dim).transpose(1, 2)
+            value_states = value_states.view(bsz, q_len, attn.num_key_value_heads, attn.head_dim).transpose(1, 2)
+
+            cos, sin = attn.rotary_emb(value_states, position_ids)
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+            # ★★★ CAPTURE POST-ROPE Q/K HERE ★★★
+            extractor._query_states[layer_idx] = query_states.detach().to(extractor.dtype)
+            extractor._key_states[layer_idx] = key_states.detach().to(extractor.dtype)
+            v_norms = torch.norm(value_states, dim=-1, p=2)
+            extractor._value_norms[layer_idx] = v_norms.detach().to(extractor.dtype)
+            # ★★★ END CAPTURE ★★★
+
+            # Call original for the rest of the computation
+            return original_forward(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                **kwargs
+            )
+
+        attn.forward = patched_forward
+        self._llama_patched = True
+
+    def _restore_llama_attention(self) -> None:
+        """
+        Restore original LlamaAttention.forward methods.
+
+        Call this in cleanup() to avoid side effects after extraction.
+        """
+        for layer_idx, original_forward in self._original_forwards.items():
+            layer = self.transformer.layers[layer_idx]
+            # Restore original bound method
+            layer.self_attn.forward = original_forward
+
+        self._original_forwards.clear()
+        self._llama_patched = False
+
     def register_hooks(self) -> None:
         """Register forward hooks on attention layers."""
         self.remove_hooks()
 
-        for layer_idx in self.layers:
-            block = self.transformer.h[layer_idx]
+        if self.architecture == "gpt2":
+            for layer_idx in self.layers:
+                block = self.transformer.h[layer_idx]
 
-            # Hook c_attn for value norms (fused QKV projection)
-            c_attn_handle = block.attn.c_attn.register_forward_hook(
-                self._make_c_attn_hook(layer_idx)
-            )
-            self._hooks.append(c_attn_handle)
+                # Hook c_attn for value norms (fused QKV projection)
+                c_attn_handle = block.attn.c_attn.register_forward_hook(
+                    self._make_c_attn_hook(layer_idx)
+                )
+                self._hooks.append(c_attn_handle)
 
-            # Hook attention module for attention weights
-            attn_handle = block.attn.register_forward_hook(
-                self._make_attn_hook(layer_idx)
-            )
-            self._hooks.append(attn_handle)
+                # Hook attention module for attention weights
+                attn_handle = block.attn.register_forward_hook(
+                    self._make_attn_hook(layer_idx)
+                )
+                self._hooks.append(attn_handle)
+
+        elif self.architecture == "llama":
+            # Detect specific model type for correct patching
+            model_type = getattr(self.model.config, 'model_type', '').lower()
+
+            for layer_idx in self.layers:
+                if 'qwen' in model_type:
+                    self._patch_qwen2_attention(layer_idx)
+                elif 'mistral' in model_type:
+                    self._patch_mistral_attention(layer_idx)
+                else:
+                    self._patch_llama_attention(layer_idx)
 
     def remove_hooks(self) -> None:
-        """Remove all registered hooks."""
+        """Remove all registered hooks and restore patched methods."""
+        # Remove GPT-2 style hooks
         for handle in self._hooks:
             handle.remove()
         self._hooks.clear()
+
+        # Restore Llama patched forward methods
+        if self._llama_patched:
+            self._restore_llama_attention()
 
     def clear_cache(self) -> None:
         """Clear stored attention weights, value norms, and Q/K states."""
@@ -168,6 +538,8 @@ class AttentionExtractor:
         self._value_norms.clear()
         self._query_states.clear()
         self._key_states.clear()
+        self._query_states_pre_rope.clear()
+        self._key_states_pre_rope.clear()
 
     def reconstruct_attention(
         self,
@@ -388,14 +760,36 @@ class AttentionExtractor:
                 return_dict=True
             )
 
+        # Post-RoPE Q/K are already captured by patched forward methods
+        # No post-hoc processing needed
+
         # Stack Q/K from all registered layers (NO attention reconstruction!)
         Q_list = []
         K_list = []
+        V_norms_expanded = {}
 
         for layer_idx in sorted(self.layers):
             if layer_idx in self._query_states:
-                Q_list.append(self._query_states[layer_idx])  # (B, H, S, D)
-                K_list.append(self._key_states[layer_idx])    # (B, H, S, D)
+                Q = self._query_states[layer_idx]  # (B, num_q_heads, S, D)
+                K = self._key_states[layer_idx]    # (B, num_kv_heads, S, D)
+
+                # Handle GQA expansion for Llama-3
+                # If num_kv_heads < num_heads, expand K to match Q
+                if self.heads_per_group > 1:
+                    # Expand K from (B, 8, S, D) -> (B, 32, S, D)
+                    # repeat_interleave(4, dim=1) duplicates each KV head 4 times
+                    K = K.repeat_interleave(self.heads_per_group, dim=1)
+
+                    # Also expand V norms for consistency
+                    if layer_idx in self._value_norms:
+                        v_norms = self._value_norms[layer_idx]  # (B, num_kv_heads, S)
+                        v_norms_expanded = v_norms.repeat_interleave(
+                            self.heads_per_group, dim=1
+                        )  # (B, num_q_heads, S)
+                        V_norms_expanded[layer_idx] = v_norms_expanded
+
+                Q_list.append(Q)
+                K_list.append(K)
 
         if not Q_list:
             raise RuntimeError(
@@ -407,7 +801,10 @@ class AttentionExtractor:
         Q_stack = torch.cat(Q_list, dim=1)
         K_stack = torch.cat(K_list, dim=1)
 
-        return Q_stack, K_stack, dict(self._value_norms), output
+        # Use expanded V norms if GQA, otherwise original
+        value_norms_out = V_norms_expanded if V_norms_expanded else dict(self._value_norms)
+
+        return Q_stack, K_stack, value_norms_out, output
 
     @property
     def extracted_layers(self) -> List[int]:

@@ -18,7 +18,7 @@ import torch
 from tqdm import tqdm
 
 from ..config import EvalConfig
-from ..datasets import load_truthfulqa
+from ..datasets import load_truthfulqa, load_triviaqa, load_coqa
 from ..metrics.calibration import (
     compute_ece,
     compute_mce,
@@ -34,7 +34,8 @@ def run_calibration_experiment(
     pe_baseline,
     config: EvalConfig,
     num_samples: int = 300,
-    save_results: bool = True
+    save_results: bool = True,
+    dataset: str = 'truthfulqa'
 ) -> Dict:
     """
     Run calibration error benchmark.
@@ -46,22 +47,30 @@ def run_calibration_experiment(
         ag_sar: AGSAR instance
         pe_baseline: Predictive Entropy baseline
         config: Evaluation configuration
-        num_samples: Number of TruthfulQA samples
+        num_samples: Number of samples
         save_results: Whether to save results
+        dataset: Dataset to use ('truthfulqa' or 'triviaqa')
 
     Returns:
         Dict with calibration results
     """
     print("=" * 60)
     print("Experiment 4: Calibration Error (ECE)")
+    print(f"Dataset: {dataset}")
     print("=" * 60)
 
-    # Load TruthfulQA
-    print(f"\nLoading TruthfulQA ({num_samples} samples)...")
-    samples = load_truthfulqa(max_samples=num_samples)
+    # Load dataset
+    print(f"\nLoading {dataset} ({num_samples} samples)...")
+    if dataset == 'triviaqa':
+        samples = load_triviaqa(max_samples=num_samples)
+    elif dataset == 'coqa':
+        samples = load_coqa(max_samples=num_samples)
+    else:
+        samples = load_truthfulqa(max_samples=num_samples)
 
     results = {
         'experiment': 'calibration_ece',
+        'dataset': dataset,
         'num_samples': len(samples),
         'num_bins': config.ece_num_bins,
         'rouge_threshold': config.rouge_threshold,

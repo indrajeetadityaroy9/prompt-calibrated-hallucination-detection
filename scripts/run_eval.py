@@ -37,30 +37,100 @@ def setup_device():
 
 
 def load_model_and_tokenizer(model_name: str = 'gpt2', device=None):
-    """Load the base language model."""
-    from transformers import GPT2LMHeadModel, GPT2Tokenizer
+    """Load the base language model.
 
-    print(f"\nLoading {model_name}...")
-    model = GPT2LMHeadModel.from_pretrained(model_name)
-    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+    Supports:
+        - 'gpt2': GPT-2 base model
+        - 'llama3': Meta-Llama-3-8B-Instruct (requires HF token)
+        - Any HuggingFace model ID
+    """
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    import os
 
-    if device:
-        model = model.to(device)
+    # Map shorthand names to full model IDs
+    # NOTE: Use BASE models for uncertainty estimation, NOT Instruct versions
+    # Instruct models are RLHF-tuned to be overconfident, destroying calibration
+    model_map = {
+        'gpt2': 'gpt2',
+        # Llama-3 family (use BASE models for uncertainty - Instruct is RLHF-overconfident)
+        'llama3': 'meta-llama/Meta-Llama-3-8B',  # Base model
+        'llama3-8b': 'meta-llama/Meta-Llama-3-8B',
+        'llama3-instruct': 'meta-llama/Meta-Llama-3-8B-Instruct',
+        'llama3.1': 'meta-llama/Llama-3.1-8B',
+        'llama3.1-8b': 'meta-llama/Llama-3.1-8B',
+        'llama3.2': 'meta-llama/Llama-3.2-3B',
+        'llama3.2-3b': 'meta-llama/Llama-3.2-3B',
+        # Non-gated alternatives
+        'qwen2.5': 'Qwen/Qwen2.5-7B',
+        'qwen2.5-7b': 'Qwen/Qwen2.5-7B',
+        'qwen': 'Qwen/Qwen2.5-7B',
+        'mistral': 'mistralai/Mistral-7B-v0.3',
+        'mistral-7b': 'mistralai/Mistral-7B-v0.3',
+    }
+    model_id = model_map.get(model_name, model_name)
 
-    # Use bfloat16 if available for faster inference
-    if device and device.type == 'cuda' and torch.cuda.is_bf16_supported():
-        model = model.to(torch.bfloat16)
-        print("Using bfloat16 precision")
+    print(f"\nLoading {model_id}...")
 
+    # Check for HF token for gated models
+    hf_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN')
+    token_kwargs = {'token': hf_token} if hf_token else {}
+
+    # Detect architecture type for RoPE-based models
+    is_rope_model = any(arch in model_id.lower() for arch in ['llama', 'qwen', 'mistral'])
+
+    # Load model with appropriate settings
+    if is_rope_model:
+        # RoPE-based models (Llama, Qwen, Mistral) - use Flash Attention
+        arch_name = 'Llama' if 'llama' in model_id.lower() else \
+                    'Qwen' if 'qwen' in model_id.lower() else 'Mistral'
+        print(f"  Detected {arch_name} architecture (RoPE + GQA)")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32,
+            device_map='auto' if device is None else None,
+            attn_implementation='sdpa',  # Use SDPA for Flash Attention
+            trust_remote_code=True,  # Required for Qwen
+            **token_kwargs
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            trust_remote_code=True,  # Required for Qwen
+            **token_kwargs
+        )
+
+        # RoPE models need pad token
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        if device and not hasattr(model, 'hf_device_map'):
+            model = model.to(device)
+
+        print("  Using bfloat16 precision")
+    else:
+        # GPT-2 and other models
+        model = AutoModelForCausalLM.from_pretrained(model_id, **token_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(model_id, **token_kwargs)
+
+        if device:
+            model = model.to(device)
+
+        # Use bfloat16 if available for faster inference
+        if device and device.type == 'cuda' and torch.cuda.is_bf16_supported():
+            model = model.to(torch.bfloat16)
+            print("  Using bfloat16 precision")
+
+    model.eval()
     return model, tokenizer
 
 
-def initialize_ag_sar(model, tokenizer):
+def initialize_ag_sar(model, tokenizer, use_torch_compile: bool = True):
     """Initialize AG-SAR."""
     from ag_sar import AGSAR
+    from ag_sar.config import AGSARConfig
 
     print("Initializing AG-SAR...")
-    ag_sar = AGSAR(model, tokenizer)
+    config = AGSARConfig(use_torch_compile=use_torch_compile)
+    ag_sar = AGSAR(model, tokenizer, config=config)
     return ag_sar
 
 
@@ -139,7 +209,7 @@ def run_chapter_1(ag_sar, config, quick=False):
     return results
 
 
-def run_chapter_2(ag_sar, original_sar, pe_baseline, config, quick=False):
+def run_chapter_2(ag_sar, original_sar, pe_baseline, config, quick=False, dataset='truthfulqa'):
     """Run Chapter 2: Hallucination Detection experiments."""
     from eval.experiments.exp3_auroc import run_auroc_experiment, plot_auroc_comparison, plot_auroc_bar_chart
     from eval.experiments.exp4_calibration import run_calibration_experiment, plot_calibration_comparison
@@ -148,13 +218,14 @@ def run_chapter_2(ag_sar, original_sar, pe_baseline, config, quick=False):
 
     print("\n" + "=" * 70)
     print("CHAPTER 2: HALLUCINATION DETECTION")
+    print(f"Dataset: {dataset}")
     print("=" * 70)
 
     # Experiment 3: AUROC Benchmark
     print("\n--- Experiment 3: AUROC Benchmark ---")
     num_samples = 50 if quick else 200
     auroc_results = run_auroc_experiment(
-        ag_sar, original_sar, pe_baseline, config, num_samples=num_samples
+        ag_sar, original_sar, pe_baseline, config, num_samples=num_samples, dataset=dataset
     )
     results['exp3_auroc'] = auroc_results
     plot_auroc_comparison(auroc_results, config.results_dir / 'exp3_roc_curves.png')
@@ -164,7 +235,7 @@ def run_chapter_2(ag_sar, original_sar, pe_baseline, config, quick=False):
     print("\n--- Experiment 4: Calibration Error ---")
     num_samples = 80 if quick else 300
     calibration_results = run_calibration_experiment(
-        ag_sar, pe_baseline, config, num_samples=num_samples
+        ag_sar, pe_baseline, config, num_samples=num_samples, dataset=dataset
     )
     results['exp4_calibration'] = calibration_results
     plot_calibration_comparison(calibration_results, config.results_dir / 'exp4_reliability.png')
@@ -193,6 +264,29 @@ def run_chapter_5(ag_sar, config, quick=False):
     return results
 
 
+def run_chapter_4(ag_sar, config, quick=False):
+    """Run Chapter 4: Head Specialization Analysis."""
+    from eval.experiments.exp8_head_specialization import (
+        run_head_specialization_experiment,
+        plot_head_specialization_heatmap
+    )
+
+    results = {}
+
+    print("\n" + "=" * 70)
+    print("CHAPTER 4: HEAD SPECIALIZATION ANALYSIS")
+    print("=" * 70)
+
+    # Experiment 8: Head Specialization
+    print("\n--- Experiment 8: Head Specialization ---")
+    num_samples = 30 if quick else 100
+    head_results = run_head_specialization_experiment(ag_sar, config, num_samples=num_samples)
+    results['exp8_head_specialization'] = head_results
+    plot_head_specialization_heatmap(head_results, config.results_dir / 'exp8_head_heatmap.png')
+
+    return results
+
+
 def print_final_summary(all_results: dict):
     """Print final summary of all experiments."""
     from eval.visualizations.plots import create_results_table
@@ -209,8 +303,8 @@ def main():
     parser = argparse.ArgumentParser(description='AG-SAR Evaluation Runner')
     parser.add_argument(
         '--chapter', nargs='+', type=int,
-        choices=[1, 2, 3, 5],
-        help='Chapters to run (1=Mechanistic, 2=Predictive, 3=Profiling, 5=Ablation)'
+        choices=[1, 2, 3, 4, 5],
+        help='Chapters to run (1=Mechanistic, 2=Predictive, 3=Profiling, 4=Head Specialization, 5=Ablation)'
     )
     parser.add_argument(
         '--all', action='store_true',
@@ -228,12 +322,29 @@ def main():
         '--results-dir', type=str, default=None,
         help='Results directory (default: results/)'
     )
+    parser.add_argument(
+        '--seeds', nargs='+', type=int, default=[42],
+        help='Random seeds for statistical significance (default: [42], use 42 101 999 for 3-seed)'
+    )
+    parser.add_argument(
+        '--nli', action='store_true',
+        help='Use NLI-based ground truth labeling (DeBERTa entailment)'
+    )
+    parser.add_argument(
+        '--no-compile', action='store_true',
+        help='Disable torch.compile (fixes variable sequence length issues)'
+    )
+    parser.add_argument(
+        '--dataset', type=str, default='truthfulqa',
+        choices=['truthfulqa', 'triviaqa', 'coqa'],
+        help='Dataset for AUROC/calibration experiments (truthfulqa=adversarial, triviaqa=fact retrieval, coqa=conversational)'
+    )
 
     args = parser.parse_args()
 
     # Determine which chapters to run
     if args.all:
-        chapters = [3, 1, 2, 5]  # Profiling first, then others
+        chapters = [3, 1, 2, 4, 5]  # Profiling first, then mechanistic, predictive, head spec, ablation
     elif args.chapter:
         chapters = args.chapter
     else:
@@ -244,8 +355,13 @@ def main():
     print("=" * 70)
     print("AG-SAR EVALUATION FRAMEWORK")
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Model: {args.model}")
     print(f"Chapters: {chapters}")
     print(f"Quick mode: {args.quick}")
+    print(f"Seeds: {args.seeds}")
+    print(f"NLI labeling: {args.nli}")
+    print(f"torch.compile: {not getattr(args, 'no_compile', False)}")
+    print(f"Dataset: {args.dataset}")
     print("=" * 70)
 
     # Setup
@@ -255,7 +371,8 @@ def main():
     model, tokenizer = load_model_and_tokenizer(args.model, device)
 
     # Initialize AG-SAR
-    ag_sar = initialize_ag_sar(model, tokenizer)
+    use_compile = not getattr(args, 'no_compile', False)
+    ag_sar = initialize_ag_sar(model, tokenizer, use_torch_compile=use_compile)
 
     # Initialize baselines (only if needed)
     pe_baseline, original_sar = None, None
@@ -283,7 +400,11 @@ def main():
         all_results.update(results)
 
     if 2 in chapters:
-        results = run_chapter_2(ag_sar, original_sar, pe_baseline, config, args.quick)
+        results = run_chapter_2(ag_sar, original_sar, pe_baseline, config, args.quick, args.dataset)
+        all_results.update(results)
+
+    if 4 in chapters:
+        results = run_chapter_4(ag_sar, config, args.quick)
         all_results.update(results)
 
     if 5 in chapters:

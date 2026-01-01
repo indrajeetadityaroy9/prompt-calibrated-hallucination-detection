@@ -256,3 +256,132 @@ def compute_speedup(results: Dict[str, ThroughputResult]) -> Dict[str, float]:
         method: result.tokens_per_second / baseline_tps
         for method, result in results.items()
     }
+
+
+class MultiGPUBenchmark:
+    """
+    Benchmark multi-GPU scaling for AG-SAR.
+
+    Measures throughput scaling across 1, 2, ... N GPUs to validate
+    linear scaling efficiency.
+
+    Example:
+        >>> benchmark = MultiGPUBenchmark(model_name='gpt2')
+        >>> results = benchmark.run_scaling_test(prompts, responses)
+        >>> print(f"Scaling efficiency: {results['scaling_efficiency']:.1%}")
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        warmup_samples: int = 5
+    ):
+        self.tokenizer = tokenizer
+        self.warmup_samples = warmup_samples
+
+    def _count_tokens(self, prompts: List[str], responses: List[str]) -> int:
+        """Count total tokens across all samples."""
+        total = 0
+        for p, r in zip(prompts, responses):
+            total += len(self.tokenizer.encode(p + r))
+        return total
+
+    def benchmark_single_gpu(
+        self,
+        ag_sar,
+        prompts: List[str],
+        responses: List[str]
+    ) -> ThroughputResult:
+        """Benchmark single-GPU AG-SAR."""
+        # Warmup
+        for i in range(min(self.warmup_samples, len(prompts))):
+            ag_sar.compute_uncertainty(prompts[i], responses[i])
+
+        torch.cuda.synchronize()
+
+        # Benchmark
+        total_tokens = self._count_tokens(prompts, responses)
+        start = time.perf_counter()
+
+        for prompt, response in zip(prompts, responses):
+            ag_sar.compute_uncertainty(prompt, response)
+
+        torch.cuda.synchronize()
+        total_time = time.perf_counter() - start
+
+        return ThroughputResult(
+            method="single_gpu",
+            tokens_per_second=total_tokens / total_time,
+            samples_per_second=len(prompts) / total_time,
+            total_tokens=total_tokens,
+            total_samples=len(prompts),
+            total_time_seconds=total_time,
+            avg_tokens_per_sample=total_tokens / len(prompts)
+        )
+
+    def benchmark_multi_gpu(
+        self,
+        multi_ag_sar,
+        prompts: List[str],
+        responses: List[str],
+        strategy: str = 'round_robin'
+    ) -> ThroughputResult:
+        """Benchmark multi-GPU AG-SAR."""
+        # Warmup
+        warmup_prompts = prompts[:self.warmup_samples]
+        warmup_responses = responses[:self.warmup_samples]
+        multi_ag_sar.batch_compute_uncertainty(warmup_prompts, warmup_responses, strategy)
+
+        torch.cuda.synchronize()
+
+        # Benchmark
+        total_tokens = self._count_tokens(prompts, responses)
+        start = time.perf_counter()
+
+        multi_ag_sar.batch_compute_uncertainty(prompts, responses, strategy)
+
+        torch.cuda.synchronize()
+        total_time = time.perf_counter() - start
+
+        return ThroughputResult(
+            method=f"multi_gpu_{multi_ag_sar.num_gpus}x",
+            tokens_per_second=total_tokens / total_time,
+            samples_per_second=len(prompts) / total_time,
+            total_tokens=total_tokens,
+            total_samples=len(prompts),
+            total_time_seconds=total_time,
+            avg_tokens_per_sample=total_tokens / len(prompts)
+        )
+
+    def run_scaling_test(
+        self,
+        single_ag_sar,
+        multi_ag_sar,
+        prompts: List[str],
+        responses: List[str]
+    ) -> Dict:
+        """
+        Run GPU scaling benchmark.
+
+        Returns:
+            Dict with single/multi GPU results and scaling metrics
+        """
+        print("Benchmarking Single-GPU AG-SAR...")
+        single_result = self.benchmark_single_gpu(single_ag_sar, prompts, responses)
+
+        print(f"Benchmarking Multi-GPU AG-SAR ({multi_ag_sar.num_gpus} GPUs)...")
+        multi_result = self.benchmark_multi_gpu(multi_ag_sar, prompts, responses)
+
+        # Compute scaling efficiency
+        ideal_speedup = multi_ag_sar.num_gpus
+        actual_speedup = multi_result.tokens_per_second / single_result.tokens_per_second
+        scaling_efficiency = actual_speedup / ideal_speedup
+
+        return {
+            'single_gpu': single_result,
+            'multi_gpu': multi_result,
+            'num_gpus': multi_ag_sar.num_gpus,
+            'ideal_speedup': ideal_speedup,
+            'actual_speedup': actual_speedup,
+            'scaling_efficiency': scaling_efficiency,
+        }

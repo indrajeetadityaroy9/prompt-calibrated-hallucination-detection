@@ -1,0 +1,89 @@
+/home/ubuntu/.local/lib/python3.10/site-packages/huggingface_hub/file_download.py:942: FutureWarning: `resume_download` is deprecated and will be removed in version 1.0.0. Downloads always resume when possible. If you want to force a new download, use `force_download=True`.
+  warnings.warn(
+======================================================================
+AG-SAR EVALUATION FRAMEWORK
+Started: 2026-01-01 09:45:22
+Model: qwen
+Chapters: [4]
+Quick mode: True
+Seeds: [42]
+NLI labeling: False
+torch.compile: False
+Dataset: truthfulqa
+======================================================================
+Using device: cuda
+GPU: NVIDIA H100 80GB HBM3
+Memory: 85.0 GB
+
+Loading Qwen/Qwen2.5-7B...
+  Detected Qwen architecture (RoPE + GQA)
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:00,  3.05it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:00<00:00,  3.23it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:00<00:00,  3.26it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:01<00:00,  3.41it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:01<00:00,  3.33it/s]
+/home/ubuntu/.local/lib/python3.10/site-packages/huggingface_hub/file_download.py:942: FutureWarning: `resume_download` is deprecated and will be removed in version 1.0.0. Downloads always resume when possible. If you want to force a new download, use `force_download=True`.
+  warnings.warn(
+Special tokens have been added in the vocabulary, make sure the associated word embeddings are fine-tuned or trained.
+  Using bfloat16 precision
+Initializing AG-SAR...
+
+======================================================================
+CHAPTER 4: HEAD SPECIALIZATION ANALYSIS
+======================================================================
+
+--- Experiment 8: Head Specialization ---
+============================================================
+Experiment 8: Head Specialization Analysis
+============================================================
+Model architecture: llama
+Num layers: 28
+Num heads: 28
+Num KV heads: 4
+
+Analyzing per-head centrality contributions...
+
+============================================================
+RESULTS:
+============================================================
+
+Final layers (21-27) contribution: 0.0%
+
+Top 10 Semantic Heads:
+Layer    Head     Contribution
+------------------------------
+0        15       0.0366      
+0        14       0.0366      
+0        13       0.0366      
+0        12       0.0366      
+0        11       0.0366      
+0        10       0.0366      
+0        9        0.0366      
+0        8        0.0366      
+3        19       0.0366      
+3        18       0.0366      
+
+============================================================
+RESULT: FAIL
+Final layer heads in top 10: 0 (threshold: 6)
+============================================================
+
+Results saved to: results/exp8_head_specialization.json
+Heatmap saved to: results/exp8_head_heatmap.png
+
+All results saved to: results/all_results.json
+Summary dashboard saved to: results/summary_dashboard.png
+
+======================================================================
+FINAL EVALUATION SUMMARY
+======================================================================
+======================================================================
+AG-SAR EVALUATION RESULTS SUMMARY
+======================================================================
+
+Experiment                Metric                    Value     Status
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+
+Overall: 0/1 experiments passed
+======================================================================
+
+Completed: 2026-01-01 09:45:33
+
+✗ 1/1 experiments failed

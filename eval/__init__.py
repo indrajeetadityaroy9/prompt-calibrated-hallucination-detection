@@ -16,5 +16,6 @@ Usage:
 """
 
 from .config import EvalConfig
+from .nli_labeler import NLILabeler, generate_then_grade_pipeline
 
-__all__ = ['EvalConfig']
+__all__ = ['EvalConfig', 'NLILabeler', 'generate_then_grade_pipeline']

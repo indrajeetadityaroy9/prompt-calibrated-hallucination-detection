@@ -79,9 +79,9 @@ The main entry point is `AGSAR` class in `ag_sar.py`. The pipeline flow:
 
 ## Key Implementation Notes
 
+- **GPU Required**: Triton kernel requires CUDA. PyTorch >= 2.2, Triton >= 2.1 (no CPU fallback)
 - **O(N) Memory**: Matrix-free centrality via Triton kernel - no O(N²) attention matrices
-- **Triton Required**: PyTorch >= 2.2, Triton >= 2.1 (no CPU fallback)
-- **Precision**: Triton accumulators use float32 even with bfloat16 I/O for numerical stability
+- **Precision**: Triton accumulators use float32 even with bfloat16 I/O for numerical stability. NEVER use float16 with GPT-2 - causes NaN overflow
 - **Structural Selection**: Uses last 4 semantic layers directly (no entropy-based head filtering)
 - Power iteration uses 3 iterations (typically sufficient for convergence)
 - The framework is optimized for NVIDIA H100 with TF32 and bfloat16

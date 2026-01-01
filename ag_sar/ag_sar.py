@@ -32,6 +32,8 @@ from .uncertainty import (
     compute_graph_shifted_entropy,
     detect_hallucination as gse_detect_hallucination,
     compute_per_token_uncertainty,
+    compute_token_entropy_compiled,
+    compute_gse_compiled,
 )
 
 
@@ -103,14 +105,26 @@ class AGSAR:
         """Detect model architecture and set layer configuration."""
         # Get transformer block reference
         if hasattr(self.model, 'transformer'):
+            # GPT-2 style: model.transformer
             transformer = self.model.transformer
+        elif hasattr(self.model, 'model'):
+            # Llama/Qwen/Mistral style: model.model
+            transformer = self.model.model
         else:
             transformer = self.model
 
         # Get number of layers
         if hasattr(transformer, 'h'):
+            # GPT-2 style: transformer.h[i]
             self.num_layers = len(transformer.h)
+        elif hasattr(transformer, 'layers'):
+            # Llama/Qwen/Mistral style: transformer.layers[i]
+            self.num_layers = len(transformer.layers)
+        elif hasattr(transformer, 'config') and hasattr(transformer.config, 'num_hidden_layers'):
+            # Fallback: Llama config
+            self.num_layers = transformer.config.num_hidden_layers
         elif hasattr(transformer, 'config') and hasattr(transformer.config, 'n_layer'):
+            # Fallback: GPT-2 config
             self.num_layers = transformer.config.n_layer
         else:
             self.num_layers = 12  # GPT-2 default
@@ -235,7 +249,8 @@ class AGSAR:
         ).to(self.dtype)
 
         # Compute sink-aware centrality via matrix-free Triton kernel
-        relevance, centrality = compute_sink_aware_centrality(
+        # When return_details=True, also get per-head contributions for head specialization
+        relevance, centrality, per_head_contrib = compute_sink_aware_centrality(
             value_norms=aggregated_value_norms,
             attention_mask=attention_mask,
             num_iterations=self.config.power_iteration_steps,
@@ -243,6 +258,8 @@ class AGSAR:
             Q_stack=Q_stack,
             K_stack=K_stack,
             residual_weight=self.config.residual_weight,
+            return_raw=return_details,  # Only compute per-head contrib when needed
+            sink_token_count=self.config.sink_token_count,  # Mask BOS/sink tokens
         )
 
         # Create response mask (only compute entropy on response tokens)
@@ -250,20 +267,35 @@ class AGSAR:
         response_mask[:, response_start:] = 1
 
         # Compute token entropy (only for response)
-        token_entropy = compute_token_entropy(
-            logits,
-            attention_mask=response_mask
-        )
+        # Use compiled version if enabled for reduced Python overhead
+        if self.config.use_torch_compile:
+            token_entropy = compute_token_entropy_compiled(
+                logits,
+                attention_mask=response_mask
+            )
+        else:
+            token_entropy = compute_token_entropy(
+                logits,
+                attention_mask=response_mask
+            )
 
         # Compute Graph-Shifted Entropy
-        gse = compute_graph_shifted_entropy(
-            token_entropy,
-            relevance,
-            attention_mask=response_mask
-        )
+        # Use compiled version if enabled for reduced Python overhead
+        if self.config.use_torch_compile:
+            gse = compute_gse_compiled(
+                token_entropy,
+                relevance,
+                attention_mask=response_mask
+            )
+        else:
+            gse = compute_graph_shifted_entropy(
+                token_entropy,
+                relevance,
+                attention_mask=response_mask
+            )
 
         if return_details:
-            return {
+            result = {
                 'gse': gse.item(),
                 'token_entropy': token_entropy,
                 'relevance': relevance,
@@ -273,6 +305,14 @@ class AGSAR:
                 'input_ids': input_ids,
                 'attention_mask': attention_mask
             }
+            # Include per-head contributions for head specialization analysis
+            if per_head_contrib is not None:
+                # Compute head importance as mean contribution across sequence
+                # per_head_contrib shape: (B, L*H, S) -> head_importance: (L*H,)
+                head_importance = per_head_contrib.abs().mean(dim=(0, 2))  # Average over batch and sequence
+                result['head_importance'] = head_importance
+                result['per_head_contrib'] = per_head_contrib
+            return result
 
         return gse.item()
 

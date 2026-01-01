@@ -76,7 +76,8 @@ def matrix_free_power_iteration(
     residual_weight: float = 0.5,
     tol: float = 1e-4,
     attention_mask: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+    return_raw: bool = False,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
     Compute eigenvector centrality via matrix-free power iteration.
 
@@ -100,9 +101,11 @@ def matrix_free_power_iteration(
         residual_weight: Weight for self-attention residual (0.5 = equal mix)
         tol: Convergence tolerance for early stopping
         attention_mask: (B, S) padding mask (1=valid, 0=padding)
+        return_raw: If True, return per-head contributions for head specialization analysis
 
     Returns:
         centrality: (B, S) normalized eigenvector centrality
+        per_head_contrib: (B, L*H, S) per-head contributions if return_raw=True, else None
     """
     B, total_heads, S, D = Q_stack.shape
     device = Q_stack.device
@@ -116,10 +119,17 @@ def matrix_free_power_iteration(
         v = v * attention_mask.float()
         v = v / v.sum(dim=-1, keepdim=True).clamp(min=1e-10)
 
+    # Track per-head contributions from final iteration
+    final_per_head_out = None
+
     for _ in range(num_iterations):
         # Triton kernel: attention-weighted sum per head
         # per_head_out[b, h, i] = sum_j softmax(Q@K.T)[i,j] * v[j]
         per_head_out = centrality_flash_fwd(Q_stack, K_stack, v)  # (B, L*H, S)
+
+        # Save for head specialization analysis
+        if return_raw:
+            final_per_head_out = per_head_out.clone()
 
         # Aggregate across all heads (mean pooling)
         attn_contrib = per_head_out.mean(dim=1)  # (B, S)
@@ -142,7 +152,7 @@ def matrix_free_power_iteration(
 
         v = v_next
 
-    return v
+    return v, final_per_head_out
 
 
 def compute_sink_aware_centrality(
@@ -156,7 +166,11 @@ def compute_sink_aware_centrality(
     residual_weight: float = 0.5,
     # Legacy matrix-based path
     attention_graph: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    # Head specialization analysis
+    return_raw: bool = False,
+    # Sink token masking (StreamingLLM-style)
+    sink_token_count: int = 0,
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """
     Compute sink-aware relevance: R(t_i) = C_eigen(t_i) × ||v_i||_2
 
@@ -177,23 +191,29 @@ def compute_sink_aware_centrality(
         K_stack: (B, L*H, S, D) stacked keys for matrix-free path
         residual_weight: Weight for self-attention in matrix-free path
         attention_graph: (batch, seq, seq) for legacy matrix-based path
+        return_raw: If True, return per-head contributions for head specialization
+        sink_token_count: Number of initial tokens to zero out (BOS/sink tokens)
+            These have high centrality but are structural, not semantic.
 
     Returns:
         relevance: (batch, seq) sink-aware relevance scores
         centrality: (batch, seq) raw eigenvector centrality (before sink correction)
+        per_head_contrib: (B, L*H, S) per-head contributions if return_raw=True, else None
     """
     # Determine which path to use
     use_matrix_free = Q_stack is not None and K_stack is not None
+    per_head_contrib = None
 
     if use_matrix_free:
         # Matrix-free path using Triton kernel
-        centrality = matrix_free_power_iteration(
+        centrality, per_head_contrib = matrix_free_power_iteration(
             Q_stack=Q_stack,
             K_stack=K_stack,
             num_iterations=num_iterations,
             residual_weight=residual_weight,
             tol=tol,
             attention_mask=attention_mask,
+            return_raw=return_raw,
         )
     else:
         # Legacy matrix-based path
@@ -221,11 +241,16 @@ def compute_sink_aware_centrality(
     # This naturally down-weights attention sinks (high C, low ||v||)
     relevance = centrality * value_norms
 
+    # Zero out sink tokens (BOS, structural attention sinks)
+    # These have high centrality but are not semantically meaningful
+    if sink_token_count > 0:
+        relevance[:, :sink_token_count] = 0.0
+
     # Apply mask to final relevance
     if attention_mask is not None:
         relevance = relevance * attention_mask.float()
 
-    return relevance, centrality
+    return relevance, centrality, per_head_contrib
 
 
 def aggregate_value_norms(

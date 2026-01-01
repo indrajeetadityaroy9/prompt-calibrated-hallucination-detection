@@ -25,7 +25,7 @@ import torch
 from tqdm import tqdm
 
 from ..config import EvalConfig
-from ..datasets import load_truthfulqa
+from ..datasets import load_truthfulqa, load_triviaqa, load_coqa
 from ..metrics.auroc import (
     compute_auroc,
     compute_auprc,
@@ -59,7 +59,8 @@ def run_auroc_experiment(
     pe_baseline,
     config: EvalConfig,
     num_samples: int = 200,
-    save_results: bool = True
+    save_results: bool = True,
+    dataset: str = 'truthfulqa'
 ) -> Dict:
     """
     Run AUROC benchmark for hallucination detection.
@@ -69,22 +70,30 @@ def run_auroc_experiment(
         original_sar: Original SAR baseline (O(N) perturbation)
         pe_baseline: Predictive Entropy baseline
         config: Evaluation configuration
-        num_samples: Number of TruthfulQA samples
+        num_samples: Number of samples
         save_results: Whether to save results
+        dataset: Dataset to use ('truthfulqa' or 'triviaqa')
 
     Returns:
         Dict with AUROC results
     """
     print("=" * 60)
     print("Experiment 3: AUROC Benchmark - Hallucination Detection")
+    print(f"Dataset: {dataset}")
     print("=" * 60)
 
-    # Load TruthfulQA
-    print(f"\nLoading TruthfulQA ({num_samples} samples)...")
-    samples = load_truthfulqa(max_samples=num_samples)
+    # Load dataset
+    print(f"\nLoading {dataset} ({num_samples} samples)...")
+    if dataset == 'triviaqa':
+        samples = load_triviaqa(max_samples=num_samples)
+    elif dataset == 'coqa':
+        samples = load_coqa(max_samples=num_samples)
+    else:
+        samples = load_truthfulqa(max_samples=num_samples)
 
     results = {
         'experiment': 'auroc_hallucination',
+        'dataset': dataset,
         'num_samples': len(samples),
         'rouge_threshold': config.rouge_threshold,
         'methods': {}
@@ -249,9 +258,10 @@ def plot_auroc_comparison(
         for k, v in plot_data.items()
     }
 
+    dataset = results.get('dataset', 'TruthfulQA').upper()
     plot_roc_curve(
         renamed_data,
-        title='ROC Curve - Hallucination Detection (TruthfulQA)',
+        title=f'ROC Curve - Hallucination Detection ({dataset})',
         save_path=str(save_path) if save_path else None
     )
 

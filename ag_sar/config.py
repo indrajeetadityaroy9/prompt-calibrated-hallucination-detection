@@ -54,12 +54,30 @@ class AGSARConfig:
     # This gives zero-latency inference with Flash Attention speed
     use_flash_attn: bool = True
 
+    # torch.compile optimization for hot paths (entropy, GSE computation)
+    # Reduces Python overhead by ~10-20% after warmup
+    use_torch_compile: bool = True
+
     # Precision - CRITICAL: Use bfloat16 on H100, NEVER float16 for GPT-2
     preferred_dtype: torch.dtype = field(default_factory=lambda: torch.bfloat16)
 
     # Model-specific (auto-detected if None)
     num_attention_heads: Optional[int] = None
     num_hidden_layers: Optional[int] = None
+
+    # Model architecture: "auto", "gpt2", or "llama"
+    # "auto" attempts to detect from model structure
+    model_architecture: str = "auto"
+
+    # GQA (Grouped Query Attention) configuration for Llama-3
+    # num_kv_heads < num_attention_heads means GQA is used
+    # For Llama-3-8B: num_q_heads=32, num_kv_heads=8 (4 Q-heads per KV-head)
+    num_kv_heads: Optional[int] = None
+
+    # Sink token masking (StreamingLLM-style)
+    # First N tokens are structural attention sinks, not semantic
+    # Llama/Mistral/Qwen use <s> as a sink - mask it out for cleaner centrality
+    sink_token_count: int = 4
 
     def __post_init__(self):
         """Validate configuration values."""
@@ -113,17 +131,25 @@ class AGSARConfig:
             'power_iteration_tol': self.power_iteration_tol,
             'hallucination_threshold': self.hallucination_threshold,
             'use_flash_attn': self.use_flash_attn,
+            'use_torch_compile': self.use_torch_compile,
             'preferred_dtype': str(self.preferred_dtype),
             'num_attention_heads': self.num_attention_heads,
             'num_hidden_layers': self.num_hidden_layers,
+            'model_architecture': self.model_architecture,
+            'num_kv_heads': self.num_kv_heads,
+            'sink_token_count': self.sink_token_count,
         }
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> 'AGSARConfig':
         """Create config from dictionary."""
         # Filter out deprecated keys
-        deprecated = {'value_norm_type', 'sink_token_count', 'use_compile', 'compile_mode', 'use_residual_correction'}
+        deprecated = {'value_norm_type', 'compile_mode', 'use_residual_correction'}
         config_dict = {k: v for k, v in config_dict.items() if k not in deprecated}
+
+        # Handle legacy 'use_compile' -> 'use_torch_compile' migration
+        if 'use_compile' in config_dict:
+            config_dict['use_torch_compile'] = config_dict.pop('use_compile')
 
         # Handle dtype conversion
         if 'preferred_dtype' in config_dict:

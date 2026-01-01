@@ -1,0 +1,403 @@
+/home/ubuntu/.local/lib/python3.10/site-packages/huggingface_hub/file_download.py:942: FutureWarning: `resume_download` is deprecated and will be removed in version 1.0.0. Downloads always resume when possible. If you want to force a new download, use `force_download=True`.
+  warnings.warn(
+/home/ubuntu/.local/lib/python3.10/site-packages/huggingface_hub/file_download.py:942: FutureWarning: `resume_download` is deprecated and will be removed in version 1.0.0. Downloads always resume when possible. If you want to force a new download, use `force_download=True`.
+  warnings.warn(
+======================================================================
+AG-SAR EVALUATION FRAMEWORK
+Started: 2026-01-01 09:52:17
+Model: mistral
+Chapters: [2, 4]
+Quick mode: True
+Seeds: [42]
+NLI labeling: False
+torch.compile: False
+Dataset: triviaqa
+======================================================================
+Using device: cuda
+GPU: NVIDIA H100 80GB HBM3
+Memory: 85.0 GB
+
+Loading mistralai/Mistral-7B-v0.3...
+  Detected Mistral architecture (RoPE + GQA)
+Downloading shards:   0%|          | 0/3 [00:00<?, ?it/s]Downloading shards:  33%|███▎      | 1/3 [00:03<00:07,  3.55s/it]Downloading shards:  67%|██████▋   | 2/3 [00:07<00:03,  3.50s/it]Downloading shards: 100%|██████████| 3/3 [00:10<00:00,  3.45s/it]Downloading shards: 100%|██████████| 3/3 [00:10<00:00,  3.47s/it]
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards:  33%|███▎      | 1/3 [00:00<00:00,  2.70it/s]Loading checkpoint shards:  67%|██████▋   | 2/3 [00:00<00:00,  2.80it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:01<00:00,  2.95it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:01<00:00,  2.90it/s]
+You set `add_prefix_space`. The tokenizer needs to be converted from the slow tokenizers
+Some weights of RobertaModel were not initialized from the model checkpoint at roberta-large and are newly initialized: ['roberta.pooler.dense.bias', 'roberta.pooler.dense.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+  Using bfloat16 precision
+Initializing AG-SAR...
+Initializing Predictive Entropy baseline...
+Initializing Original SAR baseline (loading RoBERTa-Large)...
+Loading roberta-large for perturbation analysis...
+
+======================================================================
+CHAPTER 2: HALLUCINATION DETECTION
+Dataset: triviaqa
+======================================================================
+
+--- Experiment 3: AUROC Benchmark ---
+============================================================
+Experiment 3: AUROC Benchmark - Hallucination Detection
+Dataset: triviaqa
+============================================================
+
+Loading triviaqa (50 samples)...
+
+Processing 100 samples...
+(Note: Original SAR is O(N) and will be slower)
+Evaluating:   0%|          | 0/100 [00:00<?, ?it/s]Evaluating:   1%|          | 1/100 [00:00<01:22,  1.21it/s]Evaluating:  11%|█         | 11/100 [00:00<00:05, 15.62it/s]Evaluating:  27%|██▋       | 27/100 [00:01<00:01, 40.37it/s]Evaluating:  43%|████▎     | 43/100 [00:01<00:00, 63.41it/s]Evaluating:  63%|██████▎   | 63/100 [00:01<00:00, 92.56it/s]Evaluating:  80%|████████  | 80/100 [00:01<00:00, 108.95it/s]  Warning: Failed on sample 0: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 1: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 2: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 3: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 4: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 5: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 7: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 8: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 9: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 10: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 11: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 12: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 13: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 14: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 15: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 16: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 17: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 18: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 19: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 20: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 22: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 23: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 24: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 25: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 26: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 27: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 28: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 29: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 30: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 31: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 32: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 33: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 34: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 35: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 36: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 37: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 38: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 39: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 40: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 41: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 42: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 43: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 44: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 47: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 48: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 49: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 50: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 52: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 53: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 54: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 55: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 56: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 57: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 58: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 59: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 60: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 61: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 62: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 63: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 64: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 65: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 66: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 67: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 68: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 69: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 70: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 71: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 72: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 73: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 74: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 75: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 76: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 77: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 78: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 79: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 80: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 81: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 82: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 83: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 85: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 86: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 87: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 88: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 89: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 90: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 91: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 92: Boolean value of Tensor with more than one value is ambiguous
+Evaluating: 100%|██████████| 100/100 [00:01<00:00, 69.08it/s]
+  Warning: Failed on sample 94: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 95: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 97: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 98: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 99: Boolean value of Tensor with more than one value is ambiguous
+
+============================================================
+RESULTS:
+============================================================
+
+Method                         AUROC      AUPRC    Samples
+------------------------------------------------------------
+ag_sar                           N/A        N/A          0
+original_sar                     N/A        N/A          0
+predictive_entropy               N/A        N/A          0
+
+============================================================
+RESULT: FAIL
+AG-SAR: 0.000, PE: 0.000, SAR: 0.000
+============================================================
+
+Results saved to: results/exp3_auroc.json
+No raw data available for plotting
+
+--- Experiment 4: Calibration Error ---
+============================================================
+Experiment 4: Calibration Error (ECE)
+Dataset: triviaqa
+============================================================
+
+Loading triviaqa (80 samples)...
+
+Processing 160 samples...
+Evaluating:   0%|          | 0/160 [00:00<?, ?it/s]Evaluating:  12%|█▏        | 19/160 [00:00<00:00, 186.54it/s]Evaluating:  24%|██▍       | 38/160 [00:00<00:00, 187.53it/s]Evaluating:  37%|███▋      | 59/160 [00:00<00:00, 193.84it/s]Evaluating:  49%|████▉     | 79/160 [00:00<00:00, 188.58it/s]  Warning: Failed on sample 0: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 1: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 2: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 3: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 4: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 5: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 7: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 8: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 9: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 10: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 11: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 12: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 13: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 14: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 15: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 16: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 17: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 18: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 19: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 20: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 22: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 23: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 24: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 25: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 26: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 27: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 28: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 29: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 30: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 31: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 32: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 33: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 34: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 35: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 36: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 37: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 38: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 39: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 40: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 41: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 42: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 43: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 44: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 47: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 48: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 49: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 50: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 51: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 52: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 53: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 54: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 55: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 56: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 57: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 58: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 59: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 60: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 61: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 62: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 63: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 64: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 65: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 66: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 67: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 68: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 69: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 70: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 71: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 72: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 73: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 74: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 75: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 76: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 77: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 78: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 79: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 80: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 81: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 82: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 83: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 84: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 85: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 86: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 87: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 88: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 89: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 91: Boolean value of Tensor with more than one value is ambiguous
+Evaluating:  62%|██████▏   | 99/160 [00:00<00:00, 190.11it/s]Evaluating:  74%|███████▍  | 119/160 [00:00<00:00, 185.66it/s]Evaluating:  86%|████████▋ | 138/160 [00:00<00:00, 184.67it/s]Evaluating:  99%|█████████▉| 159/160 [00:00<00:00, 190.13it/s]Evaluating: 100%|██████████| 160/160 [00:00<00:00, 188.76it/s]
+  Warning: Failed on sample 92: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 93: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 94: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 95: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 96: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 97: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 98: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 99: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 100: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 101: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 102: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 103: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 104: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 106: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 107: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 108: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 109: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 110: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 111: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 112: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 113: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 114: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 115: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 116: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 117: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 118: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 119: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 120: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 121: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 122: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 123: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 124: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 125: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 126: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 127: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 128: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 129: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 130: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 131: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 132: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 133: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 134: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 135: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 136: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 137: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 138: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 139: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 140: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 142: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 143: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 144: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 145: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 146: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 147: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 148: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 149: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 150: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 151: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 152: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 153: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 155: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 156: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 157: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 158: Boolean value of Tensor with more than one value is ambiguous
+  Warning: Failed on sample 159: Boolean value of Tensor with more than one value is ambiguous
+
+============================================================
+RESULTS:
+============================================================
+
+Method                           ECE        MCE    Samples
+------------------------------------------------------------
+ag_sar                           N/A        N/A          0
+predictive_entropy               N/A        N/A          0
+
+============================================================
+RESULT: FAIL
+AG-SAR ECE: 1.0000 (threshold: 0.15)
+============================================================
+
+Results saved to: results/exp4_calibration.json
+No methods to plot
+
+======================================================================
+CHAPTER 4: HEAD SPECIALIZATION ANALYSIS
+======================================================================
+
+--- Experiment 8: Head Specialization ---
+============================================================
+Experiment 8: Head Specialization Analysis
+============================================================
+Model architecture: llama
+Num layers: 32
+Num heads: 32
+Num KV heads: 8
+
+Analyzing per-head centrality contributions...
+Traceback (most recent call last):
+  File "/lambda/nfs/lambda-cloud-data/AG-SAR/scripts/run_eval.py", line 457, in <module>
+    sys.exit(main())
+  File "/lambda/nfs/lambda-cloud-data/AG-SAR/scripts/run_eval.py", line 407, in main
+    results = run_chapter_4(ag_sar, config, args.quick)
+  File "/lambda/nfs/lambda-cloud-data/AG-SAR/scripts/run_eval.py", line 283, in run_chapter_4
+    head_results = run_head_specialization_experiment(ag_sar, config, num_samples=num_samples)
+  File "/lambda/nfs/lambda-cloud-data/AG-SAR/eval/experiments/exp8_head_specialization.py", line 185, in run_head_specialization_experiment
+    head_analysis = analyze_per_head_centrality(ag_sar, prompts, responses)
+  File "/lambda/nfs/lambda-cloud-data/AG-SAR/eval/experiments/exp8_head_specialization.py", line 54, in analyze_per_head_centrality
+    result = ag_sar.compute_uncertainty(prompt, response, return_details=True)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 120, in decorate_context
+    return func(*args, **kwargs)
+  File "/lambda/nfs/lambda-cloud-data/AG-SAR/ag_sar/ag_sar.py", line 223, in compute_uncertainty
+    Q_stack, K_stack, value_norms, model_output = self.extractor.extract_semantic_qk(
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 120, in decorate_context
+    return func(*args, **kwargs)
+  File "/lambda/nfs/lambda-cloud-data/AG-SAR/ag_sar/attention_extractor.py", line 636, in extract_semantic_qk
+    output = self.model(
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/transformers/models/mistral/modeling_mistral.py", line 1158, in forward
+    outputs = self.model(
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/transformers/models/mistral/modeling_mistral.py", line 1043, in forward
+    layer_outputs = decoder_layer(
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/transformers/models/mistral/modeling_mistral.py", line 757, in forward
+    hidden_states, self_attn_weights, present_key_value = self.self_attn(
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/lambda/nfs/lambda-cloud-data/AG-SAR/ag_sar/attention_extractor.py", line 362, in patched_forward
+    cos, sin = attn.rotary_emb(value_states, position_ids)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/transformers/models/mistral/modeling_mistral.py", line 120, in forward
+    if seq_len > self.max_seq_len_cached:
+RuntimeError: Boolean value of Tensor with more than one value is ambiguous

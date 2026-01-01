@@ -14,7 +14,11 @@ Example:
 """
 
 from .config import AGSARConfig
-from .utils import enable_tf32, get_model_dtype, get_model_device, apply_attention_mask, safe_normalize
+from .utils import enable_tf32, is_tf32_enabled, get_model_dtype, get_model_device, apply_attention_mask, safe_normalize
+
+# Enforce TF32 at import time for ~3x matmul speedup on H100/A100
+# This ensures TF32 is enabled before any tensor operations
+enable_tf32()
 from .attention_extractor import AttentionExtractor
 from .centrality import (
     power_iteration,
@@ -31,6 +35,12 @@ from .uncertainty import (
     compute_per_token_uncertainty,
 )
 from .ag_sar import AGSAR
+from .multi_gpu import (
+    MultiGPUAGSAR,
+    GPUPool,
+    get_optimal_gpu_count,
+    distribute_samples,
+)
 
 __version__ = "0.1.0"
 
@@ -38,8 +48,14 @@ __all__ = [
     # Main class
     "AGSAR",
     "AGSARConfig",
+    # Multi-GPU support
+    "MultiGPUAGSAR",
+    "GPUPool",
+    "get_optimal_gpu_count",
+    "distribute_samples",
     # Utils
     "enable_tf32",
+    "is_tf32_enabled",
     "get_model_dtype",
     "get_model_device",
     "apply_attention_mask",
