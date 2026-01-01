@@ -31,7 +31,7 @@ from tqdm import tqdm
 from ..config import EvalConfig
 from ..datasets import load_truthfulqa
 from ..metrics.auroc import compute_auroc
-from .exp3_auroc import compute_rouge_l
+from ..metrics.rouge import compute_rouge_l
 
 
 @dataclass

@@ -26,7 +26,7 @@ from ..metrics.calibration import (
     plot_reliability_diagram,
     uncertainty_to_confidence
 )
-from .exp3_auroc import compute_rouge_l
+from ..metrics.rouge import compute_rouge_l
 
 
 def run_calibration_experiment(

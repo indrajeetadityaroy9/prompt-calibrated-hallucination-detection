@@ -63,16 +63,21 @@ def safe_json_value(value: Any) -> Any:
         return [safe_json_value(v) for v in value]
     if isinstance(value, dict):
         return {k: safe_json_value(v) for k, v in value.items()}
-    if hasattr(value, 'item'):
-        return value.item()
-    if hasattr(value, 'tolist'):
-        return value.tolist()
+    # Check for numpy arrays BEFORE .item() since arrays have .item() but it fails for non-scalars
     if isinstance(value, np.ndarray):
         return value.tolist()
     if isinstance(value, np.floating):
         return float(value)
     if isinstance(value, np.integer):
         return int(value)
+    # For scalar tensors/arrays, try .item()
+    if hasattr(value, 'item'):
+        try:
+            return value.item()
+        except (ValueError, RuntimeError):
+            pass
+    if hasattr(value, 'tolist'):
+        return value.tolist()
     return str(value)
 
 

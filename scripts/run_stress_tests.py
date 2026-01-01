@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from ag_sar import AGSAR, AGSARConfig
 from eval.baselines.predictive_entropy import PredictiveEntropy
 from eval.datasets import load_triviaqa, load_coqa
+from eval.experiment_utils import safe_json_value
 from eval.config import EvalConfig
 
 
@@ -474,26 +475,8 @@ def main():
     results_path = Path('results/stress_tests.json')
     results_path.parent.mkdir(exist_ok=True)
 
-    # Convert numpy types for JSON serialization
-    def convert_numpy(obj):
-        if isinstance(obj, (np.floating, float)):
-            return float(obj)
-        elif isinstance(obj, (np.integer, int)):
-            return int(obj)
-        elif isinstance(obj, (np.bool_, bool)):
-            return bool(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, dict):
-            return {k: convert_numpy(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [convert_numpy(i) for i in obj]
-        elif isinstance(obj, tuple):
-            return tuple(convert_numpy(i) for i in obj)
-        return obj
-
     with open(results_path, 'w') as f:
-        json.dump(convert_numpy(all_results), f, indent=2)
+        json.dump(safe_json_value(all_results), f, indent=2)
 
     print(f"\nResults saved to: {results_path}")
 

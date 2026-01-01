@@ -32,17 +32,7 @@ from ag_sar.uncertainty import compute_token_surprisal, compute_graph_shifted_su
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from eval.datasets import load_truthfulqa, load_triviaqa
 from eval.config import EvalConfig
-
-
-def gini_coefficient(x: np.ndarray) -> float:
-    """Compute Gini coefficient - measure of inequality/sharpness."""
-    x = np.abs(x).flatten()
-    if len(x) == 0 or np.sum(x) == 0:
-        return 0.0
-    sorted_x = np.sort(x)
-    n = len(x)
-    cumsum = np.cumsum(sorted_x)
-    return (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n
+from eval.metrics import gini_coefficient
 
 
 def run_orthogonality_test(
@@ -94,7 +84,7 @@ def run_orthogonality_test(
                 continue
 
             try:
-                # Get AG-SAR details
+                # Get AG-SAR details (relevance + logits from single forward pass)
                 details = ag_sar.compute_uncertainty(
                     sample.prompt, sample.response, return_details=True
                 )
@@ -102,24 +92,18 @@ def run_orthogonality_test(
                 relevance = details['relevance']
                 response_start = details['response_start']
                 input_ids = details['input_ids']
-
-                # Get logits for surprisal
-                text = sample.prompt + sample.response
-                inputs = tokenizer(text, return_tensors="pt").to("cuda")
-
-                with torch.no_grad():
-                    outputs = model(input_ids=inputs.input_ids)
-                    logits = outputs.logits.float()
+                attention_mask = details['attention_mask']
+                logits = details['logits'].float()  # Use cached logits
 
                 # Compute surprisal
-                surprisal = compute_token_surprisal(logits, inputs.input_ids)
+                surprisal = compute_token_surprisal(logits, input_ids)
 
                 # Extract response-only metrics
                 response_relevance = relevance[:, response_start:]
                 response_surprisal = surprisal[:, response_start:]
 
                 # Create response mask
-                response_mask = torch.zeros_like(inputs.attention_mask)
+                response_mask = torch.zeros_like(attention_mask)
                 response_mask[:, response_start:] = 1
 
                 # === Metric 1: Pure Surprisal (avg NLL) ===

@@ -261,24 +261,19 @@ def benchmark_agsar(
     start = time.perf_counter()
 
     for prompt, response in tqdm(zip(prompts, responses), total=len(prompts), desc="AG-SAR"):
-        # Get relevance from AG-SAR
+        # Get relevance + logits from AG-SAR (single forward pass)
         details = ag_sar.compute_uncertainty(prompt, response, return_details=True)
         relevance = details['relevance']
         response_start = details['response_start']
-
-        # Get logits for surprisal
-        text = prompt + response
-        inputs = tokenizer(text, return_tensors="pt").to("cuda")
-
-        with torch.no_grad():
-            outputs = model(input_ids=inputs.input_ids)
-            logits = outputs.logits.float()
+        input_ids = details['input_ids']
+        attention_mask = details['attention_mask']
+        logits = details['logits'].float()  # Use cached logits
 
         # Compute surprisal
-        surprisal = compute_token_surprisal(logits, inputs.input_ids)
+        surprisal = compute_token_surprisal(logits, input_ids)
 
         # Create response mask
-        response_mask = torch.zeros_like(inputs.attention_mask)
+        response_mask = torch.zeros_like(attention_mask)
         response_mask[:, response_start:] = 1
 
         # Compute TWS (Graph-Shifted Surprisal)

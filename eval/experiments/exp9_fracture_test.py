@@ -36,27 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from ag_sar import AGSAR, AGSARConfig
 from ag_sar.uncertainty import compute_token_surprisal, compute_graph_shifted_surprisal
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-
-def gini_coefficient(x: np.ndarray) -> float:
-    """
-    Compute Gini coefficient - measure of inequality/sharpness.
-
-    Range: 0 (perfect equality) to 1 (perfect inequality)
-    Higher Gini = more concentrated attention on fewer tokens (sharper focus)
-    Lower Gini = more diffuse attention across many tokens (scattered/fractured)
-    """
-    x = np.abs(x).flatten()
-    if len(x) == 0 or np.sum(x) == 0:
-        return 0.0
-
-    # Sort values
-    sorted_x = np.sort(x)
-    n = len(x)
-
-    # Gini formula
-    cumsum = np.cumsum(sorted_x)
-    return (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n
+from eval.metrics import gini_coefficient
 
 
 def run_fracture_test(
@@ -111,21 +91,13 @@ def run_fracture_test(
         pair_result = {'prompt': prompt}
 
         for label, response in [('FACT', fact), ('HALLUC', hall)]:
-            # Forward pass to get logits and relevance
-            text = prompt + response
-            inputs = tokenizer(text, return_tensors="pt").to("cuda")
-            input_ids = inputs.input_ids
-            attention_mask = inputs.attention_mask
-
-            # Get AG-SAR details (relevance from attention graph)
+            # Get AG-SAR details (relevance + logits from single forward pass)
             details = ag_sar.compute_uncertainty(prompt, response, return_details=True)
             relevance = details['relevance']  # (1, seq_len)
             response_start = details['response_start']
-
-            # Get logits for surprisal
-            with torch.no_grad():
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-                logits = outputs.logits.float()
+            input_ids = details['input_ids']
+            attention_mask = details['attention_mask']
+            logits = details['logits'].float()  # Use cached logits
 
             # Compute surprisal (NLL of actual tokens)
             surprisal = compute_token_surprisal(logits, input_ids)

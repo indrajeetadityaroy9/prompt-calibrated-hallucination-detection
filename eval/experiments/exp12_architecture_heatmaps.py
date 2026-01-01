@@ -27,6 +27,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from ag_sar import AGSAR, AGSARConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from eval.metrics import gini_coefficient
+from eval.experiment_utils import safe_json_value
 
 
 # Test prompts for head analysis
@@ -183,23 +185,14 @@ def analyze_layer_contributions(
     layer_centrality = {i: [] for i in layer_indices}
 
     for prompt, response in test_samples:
-        # Get relevance
+        # Get relevance from compute_uncertainty (uses cached forward pass)
         details = ag_sar.compute_uncertainty(prompt, response, return_details=True)
+        relevance = details['relevance'][0].cpu().numpy()
 
-        # The extractor stores Q/K for semantic layers
-        # We can compute attention and centrality per layer
-        with torch.no_grad():
-            text = prompt + response
-            inputs = ag_sar.tokenizer(text, return_tensors="pt").to("cuda")
-
-            # Get Q/K from extractor (already computed in compute_uncertainty)
-            # For now, use aggregate statistics
-            relevance = details['relevance'][0].cpu().numpy()
-
-            # Attribute relevance equally to each semantic layer (simplified)
-            # In reality, need to modify extractor to return per-layer data
-            for layer_idx in layer_indices:
-                layer_centrality[layer_idx].append(np.mean(relevance))
+        # Attribute relevance equally to each semantic layer (simplified)
+        # In reality, need to modify extractor to return per-layer data
+        for layer_idx in layer_indices:
+            layer_centrality[layer_idx].append(np.mean(relevance))
 
     # Compute statistics per layer
     layer_stats = {}
@@ -213,17 +206,6 @@ def analyze_layer_contributions(
         }
 
     return layer_stats
-
-
-def gini_coefficient(x: np.ndarray) -> float:
-    """Compute Gini coefficient."""
-    x = np.abs(x).flatten()
-    if len(x) == 0 or np.sum(x) == 0:
-        return 0.0
-    sorted_x = np.sort(x)
-    n = len(x)
-    cumsum = np.cumsum(sorted_x)
-    return (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n
 
 
 def run_architecture_heatmaps(
@@ -266,7 +248,7 @@ def run_architecture_heatmaps(
 
     if save_results:
         # Convert numpy types for JSON
-        json_results = convert_to_json_serializable(results)
+        json_results = safe_json_value(results)
         with open(results_dir / 'exp12_architecture_heatmaps.json', 'w') as f:
             json.dump(json_results, f, indent=2)
         print(f"\nResults saved to: {results_dir / 'exp12_architecture_heatmaps.json'}")
@@ -275,23 +257,6 @@ def run_architecture_heatmaps(
         plot_architecture_comparison(results, results_dir)
 
     return results
-
-
-def convert_to_json_serializable(obj):
-    """Convert numpy types to Python native types."""
-    if isinstance(obj, dict):
-        return {k: convert_to_json_serializable(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_to_json_serializable(v) for v in obj]
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, (np.int64, np.int32)):
-        return int(obj)
-    elif isinstance(obj, (np.float64, np.float32)):
-        return float(obj)
-    elif isinstance(obj, np.bool_):
-        return bool(obj)
-    return obj
 
 
 def plot_architecture_comparison(results: Dict, save_dir: Path):

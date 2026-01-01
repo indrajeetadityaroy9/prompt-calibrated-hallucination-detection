@@ -303,7 +303,8 @@ class AGSAR:
                 'value_norms': aggregated_value_norms,
                 'response_start': response_start,
                 'input_ids': input_ids,
-                'attention_mask': attention_mask
+                'attention_mask': attention_mask,
+                'logits': logits,  # Include for downstream surprisal computation
             }
             # Include per-head contributions for head specialization analysis
             if per_head_contrib is not None:

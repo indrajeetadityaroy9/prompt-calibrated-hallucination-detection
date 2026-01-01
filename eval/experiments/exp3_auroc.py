@@ -32,25 +32,7 @@ from ..metrics.auroc import (
     plot_roc_curve,
     compute_optimal_threshold
 )
-
-
-def compute_rouge_l(prediction: str, reference: str) -> float:
-    """
-    Compute ROUGE-L score between prediction and reference.
-    """
-    try:
-        from rouge_score import rouge_scorer
-        scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
-        scores = scorer.score(reference, prediction)
-        return scores['rougeL'].fmeasure
-    except ImportError:
-        # Fallback: simple overlap ratio
-        pred_tokens = set(prediction.lower().split())
-        ref_tokens = set(reference.lower().split())
-        if len(pred_tokens) == 0:
-            return 0.0
-        overlap = len(pred_tokens & ref_tokens)
-        return overlap / max(len(pred_tokens), len(ref_tokens))
+from ..metrics.rouge import compute_rouge_l
 
 
 def run_auroc_experiment(
