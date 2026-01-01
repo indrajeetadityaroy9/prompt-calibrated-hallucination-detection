@@ -16,21 +16,13 @@ Example:
 from .config import AGSARConfig
 from .utils import enable_tf32, get_model_dtype, get_model_device, apply_attention_mask, safe_normalize
 from .attention_extractor import AttentionExtractor
-from .head_filter import (
-    compute_attention_entropy,
-    compute_head_entropy,
-    filter_heads_by_entropy,
-)
-from .attention_graph import (
-    add_residual_connection,
-    compute_attention_rollout,
-    build_global_attention_graph,
-)
 from .centrality import (
     power_iteration,
+    matrix_free_power_iteration,
     compute_sink_aware_centrality,
     aggregate_value_norms,
 )
+from .kernels import centrality_flash_fwd
 from .uncertainty import (
     compute_token_entropy,
     normalize_relevance,
@@ -54,18 +46,12 @@ __all__ = [
     "safe_normalize",
     # Attention extraction
     "AttentionExtractor",
-    # Head filtering
-    "compute_attention_entropy",
-    "compute_head_entropy",
-    "filter_heads_by_entropy",
-    # Graph construction
-    "add_residual_connection",
-    "compute_attention_rollout",
-    "build_global_attention_graph",
-    # Centrality
+    # Centrality (matrix-free via Triton)
     "power_iteration",
+    "matrix_free_power_iteration",
     "compute_sink_aware_centrality",
     "aggregate_value_norms",
+    "centrality_flash_fwd",
     # Uncertainty (GSE)
     "compute_token_entropy",
     "normalize_relevance",

@@ -26,8 +26,6 @@ if TYPE_CHECKING:
 from .config import AGSARConfig
 from .utils import enable_tf32, get_model_dtype, get_model_device
 from .attention_extractor import AttentionExtractor
-from .head_filter import filter_heads_by_entropy
-from .attention_graph import build_global_attention_graph
 from .centrality import compute_sink_aware_centrality, aggregate_value_norms
 from .uncertainty import (
     compute_token_entropy,
@@ -193,8 +191,6 @@ class AGSAR:
                     'relevance': torch.tensor([[]], device=self.device),
                     'centrality': torch.tensor([[]], device=self.device),
                     'value_norms': torch.tensor([[]], device=self.device),
-                    'global_attention': torch.tensor([[[]]], device=self.device),
-                    'head_mask': torch.tensor([], device=self.device),
                     'response_start': 0,
                     'input_ids': torch.tensor([[]], device=self.device),
                     'attention_mask': torch.tensor([[]], device=self.device)
@@ -215,16 +211,14 @@ class AGSAR:
                     'relevance': torch.zeros(1, seq_len, device=self.device, dtype=self.dtype),
                     'centrality': torch.zeros(1, seq_len, device=self.device, dtype=self.dtype),
                     'value_norms': torch.zeros(1, seq_len, device=self.device, dtype=self.dtype),
-                    'global_attention': torch.zeros(1, seq_len, seq_len, device=self.device, dtype=self.dtype),
-                    'head_mask': torch.tensor([], device=self.device),
                     'response_start': response_start,
                     'input_ids': input_ids,
                     'attention_mask': attention_mask
                 }
             return 0.0
 
-        # Forward pass with attention extraction
-        attention_weights, value_norms, model_output = self.extractor.extract(
+        # Matrix-free extraction: get Q/K stacks without O(N^2) attention matrices
+        Q_stack, K_stack, value_norms, model_output = self.extractor.extract_semantic_qk(
             input_ids=input_ids,
             attention_mask=attention_mask,
             use_flash_attn=self.config.use_flash_attn
@@ -233,24 +227,6 @@ class AGSAR:
         # Get logits for entropy computation, cast to target dtype
         logits = model_output.logits.to(self.dtype)
 
-        # Filter heads by entropy (optional - improves signal quality)
-        filtered_weights, head_mask = filter_heads_by_entropy(
-            attention_weights,
-            entropy_low=self.config.entropy_threshold_low,
-            entropy_high=self.config.entropy_threshold_high,
-            attention_mask=attention_mask
-        )
-
-        # Build global attention graph
-        global_attention = build_global_attention_graph(
-            attention_weights,
-            attention_mask=attention_mask,
-            semantic_layers=len(self._semantic_layer_indices),
-            residual_weight=self.config.residual_weight,
-            head_aggregation='mean',
-            use_rollout=True
-        ).to(self.dtype)
-
         # Aggregate value norms across layers and heads
         aggregated_value_norms = aggregate_value_norms(
             value_norms,
@@ -258,13 +234,15 @@ class AGSAR:
             aggregation='mean'
         ).to(self.dtype)
 
-        # Compute sink-aware centrality
+        # Compute sink-aware centrality via matrix-free Triton kernel
         relevance, centrality = compute_sink_aware_centrality(
-            global_attention,
-            aggregated_value_norms,
+            value_norms=aggregated_value_norms,
             attention_mask=attention_mask,
             num_iterations=self.config.power_iteration_steps,
-            tol=self.config.power_iteration_tol
+            tol=self.config.power_iteration_tol,
+            Q_stack=Q_stack,
+            K_stack=K_stack,
+            residual_weight=self.config.residual_weight,
         )
 
         # Create response mask (only compute entropy on response tokens)
@@ -291,8 +269,6 @@ class AGSAR:
                 'relevance': relevance,
                 'centrality': centrality,
                 'value_norms': aggregated_value_norms,
-                'global_attention': global_attention,
-                'head_mask': head_mask,
                 'response_start': response_start,
                 'input_ids': input_ids,
                 'attention_mask': attention_mask

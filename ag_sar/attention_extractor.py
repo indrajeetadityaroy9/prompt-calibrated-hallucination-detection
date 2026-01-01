@@ -312,6 +312,103 @@ class AttentionExtractor:
             output
         )
 
+    @torch.inference_mode()
+    def extract_semantic_qk(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        use_flash_attn: bool = True,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[int, torch.Tensor], Any]:
+        """
+        Extract stacked Q/K vectors for matrix-free centrality computation.
+
+        Unlike extract(), this does NOT call reconstruct_attention() and
+        does NOT create O(S^2) attention matrices. This is the key to
+        the matrix-free centrality approach.
+
+        The method:
+        1. Runs forward pass with hooks registered (captures Q, K, V norms)
+        2. Stacks Q/K from all registered layers
+        3. Returns value_norms for sink-aware weighting
+
+        Args:
+            input_ids: (B, S) input tokens
+            attention_mask: (B, S) padding mask
+            use_flash_attn: Enable Flash Attention context
+
+        Returns:
+            Q_stack: (B, L*H, S, D) stacked queries from semantic layers
+            K_stack: (B, L*H, S, D) stacked keys from semantic layers
+            value_norms: Dict[layer_idx, (B, H, S)] value norms per layer
+            model_output: Model forward output with logits
+        """
+        self.clear_cache()
+
+        # Move inputs to model device with async transfer
+        input_ids = input_ids.to(self.device, non_blocking=True)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(self.device, non_blocking=True)
+
+        # Run forward pass (hooks capture Q, K, V norms)
+        if use_flash_attn:
+            try:
+                from torch.nn.attention import sdpa_kernel, SDPBackend
+                with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                    output = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        output_attentions=False,
+                        return_dict=True
+                    )
+            except ImportError:
+                if hasattr(torch.backends.cuda, 'sdp_kernel'):
+                    with torch.backends.cuda.sdp_kernel(
+                        enable_flash=True,
+                        enable_math=False,
+                        enable_mem_efficient=False
+                    ):
+                        output = self.model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            output_attentions=False,
+                            return_dict=True
+                        )
+                else:
+                    output = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        output_attentions=False,
+                        return_dict=True
+                    )
+        else:
+            output = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_attentions=False,
+                return_dict=True
+            )
+
+        # Stack Q/K from all registered layers (NO attention reconstruction!)
+        Q_list = []
+        K_list = []
+
+        for layer_idx in sorted(self.layers):
+            if layer_idx in self._query_states:
+                Q_list.append(self._query_states[layer_idx])  # (B, H, S, D)
+                K_list.append(self._key_states[layer_idx])    # (B, H, S, D)
+
+        if not Q_list:
+            raise RuntimeError(
+                "No Q/K states captured. Ensure hooks are registered "
+                "and layers are correctly specified."
+            )
+
+        # Stack along head dimension: (B, L*H, S, D)
+        Q_stack = torch.cat(Q_list, dim=1)
+        K_stack = torch.cat(K_list, dim=1)
+
+        return Q_stack, K_stack, dict(self._value_norms), output
+
     @property
     def extracted_layers(self) -> List[int]:
         """Return list of layer indices that have been extracted."""

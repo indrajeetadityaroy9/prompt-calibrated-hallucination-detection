@@ -26,7 +26,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "torch>=2.0",
+    "torch>=2.2",
+    "triton>=2.1",
     "transformers>=4.30",
     "numpy>=1.20",
 ]

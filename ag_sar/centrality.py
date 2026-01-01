@@ -1,8 +1,9 @@
 """
 Sink-aware eigenvector centrality computation.
 
-CRITICAL: Uses pure PyTorch power iteration to avoid NetworkX CPU bottleneck.
-NetworkX would require tensor-to-list conversions causing 100ms+ latency.
+Supports two computation modes:
+1. Matrix-based (legacy): Uses explicit O(N^2) attention graph
+2. Matrix-free (Triton): Uses O(N) memory via Flash-style kernel
 
 Key formula: R(t_i) = C_eigen(t_i) × ||v_i||_2
 
@@ -14,6 +15,7 @@ from typing import Dict, Optional, Tuple
 import torch
 
 from .utils import apply_attention_mask
+from .kernels.centrality_flash import centrality_flash_fwd
 
 
 def power_iteration(
@@ -67,12 +69,93 @@ def power_iteration(
     return centrality / centrality.sum(dim=-1, keepdim=True).clamp(min=1e-10)
 
 
+def matrix_free_power_iteration(
+    Q_stack: torch.Tensor,
+    K_stack: torch.Tensor,
+    num_iterations: int = 3,
+    residual_weight: float = 0.5,
+    tol: float = 1e-4,
+    attention_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Compute eigenvector centrality via matrix-free power iteration.
+
+    Uses Triton kernel to avoid O(N^2) attention matrix materialization.
+    This is the core of the "Flash Centrality" approach.
+
+    Algorithm per iteration:
+        1. per_head_out = triton_kernel(Q, K, v)  # Attention-weighted sum
+        2. attn_contrib = mean(per_head_out, dim=heads)
+        3. v_next = (1 - residual_weight) * attn_contrib + residual_weight * v
+        4. v_next = normalize(v_next)
+
+    The residual connection (step 3) prevents centrality collapse on early
+    tokens in causal attention, equivalent to adding identity matrix
+    in the matrix-based approach.
+
+    Args:
+        Q_stack: Stacked query vectors from semantic layers (B, L*H, S, D)
+        K_stack: Stacked key vectors from semantic layers (B, L*H, S, D)
+        num_iterations: Power iteration steps (3 typically sufficient)
+        residual_weight: Weight for self-attention residual (0.5 = equal mix)
+        tol: Convergence tolerance for early stopping
+        attention_mask: (B, S) padding mask (1=valid, 0=padding)
+
+    Returns:
+        centrality: (B, S) normalized eigenvector centrality
+    """
+    B, total_heads, S, D = Q_stack.shape
+    device = Q_stack.device
+    dtype = Q_stack.dtype
+
+    # Initialize uniform centrality
+    v = torch.ones(B, S, device=device, dtype=dtype) / S
+
+    # Apply mask to initial vector
+    if attention_mask is not None:
+        v = v * attention_mask.float()
+        v = v / v.sum(dim=-1, keepdim=True).clamp(min=1e-10)
+
+    for _ in range(num_iterations):
+        # Triton kernel: attention-weighted sum per head
+        # per_head_out[b, h, i] = sum_j softmax(Q@K.T)[i,j] * v[j]
+        per_head_out = centrality_flash_fwd(Q_stack, K_stack, v)  # (B, L*H, S)
+
+        # Aggregate across all heads (mean pooling)
+        attn_contrib = per_head_out.mean(dim=1)  # (B, S)
+
+        # Apply residual connection: v_next = (1-w) * Av + w * v
+        # This prevents centrality collapse on early tokens
+        v_next = (1 - residual_weight) * attn_contrib + residual_weight * v
+
+        # Apply mask
+        if attention_mask is not None:
+            v_next = v_next * attention_mask.float()
+
+        # Normalize to sum=1
+        v_next = v_next / v_next.sum(dim=-1, keepdim=True).clamp(min=1e-10)
+
+        # Early stopping check
+        if (v_next - v).abs().max() < tol:
+            v = v_next
+            break
+
+        v = v_next
+
+    return v
+
+
 def compute_sink_aware_centrality(
-    attention_graph: torch.Tensor,
     value_norms: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
-    num_iterations: int = 100,
-    tol: float = 1e-6
+    num_iterations: int = 3,
+    tol: float = 1e-4,
+    # Matrix-free path (preferred)
+    Q_stack: Optional[torch.Tensor] = None,
+    K_stack: Optional[torch.Tensor] = None,
+    residual_weight: float = 0.5,
+    # Legacy matrix-based path
+    attention_graph: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute sink-aware relevance: R(t_i) = C_eigen(t_i) × ||v_i||_2
@@ -81,30 +164,58 @@ def compute_sink_aware_centrality(
     high centrality but low value norms (mechanistically passive tokens
     like <s>, punctuation, etc.).
 
+    Supports two computation modes:
+    1. Matrix-free (Triton): Pass Q_stack, K_stack for O(N) memory
+    2. Matrix-based (legacy): Pass attention_graph for O(N^2) memory
+
     Args:
-        attention_graph: (batch, seq, seq) global attention matrix
         value_norms: (batch, seq) L2 norm of value vectors per token
         attention_mask: (batch, seq) valid token mask (1=valid, 0=padding)
         num_iterations: Power iteration steps
         tol: Convergence tolerance
+        Q_stack: (B, L*H, S, D) stacked queries for matrix-free path
+        K_stack: (B, L*H, S, D) stacked keys for matrix-free path
+        residual_weight: Weight for self-attention in matrix-free path
+        attention_graph: (batch, seq, seq) for legacy matrix-based path
 
     Returns:
         relevance: (batch, seq) sink-aware relevance scores
         centrality: (batch, seq) raw eigenvector centrality (before sink correction)
     """
-    # Apply mask to attention graph first (with normalization)
-    if attention_mask is not None:
-        attention_graph = apply_attention_mask(
-            attention_graph, attention_mask, normalize=True
-        )
+    # Determine which path to use
+    use_matrix_free = Q_stack is not None and K_stack is not None
 
-    # Compute eigenvector centrality
-    centrality = power_iteration(
-        attention_graph,
-        num_iterations=num_iterations,
-        tol=tol,
-        normalize_adjacency=False  # Already normalized above
-    )
+    if use_matrix_free:
+        # Matrix-free path using Triton kernel
+        centrality = matrix_free_power_iteration(
+            Q_stack=Q_stack,
+            K_stack=K_stack,
+            num_iterations=num_iterations,
+            residual_weight=residual_weight,
+            tol=tol,
+            attention_mask=attention_mask,
+        )
+    else:
+        # Legacy matrix-based path
+        if attention_graph is None:
+            raise ValueError(
+                "Must provide either (Q_stack, K_stack) for matrix-free path "
+                "or attention_graph for legacy matrix-based path"
+            )
+
+        # Apply mask to attention graph first (with normalization)
+        if attention_mask is not None:
+            attention_graph = apply_attention_mask(
+                attention_graph, attention_mask, normalize=True
+            )
+
+        # Compute eigenvector centrality
+        centrality = power_iteration(
+            attention_graph,
+            num_iterations=num_iterations,
+            tol=tol,
+            normalize_adjacency=False  # Already normalized above
+        )
 
     # Sink-aware relevance: multiply centrality by value norms
     # This naturally down-weights attention sinks (high C, low ||v||)

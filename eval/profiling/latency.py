@@ -12,8 +12,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from contextlib import contextmanager
 
-from ag_sar.centrality import power_iteration
-from ag_sar.gse import compute_graph_shifted_entropy
+from ag_sar.centrality import power_iteration, matrix_free_power_iteration
+from ag_sar.uncertainty import compute_graph_shifted_entropy
 
 
 @dataclass
@@ -106,9 +106,8 @@ def profile_ag_sar_components(
 
     Components measured:
     1. forward_pass: Model forward with hook execution
-    2. reconstruction: Q/K attention reconstruction
-    3. centrality: Power iteration for eigenvector centrality
-    4. gse_computation: Graph-Shifted Entropy calculation
+    2. triton_centrality: Matrix-free centrality via Triton kernel
+    3. gse_computation: Graph-Shifted Entropy calculation
 
     Args:
         ag_sar: AGSAR instance
@@ -135,7 +134,7 @@ def profile_ag_sar_components(
     for _ in range(num_runs):
         ag_sar.extractor.clear_cache()
 
-        # 1. Forward pass with hooks
+        # 1. Forward pass with hooks (captures Q, K, V norms)
         with profiler.measure("1_forward_pass"):
             with torch.inference_mode():
                 output = ag_sar.model(
@@ -145,37 +144,32 @@ def profile_ag_sar_components(
                     return_dict=True
                 )
 
-        # 2. Q/K Reconstruction (simulate what happens in hooks)
-        with profiler.measure("2_reconstruction"):
-            # Get Q, K from hooks (they're already stored)
-            for layer_idx in ag_sar._semantic_layer_indices:
-                if layer_idx in ag_sar.extractor._query_states:
-                    Q = ag_sar.extractor._query_states[layer_idx]
-                    K = ag_sar.extractor._key_states[layer_idx]
-                    scale = 1.0 / math.sqrt(ag_sar.extractor.head_dim)
-                    attn_scores = torch.matmul(Q, K.transpose(-1, -2)) * scale
-                    seq_len = Q.size(2)
-                    causal_mask = torch.triu(
-                        torch.ones(seq_len, seq_len, device=device, dtype=torch.bool),
-                        diagonal=1
-                    )
-                    attn_scores = attn_scores.masked_fill(causal_mask, float('-inf'))
-                    _ = F.softmax(attn_scores, dim=-1, dtype=torch.float32)
-
-        # 3. Power iteration (centrality)
-        # Create dummy attention graph
+        # 2. Matrix-free centrality via Triton kernel
+        # Stack Q/K from semantic layers
         batch_size = input_ids.size(0)
         seq_len = input_ids.size(1)
-        dummy_graph = torch.randn(batch_size, seq_len, seq_len, device=device, dtype=dtype).softmax(dim=-1)
+        num_heads = ag_sar.extractor.num_heads
+        head_dim = ag_sar.extractor.head_dim
+        num_layers = len(ag_sar._semantic_layer_indices)
 
-        with profiler.measure("3_centrality"):
-            _ = power_iteration(dummy_graph, num_iterations=3)
+        # Create dummy Q/K stacks for profiling
+        Q_stack = torch.randn(
+            batch_size, num_layers * num_heads, seq_len, head_dim,
+            device=device, dtype=dtype
+        )
+        K_stack = torch.randn(
+            batch_size, num_layers * num_heads, seq_len, head_dim,
+            device=device, dtype=dtype
+        )
 
-        # 4. GSE computation
+        with profiler.measure("2_triton_centrality"):
+            _ = matrix_free_power_iteration(Q_stack, K_stack, num_iterations=3)
+
+        # 3. GSE computation
         dummy_entropy = torch.rand(batch_size, seq_len, device=device, dtype=dtype)
         dummy_relevance = torch.rand(batch_size, seq_len, device=device, dtype=dtype)
 
-        with profiler.measure("4_gse_computation"):
+        with profiler.measure("3_gse_computation"):
             _ = compute_graph_shifted_entropy(dummy_entropy, dummy_relevance)
 
     return profiler.get_results()

@@ -86,7 +86,8 @@ class TestSinkAwareCentrality:
         value_norms = torch.rand(batch_size, seq_len) + 0.1
 
         relevance, centrality = compute_sink_aware_centrality(
-            attention_graph, value_norms
+            value_norms=value_norms,
+            attention_graph=attention_graph
         )
 
         assert relevance.shape == (batch_size, seq_len)
@@ -107,7 +108,8 @@ class TestSinkAwareCentrality:
         value_norms = torch.tensor([[0.01, 1.0, 1.0, 1.0]])
 
         relevance, centrality = compute_sink_aware_centrality(
-            attention_graph, value_norms
+            value_norms=value_norms,
+            attention_graph=attention_graph
         )
 
         # Node 0 should have relatively high centrality
@@ -123,7 +125,9 @@ class TestSinkAwareCentrality:
         mask = torch.tensor([[1, 1, 0, 0]])
 
         relevance, centrality = compute_sink_aware_centrality(
-            attention_graph, value_norms, attention_mask=mask
+            value_norms=value_norms,
+            attention_graph=attention_graph,
+            attention_mask=mask
         )
 
         # Masked positions should have zero relevance
