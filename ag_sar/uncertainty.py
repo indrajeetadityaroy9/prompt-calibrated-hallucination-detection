@@ -216,6 +216,116 @@ def compute_graph_shifted_surprisal(
     return gss
 
 
+def compute_bounded_surprisal(
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    beta: float = 5.0,
+    attention_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Compute soft-clamped bounded surprisal for MC-SS.
+
+    S_bounded(x_t) = tanh(-log P(x_t | x_{<t}) / β)
+
+    This bounds surprisal to [0, 1], preventing extreme values (when P → 0)
+    from dominating the MC-SS metric. The β parameter controls the softness
+    of the clamp - higher β means softer clamp (values stay closer to linear).
+
+    Args:
+        logits: (batch, seq, vocab) model output logits
+        input_ids: (batch, seq) actual token IDs
+        beta: Softness parameter for tanh clamp (default 5.0)
+               Higher β = softer clamp, values closer to linear
+               Lower β = harder clamp, saturates faster
+        attention_mask: (batch, seq) valid token mask
+
+    Returns:
+        bounded_surprisal: (batch, seq) in range [0, 1]
+    """
+    # Get raw surprisal using existing function
+    raw_surprisal = compute_token_surprisal(logits, input_ids, attention_mask=None)
+
+    # Apply soft clamp: tanh(S / β)
+    # This maps [0, ∞) → [0, 1)
+    # tanh(x) saturates around x ≈ 2-3, so with β=5, saturation around S=10-15
+    bounded = torch.tanh(raw_surprisal / beta)
+
+    # Apply mask if provided
+    if attention_mask is not None:
+        bounded = bounded * attention_mask.float()
+
+    return bounded
+
+
+def compute_manifold_consistent_spectral_surprisal(
+    bounded_surprisal: torch.Tensor,
+    centrality: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    penalty_weight: float = 1.0,
+) -> torch.Tensor:
+    """
+    Compute Manifold-Consistent Spectral Surprisal (MC-SS).
+
+    MC-SS = Mean( S_bounded + λ × (1 - v_norm) )
+
+    Where:
+    - S_bounded = tanh(-log P / β) is soft-clamped surprisal [0, 1]
+    - v_norm = MAX-normalized centrality [0, 1]
+    - (1 - v_norm) = structural penalty (ungrounded → 1, grounded → 0)
+    - λ = penalty_weight balancing surprisal and structure
+
+    CRITICAL: Uses ADDITIVE formulation (not multiplicative) to catch
+    "Confident Lies" - tokens with low surprisal but low centrality.
+
+    Multiplicative S × (1-v) fails when S ≈ 0: low × high = low (False Negative)
+    Additive S + λ(1-v) catches all cases:
+        - Confident Fact: 0.1 + 0 = 0.1 (Low) ✓
+        - Confident Lie: 0.1 + 0.98 = 1.08 (High) ✓
+        - Confused Lie: 0.9 + 0.98 = 1.88 (Very High) ✓
+
+    CRITICAL: Uses MAX-normalization (not L1) for centrality to preserve
+    discriminative power. With L1 (sum=1), avg centrality ≈ 0.01 for N=100,
+    so (1 - 0.01) ≈ 0.99 for all tokens - signal drowned out!
+
+    Args:
+        bounded_surprisal: (batch, seq) soft-clamped surprisal in [0, 1]
+        centrality: (batch, seq) Hebbian-filtered centrality (L1 normalized)
+        attention_mask: (batch, seq) valid token mask
+        penalty_weight: λ weight for additive penalty term (default 1.0)
+
+    Returns:
+        mcss: (batch,) MC-SS score per sequence
+    """
+    # 1. Mask padding before finding max (to avoid max in padding)
+    if attention_mask is not None:
+        centrality = centrality * attention_mask.float()
+
+    # 2. MAX-Normalize centrality (NOT L1!) - Critical fix
+    # This preserves discriminative power between grounded/ungrounded tokens
+    # With L1, all tokens have similar (1-v) ≈ 0.99, drowning the signal
+    v_max = centrality.max(dim=-1, keepdim=True).values + 1e-10
+    v_norm = centrality / v_max  # Range [0, 1]
+
+    # 3. Compute Structure Penalty (inverted centrality)
+    # Grounded tokens (high centrality, v=1) → penalty = 0
+    # Ungrounded tokens (low centrality, v≈0) → penalty ≈ 1
+    penalty = 1.0 - v_norm
+
+    # 4. ADDITIVE Fusion (catches Confident Lies)
+    # Multiplicative S*penalty fails when S≈0 (confident) but penalty≈1 (ungrounded)
+    # Additive ensures ungrounded tokens always add uncertainty
+    score_token = bounded_surprisal + (penalty_weight * penalty)
+
+    # 5. Average over valid tokens
+    if attention_mask is not None:
+        valid_tokens = attention_mask.sum(dim=-1).clamp(min=1)
+        mcss = (score_token * attention_mask.float()).sum(dim=-1) / valid_tokens
+    else:
+        mcss = score_token.mean(dim=-1)
+
+    return mcss
+
+
 def normalize_relevance(
     relevance: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,

@@ -16,7 +16,8 @@ class EvalSample:
 
 def load_truthfulqa(
     split: str = "validation",
-    max_samples: Optional[int] = None
+    max_samples: Optional[int] = None,
+    offset: int = 50  # Skip first N samples (reserved for calibration)
 ) -> List[EvalSample]:
     """
     Load TruthfulQA dataset for hallucination detection.
@@ -24,6 +25,7 @@ def load_truthfulqa(
     Args:
         split: Dataset split to load
         max_samples: Maximum number of samples (None = all)
+        offset: Skip first N samples (default 50 for calibration hold-out)
 
     Returns:
         List of EvalSample with prompt, response, and factuality label
@@ -33,9 +35,14 @@ def load_truthfulqa(
     dataset = load_dataset("truthful_qa", "generation", split=split)
 
     samples = []
+    sample_count = 0
     for i, item in enumerate(dataset):
-        if max_samples and i >= max_samples:
+        # Skip calibration samples
+        if i < offset:
+            continue
+        if max_samples and sample_count >= max_samples:
             break
+        sample_count += 1
 
         # Use best answer as factual response
         prompt = item['question']
@@ -64,7 +71,8 @@ def load_truthfulqa(
 
 def load_triviaqa(
     split: str = "validation",
-    max_samples: Optional[int] = None
+    max_samples: Optional[int] = None,
+    seed: int = 42
 ) -> List[EvalSample]:
     """
     Load TriviaQA dataset for hallucination detection sanity check.
@@ -76,11 +84,16 @@ def load_triviaqa(
     Args:
         split: Dataset split to load ("train" or "validation")
         max_samples: Maximum number of samples (None = all)
+        seed: Random seed for deterministic hallucination sample generation
 
     Returns:
         List of EvalSample with prompt, response, and factuality label
     """
     from datasets import load_dataset
+    import random
+
+    # Create seeded RNG for deterministic behavior
+    rng = random.Random(seed)
 
     # Load TriviaQA RC (reading comprehension) task
     dataset = load_dataset("trivia_qa", "rc", split=split)
@@ -120,13 +133,12 @@ def load_triviaqa(
 
     # Second pass: create hallucination samples by shuffling answers
     if len(samples) > 1:
-        import random
         correct_answers = [s.response.strip() for s in samples]
         num_correct = len(correct_answers)
 
         for i, sample in enumerate(list(samples)):  # Iterate over copy
-            # Pick a random wrong answer from another question
-            offset = random.randint(1, num_correct - 1)
+            # Pick a random wrong answer from another question (deterministic)
+            offset = rng.randint(1, num_correct - 1)
             wrong_idx = (i + offset) % num_correct
             wrong_answer = correct_answers[wrong_idx]
 
@@ -148,7 +160,8 @@ def load_triviaqa(
 
 def load_coqa(
     split: str = "validation",
-    max_samples: Optional[int] = None
+    max_samples: Optional[int] = None,
+    seed: int = 42
 ) -> List[EvalSample]:
     """
     Load CoQA dataset for conversational QA hallucination detection.
@@ -160,12 +173,16 @@ def load_coqa(
     Args:
         split: Dataset split ("train" or "validation")
         max_samples: Maximum number of samples (None = all)
+        seed: Random seed for deterministic hallucination sample generation
 
     Returns:
         List of EvalSample with prompt, response, and factuality label
     """
     from datasets import load_dataset
     import random
+
+    # Create seeded RNG for deterministic behavior
+    rng = random.Random(seed)
 
     # Load CoQA dataset
     dataset = load_dataset("coqa", split=split)
@@ -207,8 +224,8 @@ def load_coqa(
     # Second pass: create hallucination samples
     if len(samples) > 1 and len(all_answers) > 1:
         for i, sample in enumerate(list(samples)):
-            # Pick a random wrong answer from another story
-            offset = random.randint(1, len(all_answers) - 1)
+            # Pick a random wrong answer from another story (deterministic)
+            offset = rng.randint(1, len(all_answers) - 1)
             wrong_idx = (i + offset) % len(all_answers)
             wrong_answer = all_answers[wrong_idx]
 
@@ -332,16 +349,25 @@ def generate_synthetic_samples(
 class DataLoader:
     """Batch iterator for evaluation samples."""
 
-    def __init__(self, samples: List[EvalSample], batch_size: int = 1, shuffle: bool = False):
+    def __init__(
+        self,
+        samples: List[EvalSample],
+        batch_size: int = 1,
+        shuffle: bool = False,
+        seed: int = 42
+    ):
         self.samples = samples
         self.batch_size = batch_size
         self.shuffle = shuffle
+        self.seed = seed
 
     def __iter__(self) -> Iterator[List[EvalSample]]:
         indices = list(range(len(self.samples)))
         if self.shuffle:
             import random
-            random.shuffle(indices)
+            # Use seeded RNG for deterministic shuffling
+            rng = random.Random(self.seed)
+            rng.shuffle(indices)
 
         for i in range(0, len(indices), self.batch_size):
             batch_indices = indices[i:i + self.batch_size]

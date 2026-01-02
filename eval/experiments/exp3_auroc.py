@@ -175,7 +175,7 @@ def run_auroc_experiment(
     if sar_auroc > 0:
         success = success and (ag_sar_auroc >= sar_auroc - 0.02)  # Allow small margin
 
-    results['success'] = success
+    results['success'] = bool(success)  # Convert numpy.bool_ to Python bool for JSON
     results['success_criteria'] = 'AG-SAR AUROC > PE AUROC and AG-SAR ≥ Original SAR'
 
     print(f"\n{'=' * 60}")

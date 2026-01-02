@@ -114,7 +114,7 @@ class TestMatrixFreePowerIteration:
         from ag_sar.centrality import matrix_free_power_iteration
 
         Q_stack, K_stack, B, S = setup_qk_stacks
-        centrality = matrix_free_power_iteration(Q_stack, K_stack)
+        centrality, _ = matrix_free_power_iteration(Q_stack, K_stack)
 
         assert centrality.shape == (B, S), f"Expected {(B, S)}, got {centrality.shape}"
 
@@ -123,7 +123,7 @@ class TestMatrixFreePowerIteration:
         from ag_sar.centrality import matrix_free_power_iteration
 
         Q_stack, K_stack, B, S = setup_qk_stacks
-        centrality = matrix_free_power_iteration(Q_stack, K_stack)
+        centrality, _ = matrix_free_power_iteration(Q_stack, K_stack)
 
         sums = centrality.sum(dim=-1)
         assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
@@ -134,15 +134,16 @@ class TestMatrixFreePowerIteration:
 
         Q_stack, K_stack, B, S = setup_qk_stacks
 
-        c1 = matrix_free_power_iteration(Q_stack, K_stack, num_iterations=1)
-        c3 = matrix_free_power_iteration(Q_stack, K_stack, num_iterations=3)
-        c10 = matrix_free_power_iteration(Q_stack, K_stack, num_iterations=10)
+        c1, _ = matrix_free_power_iteration(Q_stack, K_stack, num_iterations=1)
+        c3, _ = matrix_free_power_iteration(Q_stack, K_stack, num_iterations=3)
+        c10, _ = matrix_free_power_iteration(Q_stack, K_stack, num_iterations=10)
 
         # More iterations should converge (c3 closer to c10 than c1 is)
+        # Use <= because algorithm may converge in 1 iteration for some inputs
         diff_1_10 = (c1 - c10).abs().max()
         diff_3_10 = (c3 - c10).abs().max()
 
-        assert diff_3_10 < diff_1_10, "More iterations should converge"
+        assert diff_3_10 <= diff_1_10, "More iterations should converge or stabilize"
 
     def test_attention_mask_support(self, setup_qk_stacks):
         """Test that attention mask zeros out padded positions."""
@@ -154,7 +155,7 @@ class TestMatrixFreePowerIteration:
         attention_mask = torch.ones(B, S, device=Q_stack.device)
         attention_mask[:, -10:] = 0
 
-        centrality = matrix_free_power_iteration(
+        centrality, _ = matrix_free_power_iteration(
             Q_stack, K_stack, attention_mask=attention_mask
         )
 
@@ -188,7 +189,7 @@ class TestSinkAwareCentrality:
 
         Q_stack, K_stack, value_norms, B, S = setup_full_inputs
 
-        relevance, centrality = compute_sink_aware_centrality(
+        relevance, centrality, _ = compute_sink_aware_centrality(
             value_norms=value_norms,
             Q_stack=Q_stack,
             K_stack=K_stack,
@@ -208,7 +209,7 @@ class TestSinkAwareCentrality:
         value_norms_sink = value_norms.clone()
         value_norms_sink[:, 0] = 0.01
 
-        relevance, centrality = compute_sink_aware_centrality(
+        relevance, centrality, _ = compute_sink_aware_centrality(
             value_norms=value_norms_sink,
             Q_stack=Q_stack,
             K_stack=K_stack,

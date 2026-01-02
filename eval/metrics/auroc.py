@@ -15,8 +15,16 @@ def compute_auroc(
     """
     Compute Area Under ROC Curve.
 
+    Label Convention:
+        - labels[i] = True means sample i IS a hallucination (positive class)
+        - labels[i] = False means sample i is factual (negative class)
+        - Higher AUROC means better hallucination detection
+
+    Note: TruthfulQA dataset uses opposite convention (label=True means factual).
+        The caller (exp3_auroc.py) inverts via: is_hallucination = not sample.label
+
     Args:
-        labels: Ground truth labels (True = hallucination/uncertain)
+        labels: Ground truth labels (True = hallucination, False = factual)
         scores: Uncertainty scores from method
         higher_score_is_positive: If True, higher score means more uncertain
 

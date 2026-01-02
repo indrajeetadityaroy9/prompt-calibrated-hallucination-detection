@@ -79,6 +79,19 @@ class AGSARConfig:
     # Llama/Mistral/Qwen use <s> as a sink - mask it out for cleaner centrality
     sink_token_count: int = 4
 
+    # MC-SS (Manifold-Consistent Spectral Surprisal) configuration
+    # Alternative uncertainty metric using Hebbian-filtered centrality
+    uncertainty_metric: str = "gse"  # Options: "gse", "gss", "mcss"
+    mcss_beta: float = 5.0  # Soft clamp for bounded surprisal: tanh(-log P / beta)
+    mcss_hebbian_tau: float = 0.1  # ReLU threshold for Hebbian prior: ReLU(sim - tau)
+    mcss_penalty_weight: float = 1.0  # λ weight for additive penalty term in MC-SS
+
+    # Truth-Head weighting (ITI-inspired)
+    # Suppresses Induction Heads that perpetuate misconceptions
+    # Weights are loaded statically at init from calibration JSON
+    use_head_weighting: bool = False
+    head_weights_path: Optional[str] = None  # Path to calibrated weights JSON
+
     def __post_init__(self):
         """Validate configuration values."""
         if not 0.0 <= self.entropy_threshold_low <= 1.0:
@@ -120,6 +133,23 @@ class AGSARConfig:
                 UserWarning
             )
 
+        # Validate MC-SS parameters
+        if self.uncertainty_metric not in ("gse", "gss", "mcss"):
+            raise ValueError(
+                f"uncertainty_metric must be 'gse', 'gss', or 'mcss', "
+                f"got {self.uncertainty_metric}"
+            )
+        if self.mcss_beta <= 0:
+            raise ValueError(f"mcss_beta must be > 0, got {self.mcss_beta}")
+        if not 0.0 <= self.mcss_hebbian_tau <= 1.0:
+            raise ValueError(
+                f"mcss_hebbian_tau must be in [0, 1], got {self.mcss_hebbian_tau}"
+            )
+        if self.mcss_penalty_weight < 0:
+            raise ValueError(
+                f"mcss_penalty_weight must be >= 0, got {self.mcss_penalty_weight}"
+            )
+
     def to_dict(self) -> dict:
         """Convert config to dictionary for serialization."""
         return {
@@ -138,6 +168,12 @@ class AGSARConfig:
             'model_architecture': self.model_architecture,
             'num_kv_heads': self.num_kv_heads,
             'sink_token_count': self.sink_token_count,
+            'uncertainty_metric': self.uncertainty_metric,
+            'mcss_beta': self.mcss_beta,
+            'mcss_hebbian_tau': self.mcss_hebbian_tau,
+            'mcss_penalty_weight': self.mcss_penalty_weight,
+            'use_head_weighting': self.use_head_weighting,
+            'head_weights_path': self.head_weights_path,
         }
 
     @classmethod

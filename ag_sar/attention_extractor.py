@@ -28,9 +28,27 @@ SDPA/Flash Attention Compatibility:
 from typing import Dict, List, Optional, Tuple, Any, Callable
 import types
 import math
+import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# Version guard for monkey-patched attention methods
+# These patches may break with major transformers updates
+try:
+    import transformers
+    _TRANSFORMERS_VERSION = tuple(int(x) for x in transformers.__version__.split('.')[:2])
+    if _TRANSFORMERS_VERSION >= (5, 0):
+        warnings.warn(
+            f"transformers {transformers.__version__} detected. "
+            "Attention monkey-patching in AG-SAR was tested with transformers 4.x. "
+            "If you encounter issues with Llama/Qwen/Mistral models, please downgrade "
+            "to transformers<5.0.0 or report the issue.",
+            UserWarning
+        )
+except (ImportError, ValueError):
+    # transformers not installed or version parsing failed
+    _TRANSFORMERS_VERSION = (0, 0)
 
 
 class AttentionExtractor:

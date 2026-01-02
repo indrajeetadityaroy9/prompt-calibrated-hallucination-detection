@@ -87,6 +87,9 @@ def _get_autotune_configs():
 def _centrality_flash_kernel(
     # Pointers to matrices
     Q_ptr, K_ptr, v_ptr, Out_ptr,
+    # Head weighting (ITI-inspired Truth-Head suppression)
+    head_weights_ptr,  # (L*H,) per-layer-head weights or dummy ptr
+    USE_HEAD_WEIGHTS: tl.constexpr,  # Whether to apply head weighting
     # Strides for Q: (B, H, S, D)
     stride_qb, stride_qh, stride_qs, stride_qd,
     # Strides for K: (B, H, S, D)
@@ -107,10 +110,16 @@ def _centrality_flash_kernel(
     Triton kernel for matrix-free attention-weighted centrality.
 
     For each query position i, computes:
-        out[i] = sum_{j <= i} softmax(Q[i] @ K[j].T / sqrt(D)) * v[j]
+        out[i] = sum_{j <= i} softmax(Q[i] @ K[j].T / sqrt(D)) * v[j] * w_h
+
+    where w_h is the per-head weight (if USE_HEAD_WEIGHTS=True).
 
     Uses online softmax (Flash Attention style) to avoid O(S^2) memory.
     Accumulators use float32 for numerical stability even with bfloat16 inputs.
+
+    Head weighting (ITI-inspired):
+    - w_h ∈ [0, 1] down-weights Induction Heads that perpetuate misconceptions
+    - Calibrated offline using TruthfulQA samples
     """
     # Program IDs
     pid_b = tl.program_id(0)  # Batch index
@@ -182,8 +191,15 @@ def _centrality_flash_kernel(
         l_new = l_i * alpha + tl.sum(beta, axis=1)
 
         # 4. Update running weighted sum
-        # acc_new = acc_old * alpha + sum(beta * v)
+        # acc_new = acc_old * alpha + sum(beta * v * w_h)
         beta_v = beta * v_block[None, :]
+
+        # Apply head weighting if enabled (ITI-style Truth-Head suppression)
+        if USE_HEAD_WEIGHTS:
+            # Load per-head weight (pid_h indexes into flattened L*H tensor)
+            head_weight = tl.load(head_weights_ptr + pid_h)
+            beta_v = beta_v * head_weight
+
         acc_new = acc_i * alpha + tl.sum(beta_v, axis=1)
 
         # 5. Update state
@@ -203,17 +219,21 @@ def centrality_flash_fwd(
     Q: torch.Tensor,  # (B, H, S, D)
     K: torch.Tensor,  # (B, H, S, D)
     v: torch.Tensor,  # (B, S)
+    head_weights: Optional[torch.Tensor] = None,  # (L*H,) per-layer-head weights
 ) -> torch.Tensor:    # (B, H, S)
     """
     Forward pass: compute attention-weighted centrality per head.
 
-    Computes Out[b,h,i] = sum_{j<=i} softmax(Q[b,h,i,:] @ K[b,h,j,:].T / sqrt(D)) * v[b,j]
+    Computes Out[b,h,i] = sum_{j<=i} softmax(Q[b,h,i,:] @ K[b,h,j,:].T / sqrt(D)) * v[b,j] * w_h
     without materializing the (S,S) attention matrix.
 
     Args:
-        Q: Query vectors (B, H, S, D)
+        Q: Query vectors (B, H, S, D) where H = L*heads_per_layer
         K: Key vectors (B, H, S, D)
         v: Current centrality vector (B, S)
+        head_weights: Optional (L*H,) per-layer-head weights in [0,1].
+            If provided, each head's contribution is scaled by its weight.
+            Used for ITI-inspired Truth-Head weighting to suppress Induction Heads.
 
     Returns:
         out: Attention-weighted centrality per head (B, H, S)
@@ -223,6 +243,7 @@ def centrality_flash_fwd(
         - Accumulators use float32 for numerical stability
         - Causal masking is built-in (j <= i)
         - Autotuned for H100 with multiple block size configurations
+        - Head weighting incurs zero overhead when disabled (compile-time conditional)
     """
     # Validate inputs
     B, H, S, D = Q.shape
@@ -231,6 +252,18 @@ def centrality_flash_fwd(
     assert Q.is_cuda, "Q must be on CUDA device"
     assert K.is_cuda, "K must be on CUDA device"
     assert v.is_cuda, "v must be on CUDA device"
+
+    # Head weights setup with dummy pointer safety
+    # CRITICAL: Triton segfaults on null pointer even with conditional guard
+    # because the compiler may speculate the load. Pass a valid dummy pointer.
+    use_head_weights = head_weights is not None
+    if use_head_weights:
+        assert head_weights.shape == (H,), f"head_weights shape {head_weights.shape} != expected {(H,)}"
+        assert head_weights.is_cuda, "head_weights must be on CUDA device"
+        head_weights_ptr = head_weights
+    else:
+        # Use v as safe dummy pointer - never actually loaded due to compile-time conditional
+        head_weights_ptr = v
 
     # Allocate output
     out = torch.empty((B, H, S), device=Q.device, dtype=Q.dtype)
@@ -246,6 +279,8 @@ def centrality_flash_fwd(
     # Launch autotuned kernel
     _centrality_flash_kernel[grid](
         Q, K, v, out,
+        # Head weighting (ITI-inspired)
+        head_weights_ptr, use_head_weights,
         # Q strides
         Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3),
         # K strides

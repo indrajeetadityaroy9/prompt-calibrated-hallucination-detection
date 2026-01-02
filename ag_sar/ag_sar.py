@@ -26,14 +26,22 @@ if TYPE_CHECKING:
 from .config import AGSARConfig
 from .utils import enable_tf32, get_model_dtype, get_model_device
 from .attention_extractor import AttentionExtractor
-from .centrality import compute_sink_aware_centrality, aggregate_value_norms
+from .centrality import (
+    compute_sink_aware_centrality,
+    aggregate_value_norms,
+    compute_hebbian_weights,
+)
 from .uncertainty import (
     compute_token_entropy,
     compute_graph_shifted_entropy,
+    compute_graph_shifted_surprisal,
+    compute_token_surprisal,
     detect_hallucination as gse_detect_hallucination,
     compute_per_token_uncertainty,
     compute_token_entropy_compiled,
     compute_gse_compiled,
+    compute_bounded_surprisal,
+    compute_manifold_consistent_spectral_surprisal,
 )
 
 
@@ -101,6 +109,11 @@ class AGSAR:
         # Register hooks
         self.extractor.register_hooks()
 
+        # Load calibrated head weights if specified (ITI-inspired Truth-Head weighting)
+        self._head_weights = None
+        if self.config.use_head_weighting and self.config.head_weights_path:
+            self._head_weights = self._load_head_weights(self.config.head_weights_path)
+
     def _detect_model_config(self) -> None:
         """Detect model architecture and set layer configuration."""
         # Get transformer block reference
@@ -134,6 +147,37 @@ class AGSAR:
         start_layer = max(0, self.num_layers - semantic_count)
         self._semantic_layer_indices = list(range(start_layer, self.num_layers))
 
+    def _load_head_weights(self, path: str) -> torch.Tensor:
+        """
+        Load calibrated head weights from JSON file.
+
+        Head weights are used for ITI-inspired Truth-Head weighting that
+        suppresses Induction Heads that perpetuate misconceptions.
+
+        Args:
+            path: Path to calibrated weights JSON file
+
+        Returns:
+            head_weights: (L*H,) tensor of per-layer-head weights in [0, 1]
+
+        Raises:
+            FileNotFoundError: If weights file doesn't exist
+            KeyError: If file doesn't contain 'head_weights' key
+        """
+        import json
+        with open(path) as f:
+            data = json.load(f)
+
+        if 'head_weights' not in data:
+            raise KeyError(f"Weights file {path} must contain 'head_weights' key")
+
+        weights = torch.tensor(
+            data['head_weights'],
+            dtype=self.dtype,
+            device=self.device
+        )
+        return weights
+
     def _tokenize(
         self,
         prompt: str,
@@ -155,11 +199,11 @@ class AGSAR:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Tokenize separately to track boundary
+        # Tokenize prompt + response together to preserve proper tokenization
+        # (GPT-style tokenizers include leading spaces as part of tokens)
         prompt_tokens = self.tokenizer.encode(prompt, add_special_tokens=True)
-        response_tokens = self.tokenizer.encode(response, add_special_tokens=False)
-
-        full_tokens = prompt_tokens + response_tokens
+        full_text = prompt + response
+        full_tokens = self.tokenizer.encode(full_text, add_special_tokens=True)
         response_start = len(prompt_tokens)
 
         input_ids = torch.tensor([full_tokens], device=self.device)
@@ -175,14 +219,20 @@ class AGSAR:
         return_details: bool = False
     ) -> Union[float, Dict[str, Any]]:
         """
-        Compute uncertainty (GSE) for a prompt-response pair.
+        Compute uncertainty for a prompt-response pair.
+
+        Supports multiple uncertainty metrics via config.uncertainty_metric:
+        - "gse" (default): Graph-Shifted Entropy
+        - "mcss": Manifold-Consistent Spectral Surprisal (catches Confident Lies)
 
         Full pipeline:
-        1. Extract attention maps + value vectors (via hooks)
-        2. Filter semantic heads (entropy threshold)
-        3. Build global attention graph (with padding mask)
-        4. Compute sink-aware centrality (power iteration)
-        5. Calculate Graph-Shifted Entropy
+        1. Extract Q/K/V vectors via hooks (no O(N²) attention materialization)
+        2. Compute Hebbian weights if MC-SS (prompt-anchored manifold prior)
+        3. Compute sink-aware centrality via Triton kernel (O(N) matrix-free)
+        4. Calculate final uncertainty metric (GSE or MC-SS)
+
+        MC-SS uses ADDITIVE formulation: S_bounded + λ(1 - centrality)
+        This catches "Confident Lies" where S ≈ 0 but token is ungrounded.
 
         Args:
             prompt: Input prompt text
@@ -190,8 +240,8 @@ class AGSAR:
             return_details: If True, return dict with intermediate computations
 
         Returns:
-            If return_details=False: GSE score (float)
-            If return_details=True: Dict with GSE and all intermediate values
+            If return_details=False: Uncertainty score (float)
+            If return_details=True: Dict with uncertainty and all intermediate values
 
         Raises:
             ValueError: If response is empty (no tokens to analyze)
@@ -248,8 +298,24 @@ class AGSAR:
             aggregation='mean'
         ).to(self.dtype)
 
+        # Determine if MC-SS metric is requested
+        use_mcss = self.config.uncertainty_metric == "mcss"
+
+        # Compute Hebbian weights if MC-SS is enabled
+        # Uses prompt-only centroid as anchor (prevents hallucination from polluting manifold)
+        hebbian_weights = None
+        if use_mcss:
+            hebbian_weights = compute_hebbian_weights(
+                K_stack=K_stack,
+                prompt_end_idx=response_start,
+                tau=self.config.mcss_hebbian_tau,
+                attention_mask=attention_mask,
+            )
+
         # Compute sink-aware centrality via matrix-free Triton kernel
         # When return_details=True, also get per-head contributions for head specialization
+        # When use_hebbian=True, applies Hebbian prior to filter centrality by semantic grounding
+        # When head_weights is provided, applies ITI-style Truth-Head weighting
         relevance, centrality, per_head_contrib = compute_sink_aware_centrality(
             value_norms=aggregated_value_norms,
             attention_mask=attention_mask,
@@ -260,6 +326,9 @@ class AGSAR:
             residual_weight=self.config.residual_weight,
             return_raw=return_details,  # Only compute per-head contrib when needed
             sink_token_count=self.config.sink_token_count,  # Mask BOS/sink tokens
+            hebbian_weights=hebbian_weights,
+            use_hebbian=use_mcss,
+            head_weights=self._head_weights,  # ITI-style Truth-Head weighting
         )
 
         # Create response mask (only compute entropy on response tokens)
@@ -279,24 +348,59 @@ class AGSAR:
                 attention_mask=response_mask
             )
 
-        # Compute Graph-Shifted Entropy
-        # Use compiled version if enabled for reduced Python overhead
-        if self.config.use_torch_compile:
-            gse = compute_gse_compiled(
-                token_entropy,
+        # Compute final uncertainty metric based on config
+        if self.config.uncertainty_metric == "mcss":
+            # MC-SS: Manifold-Consistent Spectral Surprisal
+            # Uses ADDITIVE formulation: S_bounded + λ(1 - MaxNorm(centrality))
+            # This catches "Confident Lies" that multiplicative would miss
+            bounded_surprisal = compute_bounded_surprisal(
+                logits=logits,
+                input_ids=input_ids,
+                beta=self.config.mcss_beta,
+                attention_mask=response_mask,
+            )
+            uncertainty = compute_manifold_consistent_spectral_surprisal(
+                bounded_surprisal=bounded_surprisal,
+                centrality=relevance,  # Use relevance (value-norm weighted centrality)
+                attention_mask=response_mask,
+                penalty_weight=self.config.mcss_penalty_weight,
+            )
+        elif self.config.uncertainty_metric == "gss":
+            # GSS: Graph-Shifted Surprisal
+            # Uses surprisal (NLL) instead of entropy, weighted by relevance
+            # Better for forced response evaluation where we have ground truth tokens
+            token_surprisal = compute_token_surprisal(
+                logits,
+                input_ids,
+                attention_mask=response_mask
+            )
+            uncertainty = compute_graph_shifted_surprisal(
+                token_surprisal,
                 relevance,
                 attention_mask=response_mask
             )
         else:
-            gse = compute_graph_shifted_entropy(
-                token_entropy,
-                relevance,
-                attention_mask=response_mask
-            )
+            # GSE: Graph-Shifted Entropy (default)
+            # Use compiled version if enabled for reduced Python overhead
+            if self.config.use_torch_compile:
+                uncertainty = compute_gse_compiled(
+                    token_entropy,
+                    relevance,
+                    attention_mask=response_mask
+                )
+            else:
+                uncertainty = compute_graph_shifted_entropy(
+                    token_entropy,
+                    relevance,
+                    attention_mask=response_mask
+                )
 
         if return_details:
             result = {
-                'gse': gse.item(),
+                'uncertainty': uncertainty.item(),
+                'metric': self.config.uncertainty_metric,
+                # Legacy key for backwards compatibility
+                'gse': uncertainty.item(),
                 'token_entropy': token_entropy,
                 'relevance': relevance,
                 'centrality': centrality,
@@ -306,6 +410,10 @@ class AGSAR:
                 'attention_mask': attention_mask,
                 'logits': logits,  # Include for downstream surprisal computation
             }
+            # Include MC-SS specific fields when using that metric
+            if self.config.uncertainty_metric == "mcss":
+                result['bounded_surprisal'] = bounded_surprisal
+                result['hebbian_weights'] = hebbian_weights
             # Include per-head contributions for head specialization analysis
             if per_head_contrib is not None:
                 # Compute head importance as mean contribution across sequence
@@ -315,7 +423,7 @@ class AGSAR:
                 result['per_head_contrib'] = per_head_contrib
             return result
 
-        return gse.item()
+        return uncertainty.item()
 
     @torch.inference_mode()
     def detect_hallucination(
