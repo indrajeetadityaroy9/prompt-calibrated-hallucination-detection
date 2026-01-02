@@ -77,6 +77,13 @@ def parse_args():
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Device to run on",
     )
+    parser.add_argument(
+        "--output-format",
+        type=str,
+        choices=["sigmoid", "zscore"],
+        default="zscore",
+        help="Output format: 'sigmoid' = legacy [0,1] weights, 'zscore' = centered Z-scores for SGSS",
+    )
     return parser.parse_args()
 
 
@@ -126,7 +133,6 @@ def compute_per_head_contribution(
     Q_stack, K_stack, _, _ = ag_sar.extractor.extract_semantic_qk(
         input_ids=input_ids,
         attention_mask=attention_mask,
-        use_flash_attn=ag_sar.config.use_flash_attn
     )
 
     # K_stack shape: (B, L*H, S, D)
@@ -162,26 +168,32 @@ def calibrate_truth_heads(
     semantic_layers: int = 4,
     temperature: float = 5.0,
     device: str = "cuda",
-) -> Tuple[torch.Tensor, Dict]:
+    output_format: str = "zscore",
+) -> Tuple[torch.Tensor, Dict, str]:
     """
     Calibrate Truth-Head weights using TruthfulQA samples.
 
     For each head h (flattened L*H), compute Difference in Means:
         Score_h = Mean(C_h | Correct) - Mean(C_h | Incorrect)
 
-    Then normalize with sigmoid:
-        weight_h = Sigmoid(Score_h * temperature)
+    Output formats:
+    - "zscore": Centered Z-scores (native SGSS format)
+        Positive = Truth Head, Negative = Induction Head
+    - "sigmoid": Legacy [0,1] weights via sigmoid(z_score * temperature)
+        1.0 = Truth Head, 0.0 = Induction Head
 
     Args:
         model_name: HuggingFace model name
         samples: List of TruthfulQA samples
         semantic_layers: Number of layers to analyze
-        temperature: Sigmoid temperature for normalization
+        temperature: Sigmoid temperature for normalization (only used for sigmoid format)
         device: Device to run on
+        output_format: "zscore" for native SGSS format, "sigmoid" for legacy format
 
     Returns:
-        weights: (L*H,) tensor of calibrated weights
+        output_values: (L*H,) tensor of calibrated scores (Z-scores or sigmoid weights)
         metadata: Dict with calibration info
+        output_key: JSON key to use ("head_z_scores" or "head_weights")
     """
     print(f"Loading model: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -243,14 +255,23 @@ def calibrate_truth_heads(
     # Positive = Truth Head, Negative = Induction Head
     scores = mean_correct - mean_incorrect
 
-    # Standardize scores to have meaningful range before sigmoid
-    # This ensures the sigmoid can differentiate between heads
+    # Z-score normalization (always computed)
     scores_std = scores.std() + 1e-8
     scores_mean = scores.mean()
-    scores_normalized = (scores - scores_mean) / scores_std
+    z_scores = (scores - scores_mean) / scores_std
 
-    # Normalize to [0, 1] with sigmoid
-    weights = torch.sigmoid(scores_normalized * temperature)
+    # Choose output format
+    if output_format == "zscore":
+        # Native SGSS format: centered Z-scores
+        # Positive = Truth Head (upweight when confident)
+        # Negative = Induction Head (downweight when confident)
+        output_values = z_scores
+        output_key = "head_z_scores"
+    else:
+        # Legacy sigmoid format: [0, 1] weights
+        # 1.0 = Truth Head, 0.0 = Induction Head
+        output_values = torch.sigmoid(z_scores * temperature)
+        output_key = "head_weights"
 
     # Get model config for metadata
     num_layers = ag_sar.num_layers
@@ -259,10 +280,11 @@ def calibrate_truth_heads(
 
     metadata = {
         "model": model_name,
+        "output_format": output_format,
         "num_layers": num_layers,
         "num_semantic_layers": num_semantic_layers,
         "num_heads_per_layer": num_heads,
-        "total_heads": len(weights),
+        "total_heads": len(output_values),
         "num_calibration_samples": len(samples),
         "num_correct_responses": len(correct_contribs),
         "num_incorrect_responses": len(incorrect_contribs),
@@ -270,12 +292,15 @@ def calibrate_truth_heads(
         "calibration_date": datetime.now().isoformat(),
         "mean_correct": mean_correct.mean().item(),
         "mean_incorrect": mean_incorrect.mean().item(),
-        "scores_min": scores.min().item(),
-        "scores_max": scores.max().item(),
-        "scores_mean": scores.mean().item(),
-        "weights_min": weights.min().item(),
-        "weights_max": weights.max().item(),
-        "weights_mean": weights.mean().item(),
+        "raw_scores_min": scores.min().item(),
+        "raw_scores_max": scores.max().item(),
+        "raw_scores_mean": scores.mean().item(),
+        "z_scores_min": z_scores.min().item(),
+        "z_scores_max": z_scores.max().item(),
+        "z_scores_mean": z_scores.mean().item(),
+        "output_values_min": output_values.min().item(),
+        "output_values_max": output_values.max().item(),
+        "output_values_mean": output_values.mean().item(),
     }
 
     # Cleanup
@@ -283,7 +308,7 @@ def calibrate_truth_heads(
     del model
     torch.cuda.empty_cache()
 
-    return weights, metadata
+    return output_values, metadata, output_key
 
 
 def main():
@@ -299,38 +324,52 @@ def main():
     print(f"Loaded {len(samples)} samples")
 
     # Run calibration
-    weights, metadata = calibrate_truth_heads(
+    output_values, metadata, output_key = calibrate_truth_heads(
         model_name=args.model,
         samples=samples,
         semantic_layers=args.semantic_layers,
         temperature=args.temperature,
         device=args.device,
+        output_format=args.output_format,
     )
 
     # Save to JSON
     output_data = {
         **metadata,
-        "head_weights": weights.tolist(),
+        output_key: output_values.tolist(),
     }
 
     with open(output_path, "w") as f:
         json.dump(output_data, f, indent=2)
 
     print(f"\nCalibration complete!")
-    print(f"  Total heads: {len(weights)}")
-    print(f"  Weights range: [{weights.min():.4f}, {weights.max():.4f}]")
-    print(f"  Weights mean: {weights.mean():.4f}")
+    print(f"  Output format: {args.output_format}")
+    print(f"  Total heads: {len(output_values)}")
+    print(f"  Values range: [{output_values.min():.4f}, {output_values.max():.4f}]")
+    print(f"  Values mean: {output_values.mean():.4f}")
     print(f"  Output saved to: {output_path}")
 
     # Summary statistics
-    truth_heads = (weights > 0.6).sum().item()
-    induction_heads = (weights < 0.4).sum().item()
-    neutral_heads = len(weights) - truth_heads - induction_heads
+    if args.output_format == "zscore":
+        # For Z-scores: positive = Truth Head, negative = Induction Head
+        truth_heads = (output_values > 0.5).sum().item()
+        induction_heads = (output_values < -0.5).sum().item()
+        neutral_heads = len(output_values) - truth_heads - induction_heads
 
-    print(f"\nHead Classification:")
-    print(f"  Truth Heads (w > 0.6): {truth_heads} ({100*truth_heads/len(weights):.1f}%)")
-    print(f"  Induction Heads (w < 0.4): {induction_heads} ({100*induction_heads/len(weights):.1f}%)")
-    print(f"  Neutral Heads: {neutral_heads} ({100*neutral_heads/len(weights):.1f}%)")
+        print(f"\nHead Classification (Z-score thresholds):")
+        print(f"  Truth Heads (z > 0.5): {truth_heads} ({100*truth_heads/len(output_values):.1f}%)")
+        print(f"  Induction Heads (z < -0.5): {induction_heads} ({100*induction_heads/len(output_values):.1f}%)")
+        print(f"  Neutral Heads: {neutral_heads} ({100*neutral_heads/len(output_values):.1f}%)")
+    else:
+        # For sigmoid weights: >0.6 = Truth Head, <0.4 = Induction Head
+        truth_heads = (output_values > 0.6).sum().item()
+        induction_heads = (output_values < 0.4).sum().item()
+        neutral_heads = len(output_values) - truth_heads - induction_heads
+
+        print(f"\nHead Classification (sigmoid thresholds):")
+        print(f"  Truth Heads (w > 0.6): {truth_heads} ({100*truth_heads/len(output_values):.1f}%)")
+        print(f"  Induction Heads (w < 0.4): {induction_heads} ({100*induction_heads/len(output_values):.1f}%)")
+        print(f"  Neutral Heads: {neutral_heads} ({100*neutral_heads/len(output_values):.1f}%)")
 
 
 if __name__ == "__main__":

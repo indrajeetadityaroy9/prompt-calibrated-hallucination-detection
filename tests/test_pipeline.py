@@ -197,14 +197,12 @@ class TestConfigOptions:
     """Test different configuration options."""
 
     def test_custom_thresholds(self, gpt2_model):
-        """Test custom entropy thresholds."""
+        """Test custom hallucination threshold."""
         from ag_sar import AGSAR, AGSARConfig
 
         model, tokenizer = gpt2_model
 
         config = AGSARConfig(
-            entropy_threshold_low=0.2,
-            entropy_threshold_high=0.9,
             hallucination_threshold=0.5
         )
         ag_sar = AGSAR(model, tokenizer, config=config)

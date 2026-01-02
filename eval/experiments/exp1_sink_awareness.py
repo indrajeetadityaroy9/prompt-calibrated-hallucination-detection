@@ -216,8 +216,6 @@ def _get_both_relevance(ag_sar, text: str):
     Raw centrality = eigenvector centrality only (attention sink prone)
     Sink-aware = centrality × value_norms (filters sinks)
     """
-    from ag_sar.centrality import power_iteration
-
     try:
         # Use empty prompt, full text as response for single-text analysis
         prompt = ""
@@ -231,14 +229,8 @@ def _get_both_relevance(ag_sar, text: str):
         if sink_aware is None:
             return None, None
 
-        # Extract raw centrality (from result, not recomputing)
+        # Extract raw centrality (from result - always present in v2 pipeline)
         raw_centrality = result.get('centrality', None)
-        if raw_centrality is None:
-            # Fallback: compute from global attention graph
-            global_attention = result.get('global_attention', None)
-            if global_attention is not None:
-                raw_centrality = power_iteration(global_attention, num_iterations=3)
-
         if raw_centrality is None:
             return None, None
 

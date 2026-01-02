@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from contextlib import contextmanager
 
-from ag_sar.centrality import power_iteration, matrix_free_power_iteration
+from ag_sar.centrality import matrix_free_power_iteration
 from ag_sar.uncertainty import compute_graph_shifted_entropy
 
 

@@ -40,7 +40,10 @@ class TestTokenEntropy:
 
         # Max entropy for 100-class uniform = log(100) ≈ 4.6
         expected = torch.log(torch.tensor(float(vocab_size)))
-        assert torch.allclose(entropy, expected.expand_as(entropy), atol=0.01)
+        # With alignment fix: entropy[0] = 0 (first token has no prediction)
+        # entropy[1:] should have max entropy
+        assert entropy[:, 0].abs().max() < 0.01  # First token entropy is 0
+        assert torch.allclose(entropy[:, 1:], expected.expand_as(entropy[:, 1:]), atol=0.01)
 
     def test_peaked_logits_low_entropy(self):
         """Test that peaked logits produce low entropy."""

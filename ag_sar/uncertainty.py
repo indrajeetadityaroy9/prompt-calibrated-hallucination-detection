@@ -49,7 +49,6 @@ def compute_token_entropy(
     logits: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     temperature: float = 1.0,
-    align_with_tokens: bool = True
 ) -> torch.Tensor:
     """
     Compute per-token predictive entropy.
@@ -58,11 +57,10 @@ def compute_token_entropy(
 
     Higher entropy = more uncertainty about the predicted token.
 
-    CRITICAL ALIGNMENT FIX:
+    ALIGNMENT:
         In autoregressive models, logits[i] predicts token[i+1].
-        When align_with_tokens=True (default), we shift the entropy so that
-        entropy[i] represents the uncertainty about generating token[i],
-        NOT about predicting token[i+1].
+        We shift the entropy so that entropy[i] represents the uncertainty
+        about generating token[i], NOT about predicting token[i+1].
 
         This aligns with standard "Predictive Entropy" definitions (Kuhn et al.)
         and ensures H(t_i) × R(t_i) correctly weights each token's uncertainty.
@@ -71,9 +69,6 @@ def compute_token_entropy(
         logits: (batch, seq, vocab) model output logits
         attention_mask: (batch, seq) valid token mask
         temperature: Softmax temperature for calibration
-        align_with_tokens: If True (default), shift entropy so entropy[i]
-                          represents uncertainty about token[i]. If False,
-                          use legacy behavior where entropy[i] is about token[i+1].
 
     Returns:
         entropy: (batch, seq) entropy per token position, aligned with tokens
@@ -89,22 +84,13 @@ def compute_token_entropy(
     # At this point, entropy[i] = uncertainty about predicting token[i+1]
     raw_entropy = -torch.sum(probs * log_probs, dim=-1)
 
-    if align_with_tokens:
-        # ALIGNMENT FIX: Shift entropy so entropy[i] = uncertainty about token[i]
-        # logits[i] predicts token[i+1], so entropy[i] is about token[i+1]
-        # We want entropy[i] to be about token[i]
-        # Therefore: aligned_entropy[i] = raw_entropy[i-1] for i > 0
-        #            aligned_entropy[0] = 0 (no prediction for first token)
-        batch_size, seq_len = raw_entropy.shape
-        entropy = torch.zeros_like(raw_entropy)
-        # Shift: entropy[1:] = raw_entropy[:-1]
-        # entropy[i] = raw_entropy[i-1] = uncertainty about token[i]
-        entropy[:, 1:] = raw_entropy[:, :-1]
-        # First token has no predictive entropy (it's the input, not generated)
-        entropy[:, 0] = 0.0
-    else:
-        # Legacy behavior (misaligned - kept for backwards compatibility)
-        entropy = raw_entropy
+    # Alignment: shift entropy so entropy[i] = uncertainty about token[i]
+    # logits[i] predicts token[i+1], so raw_entropy[i] is about token[i+1]
+    # We want entropy[i] to be about token[i]
+    # Therefore: aligned_entropy[i] = raw_entropy[i-1] for i > 0
+    #            aligned_entropy[0] = 0 (no prediction for first token)
+    entropy = torch.zeros_like(raw_entropy)
+    entropy[:, 1:] = raw_entropy[:, :-1]
 
     # Apply mask if provided
     if attention_mask is not None:
@@ -542,7 +528,6 @@ def compute_token_entropy_compiled(
     logits: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     temperature: float = 1.0,
-    align_with_tokens: bool = True
 ) -> torch.Tensor:
     """
     Compiled version of compute_token_entropy.
@@ -553,7 +538,6 @@ def compute_token_entropy_compiled(
         logits: (batch, seq, vocab) model output logits
         attention_mask: (batch, seq) valid token mask
         temperature: Softmax temperature for calibration
-        align_with_tokens: If True (default), align entropy with token positions
 
     Returns:
         entropy: (batch, seq) entropy per token position
@@ -561,11 +545,8 @@ def compute_token_entropy_compiled(
     entropy_fn = get_compiled_entropy()
     raw_entropy = entropy_fn(logits, temperature)
 
-    if align_with_tokens:
-        # Apply alignment fix: entropy[i] should be about token[i]
-        entropy = _align_entropy_with_tokens(raw_entropy)
-    else:
-        entropy = raw_entropy
+    # Apply alignment: entropy[i] should be about token[i]
+    entropy = _align_entropy_with_tokens(raw_entropy)
 
     if attention_mask is not None:
         entropy = entropy * attention_mask.float()

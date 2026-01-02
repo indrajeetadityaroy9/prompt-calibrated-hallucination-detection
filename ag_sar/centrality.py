@@ -1,9 +1,7 @@
 """
 Sink-aware eigenvector centrality computation.
 
-Supports two computation modes:
-1. Matrix-based (legacy): Uses explicit O(N^2) attention graph
-2. Matrix-free (Triton): Uses O(N) memory via Flash-style kernel
+Uses matrix-free O(N) memory computation via Flash-style Triton kernel.
 
 Key formula: R(t_i) = C_eigen(t_i) × ||v_i||_2
 
@@ -15,59 +13,7 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn.functional as F
 
-from .utils import apply_attention_mask
 from .kernels.centrality_flash import centrality_flash_fwd
-
-
-def power_iteration(
-    adj_matrix: torch.Tensor,
-    num_iterations: int = 3,
-    tol: float = 1e-4,
-    normalize_adjacency: bool = True
-) -> torch.Tensor:
-    """
-    Compute eigenvector centrality via power iteration (GPU-native).
-
-    Implements the dominant eigenvector computation for attention graphs.
-    Pure PyTorch implementation avoids NetworkX CPU bottleneck (100ms+ latency).
-
-    For attention matrices, 3 iterations is typically sufficient for convergence.
-
-    Args:
-        adj_matrix: (batch, n, n) adjacency matrix
-        num_iterations: Maximum iterations for convergence (default: 3)
-        tol: Convergence tolerance (stop when change < tol)
-        normalize_adjacency: Whether to row-normalize the matrix first
-
-    Returns:
-        centrality: (batch, n) eigenvector centrality scores, normalized to sum to 1
-    """
-    batch_size, n, _ = adj_matrix.shape
-
-    # Row-normalize to create stochastic matrix
-    if normalize_adjacency:
-        row_sum = adj_matrix.sum(dim=-1, keepdim=True).clamp(min=1e-10)
-        adj_matrix = adj_matrix / row_sum
-
-    # Initialize with uniform vector
-    v = torch.ones(batch_size, n, 1, device=adj_matrix.device,
-                   dtype=adj_matrix.dtype) / n
-
-    # Power iteration loop
-    for _ in range(num_iterations):
-        v_next = torch.bmm(adj_matrix, v)
-        # L1-normalize (mathematically equivalent to L2 for stochastic matrix)
-        v_next = v_next / (v_next.sum(dim=1, keepdim=True) + 1e-10)
-
-        # Early stopping on convergence
-        if torch.norm(v_next - v, dim=1).max() < tol:
-            v = v_next
-            break
-        v = v_next
-
-    # Return as (batch, n) with positive values, normalized to sum to 1
-    centrality = v.squeeze(-1).abs()
-    return centrality / centrality.sum(dim=-1, keepdim=True).clamp(min=1e-10)
 
 
 def matrix_free_power_iteration(
@@ -78,8 +24,13 @@ def matrix_free_power_iteration(
     tol: float = 1e-4,
     attention_mask: Optional[torch.Tensor] = None,
     return_raw: bool = False,
-    head_weights: Optional[torch.Tensor] = None,
     value_norms: Optional[torch.Tensor] = None,
+    # SGSS parameters
+    surprisal: Optional[torch.Tensor] = None,
+    head_scores: Optional[torch.Tensor] = None,
+    steering_alpha: float = 2.0,
+    steering_beta: float = 5.0,
+    response_start: int = 0,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
     Compute eigenvector centrality via matrix-free power iteration.
@@ -95,10 +46,9 @@ def matrix_free_power_iteration(
         5. v_next = normalize(v_next)
 
     CRITICAL: Injecting value_norms inside the loop (not just at the end) breaks
-    the uniform fixed point that makes head weights ineffective. With spiky v_in:
+    the uniform fixed point. With spiky v_in:
     - Different heads route semantic spikes to different destinations
-    - Truth Heads move subject entity content, Induction Heads move syntactic content
-    - Head weighting now meaningfully affects the resulting centrality profile
+    - SGSS dynamically adjusts head contributions based on surprisal
 
     The residual connection prevents centrality collapse on early tokens in causal
     attention, equivalent to adding identity matrix in the matrix-based approach.
@@ -111,8 +61,12 @@ def matrix_free_power_iteration(
         tol: Convergence tolerance for early stopping
         attention_mask: (B, S) padding mask (1=valid, 0=padding)
         return_raw: If True, return per-head contributions for head specialization analysis
-        head_weights: (L*H,) optional per-layer-head weights for ITI-style Truth-Head weighting
         value_norms: (B, S) value vector norms for signal injection (breaks uniform fixed point)
+        surprisal: (B, S) optional per-token surprisal for SGSS gating
+        head_scores: (L*H,) optional Z-scored head calibration scores for SGSS
+        steering_alpha: SGSS steering strength (default 2.0)
+        steering_beta: SGSS gate sensitivity (default 5.0)
+        response_start: Start index for response tokens (SGSS only applied to response)
 
     Returns:
         centrality: (B, S) normalized eigenvector centrality
@@ -156,9 +110,16 @@ def matrix_free_power_iteration(
         else:
             v_in = v
 
-        # Triton kernel: attention-weighted sum per head (with optional head weighting)
-        # per_head_out[b, h, i] = sum_j softmax(Q@K.T)[i,j] * v_in[j] * w_h
-        per_head_out = centrality_flash_fwd(Q_stack, K_stack, v_in, head_weights)  # (B, L*H, S)
+        # Triton kernel: attention-weighted sum per head (with optional SGSS)
+        # per_head_out[b, h, i] = sum_j softmax(Q@K.T)[i,j] * v_in[j] * w_sgss
+        per_head_out = centrality_flash_fwd(
+            Q_stack, K_stack, v_in,
+            surprisal=surprisal,
+            head_scores=head_scores,
+            steering_alpha=steering_alpha,
+            steering_beta=steering_beta,
+            response_start=response_start,
+        )  # (B, L*H, S)
 
         # Save for head specialization analysis
         if return_raw:
@@ -288,8 +249,13 @@ def matrix_free_power_iteration_hebbian(
     residual_weight: float = 0.5,
     tol: float = 1e-4,
     attention_mask: Optional[torch.Tensor] = None,
-    head_weights: Optional[torch.Tensor] = None,
     value_norms: Optional[torch.Tensor] = None,
+    # SGSS parameters
+    surprisal: Optional[torch.Tensor] = None,
+    head_scores: Optional[torch.Tensor] = None,
+    steering_alpha: float = 2.0,
+    steering_beta: float = 5.0,
+    response_start: int = 0,
 ) -> torch.Tensor:
     """
     Compute Hebbian-filtered eigenvector centrality via matrix-free power iteration.
@@ -298,8 +264,7 @@ def matrix_free_power_iteration_hebbian(
         v^(k+1) = A · (v^(k) ⊙ h_hebbian ⊙ ||V||)
 
     The Hebbian weights bias toward tokens semantically grounded in the prompt.
-    Value norms inject signal strength to break the uniform fixed point and
-    make head_weights effective.
+    Value norms inject signal strength to break the uniform fixed point.
 
     Args:
         Q_stack: (B, L*H, S, D) stacked query vectors
@@ -309,8 +274,12 @@ def matrix_free_power_iteration_hebbian(
         residual_weight: Weight for self-attention residual (default 0.5)
         tol: Convergence tolerance
         attention_mask: (B, S) padding mask
-        head_weights: (L*H,) optional per-layer-head weights for ITI-style Truth-Head weighting
         value_norms: (B, S) value vector norms for signal injection
+        surprisal: (B, S) optional per-token surprisal for SGSS gating
+        head_scores: (L*H,) optional Z-scored head calibration scores for SGSS
+        steering_alpha: SGSS steering strength (default 2.0)
+        steering_beta: SGSS gate sensitivity (default 5.0)
+        response_start: Start index for response tokens (SGSS only applied to response)
 
     Returns:
         centrality: (B, S) Hebbian-filtered eigenvector centrality (L1 normalized)
@@ -343,8 +312,15 @@ def matrix_free_power_iteration_hebbian(
         # Re-normalize after modulation to maintain probability distribution
         v_modulated = v_modulated / v_modulated.sum(dim=-1, keepdim=True).clamp(min=1e-10)
 
-        # Triton kernel: attention-weighted sum per head (with optional head weighting)
-        per_head_out = centrality_flash_fwd(Q_stack, K_stack, v_modulated, head_weights)  # (B, L*H, S)
+        # Triton kernel: attention-weighted sum per head (with optional SGSS)
+        per_head_out = centrality_flash_fwd(
+            Q_stack, K_stack, v_modulated,
+            surprisal=surprisal,
+            head_scores=head_scores,
+            steering_alpha=steering_alpha,
+            steering_beta=steering_beta,
+            response_start=response_start,
+        )  # (B, L*H, S)
 
         # Aggregate across all heads (mean pooling)
         attn_contrib = per_head_out.mean(dim=1)  # (B, S)
@@ -371,15 +347,12 @@ def matrix_free_power_iteration_hebbian(
 
 def compute_sink_aware_centrality(
     value_norms: torch.Tensor,
+    Q_stack: torch.Tensor,
+    K_stack: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     num_iterations: int = 3,
     tol: float = 1e-4,
-    # Matrix-free path (preferred)
-    Q_stack: Optional[torch.Tensor] = None,
-    K_stack: Optional[torch.Tensor] = None,
     residual_weight: float = 0.5,
-    # Legacy matrix-based path
-    attention_graph: Optional[torch.Tensor] = None,
     # Head specialization analysis
     return_raw: bool = False,
     # Sink token masking (StreamingLLM-style)
@@ -387,8 +360,12 @@ def compute_sink_aware_centrality(
     # MC-SS Hebbian filtering
     hebbian_weights: Optional[torch.Tensor] = None,
     use_hebbian: bool = False,
-    # ITI-inspired Truth-Head weighting
-    head_weights: Optional[torch.Tensor] = None,
+    # SGSS: Surprisal-Gated Spectral Steering
+    surprisal: Optional[torch.Tensor] = None,
+    head_scores: Optional[torch.Tensor] = None,
+    steering_alpha: float = 2.0,
+    steering_beta: float = 5.0,
+    response_start: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """
     Compute sink-aware relevance: R(t_i) = C_eigen(t_i) × ||v_i||_2
@@ -397,9 +374,7 @@ def compute_sink_aware_centrality(
     high centrality but low value norms (mechanistically passive tokens
     like <s>, punctuation, etc.).
 
-    Supports two computation modes:
-    1. Matrix-free (Triton): Pass Q_stack, K_stack for O(N) memory
-    2. Matrix-based (legacy): Pass attention_graph for O(N^2) memory
+    Uses matrix-free O(N) computation via Triton kernel.
 
     Optionally supports Hebbian filtering for MC-SS:
     - Pass hebbian_weights and use_hebbian=True
@@ -407,81 +382,77 @@ def compute_sink_aware_centrality(
 
     Args:
         value_norms: (batch, seq) L2 norm of value vectors per token
+        Q_stack: (B, L*H, S, D) stacked queries from semantic layers
+        K_stack: (B, L*H, S, D) stacked keys from semantic layers
         attention_mask: (batch, seq) valid token mask (1=valid, 0=padding)
         num_iterations: Power iteration steps
         tol: Convergence tolerance
-        Q_stack: (B, L*H, S, D) stacked queries for matrix-free path
-        K_stack: (B, L*H, S, D) stacked keys for matrix-free path
-        residual_weight: Weight for self-attention in matrix-free path
-        attention_graph: (batch, seq, seq) for legacy matrix-based path
+        residual_weight: Weight for self-attention residual
         return_raw: If True, return per-head contributions for head specialization
         sink_token_count: Number of initial tokens to zero out (BOS/sink tokens)
             These have high centrality but are structural, not semantic.
         hebbian_weights: (B, S) pre-computed Hebbian similarity weights for MC-SS
         use_hebbian: If True, use Hebbian-filtered power iteration
-        head_weights: (L*H,) optional per-layer-head weights for ITI-style Truth-Head weighting
+        surprisal: (B, S) optional per-token surprisal for SGSS gating
+        head_scores: (L*H,) optional Z-scored head calibration scores for SGSS
+        steering_alpha: SGSS steering strength (default 2.0)
+        steering_beta: SGSS gate sensitivity (default 5.0)
+        response_start: Start index for response tokens (SGSS only applied to response)
 
     Returns:
         relevance: (batch, seq) sink-aware relevance scores
         centrality: (batch, seq) raw eigenvector centrality (before sink correction)
         per_head_contrib: (B, L*H, S) per-head contributions if return_raw=True, else None
     """
-    # Determine which path to use
-    use_matrix_free = Q_stack is not None and K_stack is not None
+    # AG-SAR v2 requires Q/K stacks for matrix-free Flash Centrality
+    if Q_stack is None or K_stack is None:
+        raise ValueError(
+            "AG-SAR v2 requires Q_stack and K_stack for Flash Centrality. "
+            "Ensure AttentionExtractor is returning semantic Q/K tensors."
+        )
+
     per_head_contrib = None
 
-    if use_matrix_free:
-        if use_hebbian and hebbian_weights is not None:
-            # MC-SS path: Hebbian-filtered power iteration
-            # Also inject value_norms to break uniform fixed point
-            centrality = matrix_free_power_iteration_hebbian(
-                Q_stack=Q_stack,
-                K_stack=K_stack,
-                hebbian_weights=hebbian_weights,
-                num_iterations=num_iterations,
-                residual_weight=residual_weight,
-                tol=tol,
-                attention_mask=attention_mask,
-                head_weights=head_weights,
-                value_norms=value_norms,
-            )
-            # Hebbian version doesn't return per-head contributions
-            per_head_contrib = None
-        else:
-            # Standard matrix-free path using Triton kernel
-            # CRITICAL: Pass value_norms to inject signal strength inside iteration loop
-            # This breaks the uniform fixed point and makes head_weights effective
-            centrality, per_head_contrib = matrix_free_power_iteration(
-                Q_stack=Q_stack,
-                K_stack=K_stack,
-                num_iterations=num_iterations,
-                residual_weight=residual_weight,
-                tol=tol,
-                attention_mask=attention_mask,
-                return_raw=return_raw,
-                head_weights=head_weights,
-                value_norms=value_norms,
-            )
-    else:
-        # Legacy matrix-based path
-        if attention_graph is None:
-            raise ValueError(
-                "Must provide either (Q_stack, K_stack) for matrix-free path "
-                "or attention_graph for legacy matrix-based path"
-            )
-
-        # Apply mask to attention graph first (with normalization)
-        if attention_mask is not None:
-            attention_graph = apply_attention_mask(
-                attention_graph, attention_mask, normalize=True
-            )
-
-        # Compute eigenvector centrality
-        centrality = power_iteration(
-            attention_graph,
+    if use_hebbian and hebbian_weights is not None:
+        # MC-SS path: Hebbian-filtered power iteration
+        # Also inject value_norms to break uniform fixed point
+        centrality = matrix_free_power_iteration_hebbian(
+            Q_stack=Q_stack,
+            K_stack=K_stack,
+            hebbian_weights=hebbian_weights,
             num_iterations=num_iterations,
+            residual_weight=residual_weight,
             tol=tol,
-            normalize_adjacency=False  # Already normalized above
+            attention_mask=attention_mask,
+            value_norms=value_norms,
+            # SGSS parameters
+            surprisal=surprisal,
+            head_scores=head_scores,
+            steering_alpha=steering_alpha,
+            steering_beta=steering_beta,
+            response_start=response_start,
+        )
+        # Hebbian version doesn't return per-head contributions
+        per_head_contrib = None
+    else:
+        # Standard matrix-free path using Triton kernel
+        # CRITICAL: Pass value_norms to inject signal strength inside iteration loop
+        # This breaks the uniform fixed point and makes head_weights effective
+        centrality, per_head_contrib = matrix_free_power_iteration(
+            Q_stack=Q_stack,
+            K_stack=K_stack,
+            num_iterations=num_iterations,
+            residual_weight=residual_weight,
+            tol=tol,
+            attention_mask=attention_mask,
+            return_raw=return_raw,
+            value_norms=value_norms,
+            # SGSS parameters
+            surprisal=surprisal,
+            head_scores=head_scores,
+            steering_alpha=steering_alpha,
+            steering_beta=steering_beta,
+            response_start=response_start,
         )
 
     # Sink-aware relevance: multiply centrality by value norms

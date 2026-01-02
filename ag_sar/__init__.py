@@ -21,7 +21,6 @@ from .utils import enable_tf32, is_tf32_enabled, get_model_dtype, get_model_devi
 enable_tf32()
 from .attention_extractor import AttentionExtractor
 from .centrality import (
-    power_iteration,
     matrix_free_power_iteration,
     compute_sink_aware_centrality,
     aggregate_value_norms,
@@ -63,7 +62,6 @@ __all__ = [
     # Attention extraction
     "AttentionExtractor",
     # Centrality (matrix-free via Triton)
-    "power_iteration",
     "matrix_free_power_iteration",
     "compute_sink_aware_centrality",
     "aggregate_value_norms",

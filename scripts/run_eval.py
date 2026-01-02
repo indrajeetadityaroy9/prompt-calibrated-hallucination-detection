@@ -142,7 +142,7 @@ def load_model_and_tokenizer(model_name: str = 'gpt2', device=None):
     return model, tokenizer
 
 
-def initialize_ag_sar(model, tokenizer, use_torch_compile: bool = True, head_weights_path: str = None):
+def initialize_ag_sar(model, tokenizer, use_torch_compile: bool = True, head_scores_path: str = None):
     """Initialize AG-SAR."""
     from ag_sar import AGSAR
     from ag_sar.config import AGSARConfig
@@ -150,11 +150,12 @@ def initialize_ag_sar(model, tokenizer, use_torch_compile: bool = True, head_wei
     print("Initializing AG-SAR...")
     config = AGSARConfig(
         use_torch_compile=use_torch_compile,
-        use_head_weighting=head_weights_path is not None,
-        head_weights_path=head_weights_path,
+        # SGSS: Surprisal-Gated Spectral Steering (replaces static head weighting)
+        use_spectral_steering=head_scores_path is not None,
+        head_scores_path=head_scores_path,
     )
-    if head_weights_path:
-        print(f"  Using Truth-Head weights from: {head_weights_path}")
+    if head_scores_path:
+        print(f"  Using SGSS with head scores from: {head_scores_path}")
     ag_sar = AGSAR(model, tokenizer, config=config)
     return ag_sar
 
@@ -365,8 +366,8 @@ def main():
         help='Dataset for AUROC/calibration experiments (truthfulqa=adversarial, triviaqa=fact retrieval, coqa=conversational)'
     )
     parser.add_argument(
-        '--head-weights', type=str, default=None,
-        help='Path to calibrated head weights JSON (enables Truth-Head weighting)'
+        '--head-scores', type=str, default=None,
+        help='Path to calibrated head Z-scores JSON (enables SGSS steering)'
     )
 
     args = parser.parse_args()
@@ -391,8 +392,8 @@ def main():
     print(f"NLI labeling: {args.nli}")
     print(f"torch.compile: {not getattr(args, 'no_compile', False)}")
     print(f"Dataset: {args.dataset}")
-    head_weights = getattr(args, 'head_weights', None)
-    print(f"Head weights: {head_weights if head_weights else 'disabled'}")
+    head_scores = getattr(args, 'head_scores', None)
+    print(f"SGSS head scores: {head_scores if head_scores else 'disabled'}")
     print("=" * 70)
 
     # Setup
@@ -406,7 +407,7 @@ def main():
     ag_sar = initialize_ag_sar(
         model, tokenizer,
         use_torch_compile=use_compile,
-        head_weights_path=head_weights
+        head_scores_path=head_scores
     )
 
     # Initialize baselines (only if needed)

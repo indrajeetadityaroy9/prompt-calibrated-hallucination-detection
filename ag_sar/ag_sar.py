@@ -109,10 +109,11 @@ class AGSAR:
         # Register hooks
         self.extractor.register_hooks()
 
-        # Load calibrated head weights if specified (ITI-inspired Truth-Head weighting)
-        self._head_weights = None
-        if self.config.use_head_weighting and self.config.head_weights_path:
-            self._head_weights = self._load_head_weights(self.config.head_weights_path)
+        # Load head scores for SGSS (Surprisal-Gated Spectral Steering)
+        # These are Z-scored calibration scores: positive=Truth Head, negative=Induction Head
+        self._head_scores = None
+        if self.config.use_spectral_steering and self.config.head_scores_path:
+            self._head_scores = self._load_head_scores(self.config.head_scores_path)
 
     def _detect_model_config(self) -> None:
         """Detect model architecture and set layer configuration."""
@@ -147,36 +148,58 @@ class AGSAR:
         start_layer = max(0, self.num_layers - semantic_count)
         self._semantic_layer_indices = list(range(start_layer, self.num_layers))
 
-    def _load_head_weights(self, path: str) -> torch.Tensor:
+    def _load_head_scores(self, path: str) -> torch.Tensor:
         """
-        Load calibrated head weights from JSON file.
+        Load head scores for SGSS with auto-detection of format.
 
-        Head weights are used for ITI-inspired Truth-Head weighting that
-        suppresses Induction Heads that perpetuate misconceptions.
+        SGSS uses Z-scored head calibration scores:
+        - Positive scores = Truth Heads (upweight when confident)
+        - Negative scores = Induction Heads (downweight when confident)
+
+        Auto-detects format:
+        - Native SGSS: {"head_z_scores": [...]}
+        - Legacy sigmoid: {"head_weights": [...]} in [0,1] range
+
+        For legacy format, converts to Z-scores via inverse sigmoid scaling:
+        z = (w - 0.5) * 4.0  # Maps 0.5→0, 0→-2, 1→+2
 
         Args:
-            path: Path to calibrated weights JSON file
+            path: Path to head scores JSON file
 
         Returns:
-            head_weights: (L*H,) tensor of per-layer-head weights in [0, 1]
+            head_scores: (L*H,) tensor of Z-scored head calibration scores
 
         Raises:
-            FileNotFoundError: If weights file doesn't exist
-            KeyError: If file doesn't contain 'head_weights' key
+            FileNotFoundError: If scores file doesn't exist
+            ValueError: If file contains neither valid format
         """
         import json
         with open(path) as f:
             data = json.load(f)
 
-        if 'head_weights' not in data:
-            raise KeyError(f"Weights file {path} must contain 'head_weights' key")
+        if 'head_z_scores' in data:
+            # Native SGSS format (Z-scores)
+            scores = torch.tensor(
+                data['head_z_scores'],
+                dtype=self.dtype,
+                device=self.device
+            )
+        elif 'head_weights' in data:
+            # Legacy format: convert [0,1] sigmoid weights to centered Z-scores
+            # Maps 0.5 → 0 (neutral), 0 → -2 (strong Induction), 1 → +2 (strong Truth)
+            weights = torch.tensor(
+                data['head_weights'],
+                dtype=self.dtype,
+                device=self.device
+            )
+            scores = (weights - 0.5) * 4.0
+        else:
+            raise ValueError(
+                f"Scores file {path} must contain 'head_z_scores' (native SGSS) "
+                f"or 'head_weights' (legacy sigmoid) key"
+            )
 
-        weights = torch.tensor(
-            data['head_weights'],
-            dtype=self.dtype,
-            device=self.device
-        )
-        return weights
+        return scores
 
     def _tokenize(
         self,
@@ -285,7 +308,7 @@ class AGSAR:
         Q_stack, K_stack, value_norms, model_output = self.extractor.extract_semantic_qk(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            use_flash_attn=self.config.use_flash_attn
+            use_flash_attn=True  # Always use Flash Attention for matrix-free pipeline
         )
 
         # Get logits for entropy computation, cast to target dtype
@@ -297,6 +320,16 @@ class AGSAR:
             semantic_layers=len(self._semantic_layer_indices),
             aggregation='mean'
         ).to(self.dtype)
+
+        # Compute raw surprisal EARLY for SGSS gating (before centrality)
+        # SGSS needs token-level surprisal to gate head contributions
+        raw_surprisal = None
+        if self.config.use_spectral_steering and self._head_scores is not None:
+            raw_surprisal = compute_token_surprisal(
+                logits,
+                input_ids,
+                attention_mask=None  # No masking for raw surprisal - SGSS needs all tokens
+            )
 
         # Determine if MC-SS metric is requested
         use_mcss = self.config.uncertainty_metric == "mcss"
@@ -315,20 +348,25 @@ class AGSAR:
         # Compute sink-aware centrality via matrix-free Triton kernel
         # When return_details=True, also get per-head contributions for head specialization
         # When use_hebbian=True, applies Hebbian prior to filter centrality by semantic grounding
-        # When head_weights is provided, applies ITI-style Truth-Head weighting
+        # When SGSS is enabled, applies surprisal-gated dynamic head weighting
         relevance, centrality, per_head_contrib = compute_sink_aware_centrality(
             value_norms=aggregated_value_norms,
+            Q_stack=Q_stack,
+            K_stack=K_stack,
             attention_mask=attention_mask,
             num_iterations=self.config.power_iteration_steps,
             tol=self.config.power_iteration_tol,
-            Q_stack=Q_stack,
-            K_stack=K_stack,
             residual_weight=self.config.residual_weight,
             return_raw=return_details,  # Only compute per-head contrib when needed
             sink_token_count=self.config.sink_token_count,  # Mask BOS/sink tokens
             hebbian_weights=hebbian_weights,
             use_hebbian=use_mcss,
-            head_weights=self._head_weights,  # ITI-style Truth-Head weighting
+            # SGSS: Surprisal-Gated Spectral Steering
+            surprisal=raw_surprisal,
+            head_scores=self._head_scores,
+            steering_alpha=self.config.steering_alpha,
+            steering_beta=self.config.steering_beta,
+            response_start=response_start,
         )
 
         # Create response mask (only compute entropy on response tokens)
@@ -414,6 +452,10 @@ class AGSAR:
             if self.config.uncertainty_metric == "mcss":
                 result['bounded_surprisal'] = bounded_surprisal
                 result['hebbian_weights'] = hebbian_weights
+            # Include SGSS specific fields when using spectral steering
+            if self.config.use_spectral_steering and raw_surprisal is not None:
+                result['raw_surprisal'] = raw_surprisal
+                result['sgss_enabled'] = True
             # Include per-head contributions for head specialization analysis
             if per_head_contrib is not None:
                 # Compute head importance as mean contribution across sequence

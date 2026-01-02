@@ -87,9 +87,13 @@ def _get_autotune_configs():
 def _centrality_flash_kernel(
     # Pointers to matrices
     Q_ptr, K_ptr, v_ptr, Out_ptr,
-    # Head weighting (ITI-inspired Truth-Head suppression)
-    head_weights_ptr,  # (L*H,) per-layer-head weights or dummy ptr
-    USE_HEAD_WEIGHTS: tl.constexpr,  # Whether to apply head weighting
+    # SGSS: Surprisal-Gated Spectral Steering
+    surprisal_ptr,     # (B, S) per-token surprisal or dummy ptr
+    head_scores_ptr,   # (L*H,) Z-scored head calibration scores or dummy ptr
+    USE_SGSS: tl.constexpr,  # Whether to apply SGSS
+    STEERING_ALPHA: tl.constexpr,  # Steering strength
+    STEERING_BETA: tl.constexpr,   # Gate sensitivity
+    RESPONSE_START: tl.constexpr,  # Start index for response tokens
     # Strides for Q: (B, H, S, D)
     stride_qb, stride_qh, stride_qs, stride_qd,
     # Strides for K: (B, H, S, D)
@@ -98,6 +102,8 @@ def _centrality_flash_kernel(
     stride_vb, stride_vs,
     # Strides for Out: (B, H, S)
     stride_ob, stride_oh, stride_os,
+    # Strides for surprisal: (B, S)
+    stride_sb, stride_ss,
     # Dimensions
     S: tl.constexpr,  # Sequence length
     D: tl.constexpr,  # Head dimension
@@ -110,16 +116,18 @@ def _centrality_flash_kernel(
     Triton kernel for matrix-free attention-weighted centrality.
 
     For each query position i, computes:
-        out[i] = sum_{j <= i} softmax(Q[i] @ K[j].T / sqrt(D)) * v[j] * w_h
+        out[i] = sum_{j <= i} softmax(Q[i] @ K[j].T / sqrt(D)) * v[j] * w_sgss
 
-    where w_h is the per-head weight (if USE_HEAD_WEIGHTS=True).
+    where w_sgss is the dynamic SGSS weight (if USE_SGSS=True).
 
     Uses online softmax (Flash Attention style) to avoid O(S^2) memory.
     Accumulators use float32 for numerical stability even with bfloat16 inputs.
 
-    Head weighting (ITI-inspired):
-    - w_h ∈ [0, 1] down-weights Induction Heads that perpetuate misconceptions
-    - Calibrated offline using TruthfulQA samples
+    SGSS (Surprisal-Gated Spectral Steering):
+    - w_sgss = max(0, 1 + α × (1 - tanh(S/β)) × Ω_h)
+    - Gates based on QUERY (destination) surprisal, not source
+    - When confident (low S), steering is active; when uncertain, w_sgss ≈ 1
+    - Only applies to response tokens (query position >= RESPONSE_START)
     """
     # Program IDs
     pid_b = tl.program_id(0)  # Batch index
@@ -194,11 +202,38 @@ def _centrality_flash_kernel(
         # acc_new = acc_old * alpha + sum(beta * v * w_h)
         beta_v = beta * v_block[None, :]
 
-        # Apply head weighting if enabled (ITI-style Truth-Head suppression)
-        if USE_HEAD_WEIGHTS:
-            # Load per-head weight (pid_h indexes into flattened L*H tensor)
-            head_weight = tl.load(head_weights_ptr + pid_h)
-            beta_v = beta_v * head_weight
+        # SGSS: Surprisal-Gated Spectral Steering
+        # Gates based on QUERY (destination) surprisal, not source surprisal
+        # This asks "Is my generation confident?" not "Is my context confident?"
+        if USE_SGSS:
+            # Load Surprisal for the QUERY block (destination tokens being generated)
+            s_ptrs = surprisal_ptr + pid_b * stride_sb + offs_m * stride_ss
+            s_block = tl.load(s_ptrs, mask=mask_m, other=0.0)  # (BLOCK_M,)
+
+            # Load head score (scalar per head, Z-scored: positive=Truth, negative=Induction)
+            omega_h = tl.load(head_scores_ptr + pid_h)
+
+            # Gate formula: gate = 1 - tanh(S / β)
+            # Low S (confident) → gate ≈ 1 (steering active)
+            # High S (uncertain) → gate ≈ 0 (steering inactive, w_sgss ≈ 1)
+            # Use manual tanh: tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+            x = s_block / STEERING_BETA
+            exp_2x = tl.exp(2.0 * x)
+            tanh_x = (exp_2x - 1.0) / (exp_2x + 1.0)
+            gate = 1.0 - tanh_x
+
+            # Dynamic weight per Query token: w[m] = max(0, 1 + α × gate[m] × Ω_h)
+            w_dynamic = 1.0 + STEERING_ALPHA * gate * omega_h
+            w_dynamic = tl.maximum(w_dynamic, 0.0)  # (BLOCK_M,) - Physics constraint
+
+            # Only apply to response tokens (query position >= RESPONSE_START)
+            is_response = offs_m >= RESPONSE_START
+            w_dynamic = tl.where(is_response, w_dynamic, 1.0)
+
+            # Apply to beta_v with correct broadcasting
+            # beta_v: (BLOCK_M, BLOCK_N), w_dynamic: (BLOCK_M,)
+            # Broadcast: (BLOCK_M, 1) * (BLOCK_M, BLOCK_N) -> (BLOCK_M, BLOCK_N)
+            beta_v = beta_v * w_dynamic[:, None]
 
         acc_new = acc_i * alpha + tl.sum(beta_v, axis=1)
 
@@ -219,21 +254,31 @@ def centrality_flash_fwd(
     Q: torch.Tensor,  # (B, H, S, D)
     K: torch.Tensor,  # (B, H, S, D)
     v: torch.Tensor,  # (B, S)
-    head_weights: Optional[torch.Tensor] = None,  # (L*H,) per-layer-head weights
+    # SGSS parameters
+    surprisal: Optional[torch.Tensor] = None,  # (B, S) per-token surprisal
+    head_scores: Optional[torch.Tensor] = None,  # (L*H,) Z-scored head calibration scores
+    steering_alpha: float = 2.0,  # Steering strength
+    steering_beta: float = 5.0,   # Gate sensitivity
+    response_start: int = 0,      # Start index for response tokens
 ) -> torch.Tensor:    # (B, H, S)
     """
     Forward pass: compute attention-weighted centrality per head.
 
-    Computes Out[b,h,i] = sum_{j<=i} softmax(Q[b,h,i,:] @ K[b,h,j,:].T / sqrt(D)) * v[b,j] * w_h
+    Computes Out[b,h,i] = sum_{j<=i} softmax(Q[b,h,i,:] @ K[b,h,j,:].T / sqrt(D)) * v[b,j] * w_sgss
     without materializing the (S,S) attention matrix.
 
     Args:
         Q: Query vectors (B, H, S, D) where H = L*heads_per_layer
         K: Key vectors (B, H, S, D)
         v: Current centrality vector (B, S)
-        head_weights: Optional (L*H,) per-layer-head weights in [0,1].
-            If provided, each head's contribution is scaled by its weight.
-            Used for ITI-inspired Truth-Head weighting to suppress Induction Heads.
+        surprisal: Optional (B, S) per-token surprisal for SGSS gating.
+            Required if head_scores is provided.
+        head_scores: Optional (L*H,) Z-scored head calibration scores.
+            Positive = Truth Head (upweight when confident).
+            Negative = Induction Head (downweight when confident).
+        steering_alpha: SGSS steering strength (default 2.0).
+        steering_beta: SGSS gate sensitivity (default 5.0).
+        response_start: Start index for response tokens (SGSS only applied to response).
 
     Returns:
         out: Attention-weighted centrality per head (B, H, S)
@@ -243,7 +288,7 @@ def centrality_flash_fwd(
         - Accumulators use float32 for numerical stability
         - Causal masking is built-in (j <= i)
         - Autotuned for H100 with multiple block size configurations
-        - Head weighting incurs zero overhead when disabled (compile-time conditional)
+        - SGSS incurs zero overhead when disabled (compile-time conditional)
     """
     # Validate inputs
     B, H, S, D = Q.shape
@@ -253,17 +298,21 @@ def centrality_flash_fwd(
     assert K.is_cuda, "K must be on CUDA device"
     assert v.is_cuda, "v must be on CUDA device"
 
-    # Head weights setup with dummy pointer safety
-    # CRITICAL: Triton segfaults on null pointer even with conditional guard
-    # because the compiler may speculate the load. Pass a valid dummy pointer.
-    use_head_weights = head_weights is not None
-    if use_head_weights:
-        assert head_weights.shape == (H,), f"head_weights shape {head_weights.shape} != expected {(H,)}"
-        assert head_weights.is_cuda, "head_weights must be on CUDA device"
-        head_weights_ptr = head_weights
+    # SGSS setup with dummy pointer safety
+    # Both surprisal and head_scores must be provided together for SGSS
+    use_sgss = surprisal is not None and head_scores is not None
+    if use_sgss:
+        assert surprisal.shape == (B, S), f"surprisal shape {surprisal.shape} != expected {(B, S)}"
+        assert head_scores.shape == (H,), f"head_scores shape {head_scores.shape} != expected {(H,)}"
+        assert surprisal.is_cuda, "surprisal must be on CUDA device"
+        assert head_scores.is_cuda, "head_scores must be on CUDA device"
+        surprisal_ptr = surprisal
+        head_scores_ptr = head_scores
     else:
-        # Use v as safe dummy pointer - never actually loaded due to compile-time conditional
-        head_weights_ptr = v
+        # CRITICAL: Dummy tensors with valid shape (Triton segfaults on null even with guards)
+        # Use actual tensors, not just pointers, to ensure stride extraction works
+        surprisal_ptr = torch.zeros((B, S), device=Q.device, dtype=Q.dtype)
+        head_scores_ptr = torch.zeros((H,), device=Q.device, dtype=Q.dtype)
 
     # Allocate output
     out = torch.empty((B, H, S), device=Q.device, dtype=Q.dtype)
@@ -279,8 +328,9 @@ def centrality_flash_fwd(
     # Launch autotuned kernel
     _centrality_flash_kernel[grid](
         Q, K, v, out,
-        # Head weighting (ITI-inspired)
-        head_weights_ptr, use_head_weights,
+        # SGSS parameters
+        surprisal_ptr, head_scores_ptr, use_sgss,
+        steering_alpha, steering_beta, response_start,
         # Q strides
         Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3),
         # K strides
@@ -289,6 +339,8 @@ def centrality_flash_fwd(
         v.stride(0), v.stride(1) if v.dim() > 1 else 1,
         # Out strides
         out.stride(0), out.stride(1), out.stride(2),
+        # Surprisal strides
+        surprisal_ptr.stride(0), surprisal_ptr.stride(1),
         # Dimensions (used as autotune keys)
         S=S, D=D,
         # Block size for head dimension

@@ -38,3 +38,15 @@ htmlcov/
 
 # Type checking
 .mypy_cache/
+
+# Python virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Python virtual environments
+venv/
+.venv/
+env/
+.env/
