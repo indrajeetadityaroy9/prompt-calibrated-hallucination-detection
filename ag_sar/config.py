@@ -8,28 +8,59 @@ import torch
 @dataclass
 class AGSARConfig:
     """
-    Configuration for AG-SAR uncertainty quantification pipeline.
+    Configuration for AG-SAR v3.1 uncertainty quantification pipeline.
 
+    Implements Recursive Authority Flow for Zero-Latency Hallucination Detection.
     Optimized for NVIDIA H100 with bfloat16 precision.
+
+    v3.1 Mechanisms:
+        1. Register Filter: EMA Z-score + Sigmoid gate (Papers 1 & 2)
+        2. Authority Flow: Prompt Recharge + Gen Flow (Paper 6 corrected)
+        3. Spectral Roughness: Pre-MLP deviation (Paper 9 approximation)
+        4. SnapKV Eviction: Authority-weighted voting (Paper 5)
 
     Attributes:
         semantic_layers: Number of final layers to use for semantic analysis.
         residual_weight: Weight for identity matrix in residual correction.
-            A = (1 - residual_weight) * W_att + residual_weight * I
         power_iteration_steps: Maximum iterations for eigenvector centrality.
-        power_iteration_tol: Convergence tolerance for power iteration.
         hallucination_threshold: GSE threshold for hallucination detection.
-        preferred_dtype: Preferred tensor dtype. Use bfloat16 on H100
-            (NEVER use float16 with GPT-2 - causes NaN overflow).
+        preferred_dtype: Preferred tensor dtype (bfloat16 recommended).
 
     Example:
         >>> config = AGSARConfig(
         ...     semantic_layers=4,
-        ...     hallucination_threshold=0.7
+        ...     enable_register_filter=True,
+        ...     lambda_roughness=10.0,
         ... )
     """
 
-    # Semantic layer selection
+    # ==========================================================================
+    # v3.1 Mechanism 1: Register Filter (Papers 1 & 2)
+    # ==========================================================================
+    # M(t) = (t > sink_token_count) × Sigmoid(-Z(t) + τ)
+    # where Z(t) = (Kurt(v_t) - μ_EMA) / σ_EMA
+    enable_register_filter: bool = True
+    ema_decay: float = 0.995          # Welford EMA decay (high = stable)
+    kurtosis_threshold: float = 2.0   # τ: Gate threshold for sigmoid
+
+    # ==========================================================================
+    # v3.1 Mechanism 2: Authority Flow (Paper 6 corrected)
+    # ==========================================================================
+    # 𝒜(t) = [Σ_Prompt A_{t,j}] + [Σ_Gen A_{t,j} × 𝒜(j)] × M(t)
+    enable_authority_flow: bool = True
+    recharge_weight: float = 1.0      # Weight for prompt token contribution
+
+    # ==========================================================================
+    # v3.1 Mechanism 3: Spectral Roughness (Paper 9 approximation)
+    # ==========================================================================
+    # δ(t) = ||h_attn(t) - Σ A_{t,j} × v_j||_2
+    # 𝒜_final = 𝒜 × (1 / (1 + λ × δ))
+    enable_spectral_roughness: bool = True
+    lambda_roughness: float = 10.0    # Sensitivity to pre-MLP deviation
+
+    # ==========================================================================
+    # Legacy: Semantic Layer Selection
+    # ==========================================================================
     semantic_layers: int = 4
 
     # Power iteration for centrality
@@ -69,7 +100,7 @@ class AGSARConfig:
 
     # MC-SS (Manifold-Consistent Spectral Surprisal) configuration
     # Alternative uncertainty metric using Hebbian-filtered centrality
-    uncertainty_metric: str = "gse"  # Options: "gse", "gss", "mcss"
+    uncertainty_metric: str = "gse"  # Options: "gse", "gss", "mcss", "authority"
     mcss_beta: float = 5.0  # Soft clamp for bounded surprisal: tanh(-log P / beta)
     mcss_hebbian_tau: float = 0.1  # ReLU threshold for Hebbian prior: ReLU(sim - tau)
     mcss_penalty_weight: float = 1.0  # λ weight for additive penalty term in MC-SS
@@ -112,9 +143,10 @@ class AGSARConfig:
             )
 
         # Validate MC-SS parameters
-        if self.uncertainty_metric not in ("gse", "gss", "mcss"):
+        valid_metrics = ("gse", "gss", "mcss", "v31", "authority")
+        if self.uncertainty_metric not in valid_metrics:
             raise ValueError(
-                f"uncertainty_metric must be 'gse', 'gss', or 'mcss', "
+                f"uncertainty_metric must be one of {valid_metrics}, "
                 f"got {self.uncertainty_metric}"
             )
         if self.mcss_beta <= 0:
@@ -138,9 +170,34 @@ class AGSARConfig:
                 f"steering_beta must be > 0, got {self.steering_beta}"
             )
 
+        # Validate v3.1 parameters
+        if not 0.0 < self.ema_decay < 1.0:
+            raise ValueError(
+                f"ema_decay must be in (0, 1), got {self.ema_decay}"
+            )
+        if self.lambda_roughness < 0:
+            raise ValueError(
+                f"lambda_roughness must be >= 0, got {self.lambda_roughness}"
+            )
+        if self.recharge_weight < 0:
+            raise ValueError(
+                f"recharge_weight must be >= 0, got {self.recharge_weight}"
+            )
+
     def to_dict(self) -> dict:
         """Convert config to dictionary for serialization."""
         return {
+            # v3.1 Mechanism 1: Register Filter
+            'enable_register_filter': self.enable_register_filter,
+            'ema_decay': self.ema_decay,
+            'kurtosis_threshold': self.kurtosis_threshold,
+            # v3.1 Mechanism 2: Authority Flow
+            'enable_authority_flow': self.enable_authority_flow,
+            'recharge_weight': self.recharge_weight,
+            # v3.1 Mechanism 3: Spectral Roughness
+            'enable_spectral_roughness': self.enable_spectral_roughness,
+            'lambda_roughness': self.lambda_roughness,
+            # Legacy parameters
             'semantic_layers': self.semantic_layers,
             'residual_weight': self.residual_weight,
             'power_iteration_steps': self.power_iteration_steps,

@@ -1,19 +1,27 @@
 """
-AG-SAR: Attention-Graph Shifting Attention to Relevance
+AG-SAR v3.1: Recursive Authority Flow for Zero-Latency Hallucination Detection
 
-Main pipeline class that orchestrates all modules for zero-latency
-uncertainty quantification in LLMs.
+Main pipeline class implementing the unified mathematical model:
+- Mechanism 1: Register Filter (Papers 1 & 2) - EMA Z-score + Sigmoid gate
+- Mechanism 2: Authority Flow (Paper 6 corrected) - Prompt Recharge + Gen Flow
+- Mechanism 3: Spectral Roughness (Paper 9) - Pre-MLP deviation metric
 
-Example:
-    >>> from transformers import GPT2LMHeadModel, GPT2Tokenizer
-    >>> from ag_sar import AGSAR
-    >>> model = GPT2LMHeadModel.from_pretrained('gpt2')
-    >>> tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+Supports two modes:
+1. Batch evaluation (compute_uncertainty): Full sequence analysis
+2. Streaming inference (process_step): Token-by-token with state
+
+Example (Batch):
     >>> ag_sar = AGSAR(model, tokenizer)
     >>> gse = ag_sar.compute_uncertainty("The capital of France is", "Paris")
-    >>> is_hall, conf, details = ag_sar.detect_hallucination(
-    ...     "The capital of France is", "London"
-    ... )
+
+Example (Streaming):
+    >>> ag_sar = AGSAR(model, tokenizer)
+    >>> ag_sar.reset()
+    >>> ag_sar.process_prompt(prompt_ids, logits)
+    >>> for token in generation:
+    ...     score = ag_sar.process_step(token_id, logits)
+    ...     if score > 0.5:
+    ...         print("Confident hallucination detected!")
 """
 
 from typing import Dict, List, Optional, Tuple, Any, Union, TYPE_CHECKING
@@ -42,6 +50,16 @@ from .uncertainty import (
     compute_gse_compiled,
     compute_bounded_surprisal,
     compute_manifold_consistent_spectral_surprisal,
+)
+# v3.1: Pure PyTorch O(N) operations
+from .ops.functional import (
+    fisher_kurtosis,
+    welford_update,
+    compute_register_mask,
+    compute_spectral_roughness,
+    compute_authority_flow,
+    compute_authority_flow_vectorized,
+    EMAState,
 )
 
 
@@ -108,6 +126,22 @@ class AGSAR:
 
         # Register hooks
         self.extractor.register_hooks()
+
+        # =====================================================
+        # v3.1: State Management for Streaming Inference
+        # =====================================================
+        # Authority history: 𝒜(j) for all tokens processed so far
+        self._authority_history: Optional[torch.Tensor] = None
+        # EMA state for register filter (per-layer statistics)
+        self._ema_state: Optional[EMAState] = None
+        # Prompt length for authority recharge boundary
+        self._prompt_length: int = 0
+        # Flag to distinguish prompt vs generation phase
+        self._is_prompt_phase: bool = True
+        # Accumulated value vectors for spectral roughness
+        self._value_history: Optional[torch.Tensor] = None
+        # Accumulated attention outputs (h_attn) for roughness
+        self._h_attn_history: Optional[torch.Tensor] = None
 
         # Load head scores for SGSS (Surprisal-Gated Spectral Steering)
         # These are Z-scored calibration scores: positive=Truth Head, negative=Induction Head
@@ -181,6 +215,42 @@ class AGSAR:
             device=self.device
         )
 
+    def _extract_v31_captures(self) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Extract v3.1 captures from extractor after forward pass.
+
+        Returns:
+            Tuple of:
+            - h_attn: (B, S, D) attention output BEFORE o_proj/MLP (mean over layers)
+            - value_states: (B, S, D) value vectors (mean over layers)
+            - attention_weights: (B, H, S, S) attention weights (mean over layers)
+
+        Note:
+            Returns (None, None, None) if captures are not available.
+            Captures are only populated for Llama/Qwen/Mistral with patched forwards.
+        """
+        if not hasattr(self.extractor, '_attn_outputs') or not self.extractor._attn_outputs:
+            return None, None, None
+
+        # v3.1: Use the LAST semantic layer for roughness computation
+        # Mean-pooling across layers breaks the mathematical relationship:
+        # mean(A_i @ V_i) ≠ mean(A) @ mean(V)
+        # Using the last layer (closest to output) is most informative.
+        last_layer = max(self._semantic_layer_indices)
+
+        h_attn = None
+        value_states = None
+        attention_weights = None
+
+        if last_layer in self.extractor._attn_outputs:
+            h_attn = self.extractor._attn_outputs[last_layer]
+        if last_layer in self.extractor._value_states:
+            value_states = self.extractor._value_states[last_layer]
+        if last_layer in self.extractor._attention_weights:
+            attention_weights = self.extractor._attention_weights[last_layer]
+
+        return h_attn, value_states, attention_weights
+
     def _tokenize(
         self,
         prompt: str,
@@ -227,6 +297,7 @@ class AGSAR:
         Supports multiple uncertainty metrics via config.uncertainty_metric:
         - "gse" (default): Graph-Shifted Entropy
         - "mcss": Manifold-Consistent Spectral Surprisal (catches Confident Lies)
+        - "v31" or "authority": v3.1 Recursive Authority Flow (Prompt Recharge)
 
         Full pipeline:
         1. Extract Q/K/V vectors via hooks (no O(N²) attention materialization)
@@ -249,6 +320,10 @@ class AGSAR:
         Raises:
             ValueError: If response is empty (no tokens to analyze)
         """
+        # v3.1: Route to Recursive Authority Flow if configured
+        if self.config.uncertainty_metric in ("v31", "authority"):
+            return self.compute_uncertainty_v31(prompt, response, return_details)
+
         # Handle empty response
         if not response or not response.strip():
             if return_details:
@@ -555,6 +630,398 @@ class AGSAR:
             'tokens': token_info,
             'response_start': response_start
         }
+
+    # =====================================================
+    # v3.1: Batch and Streaming Inference Methods
+    # =====================================================
+
+    @torch.inference_mode()
+    def compute_uncertainty_v31(
+        self,
+        prompt: str,
+        response: str,
+        return_details: bool = False,
+    ) -> Union[float, Dict[str, Any]]:
+        """
+        Compute uncertainty using v3.1 Recursive Authority Flow pipeline.
+
+        This is the batch version of the v3.1 pipeline, suitable for
+        evaluation where the full sequence is available. For streaming
+        inference during generation, use process_prompt + process_step.
+
+        The v3.1 pipeline implements:
+        1. Register Filter: M(t) = (t > 4) × Sigmoid(-Z(t) + τ)
+        2. Authority Flow: 𝒜(t) = [Σ_Prompt A_{t,j}] + [Σ_Gen A_{t,j} × 𝒜(j)] × M(t)
+        3. Spectral Roughness: δ(t) = ||h_attn - Σ A_{t,j} × v_j||_2
+        4. Final Score: 𝒜_final(t) = 𝒜(t) / (1 + λ × δ(t))
+
+        Args:
+            prompt: Input prompt text
+            response: Generated response text
+            return_details: If True, return dict with all intermediate values
+
+        Returns:
+            If return_details=False: Mean hallucination score (1 - authority) for response
+            If return_details=True: Dict with authority, roughness, mask, etc.
+        """
+        # Handle empty response
+        if not response or not response.strip():
+            if return_details:
+                return {
+                    'uncertainty': 0.0,
+                    'metric': 'v3.1_authority',
+                    'authority': torch.tensor([[]], device=self.device),
+                    'roughness': torch.tensor([[]], device=self.device),
+                    'register_mask': torch.tensor([[]], device=self.device),
+                    'response_start': 0,
+                }
+            return 0.0
+
+        # Tokenize
+        input_ids, attention_mask, response_start = self._tokenize(prompt, response)
+        B, seq_len = input_ids.shape
+
+        # Forward pass with attention capture
+        with torch.no_grad():
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_attentions=True,
+            )
+
+        # Extract v3.1 captures
+        h_attn, value_states, attn_weights = self._extract_v31_captures()
+
+        # Fallback: use model's attention if hooks didn't capture
+        if attn_weights is None and hasattr(outputs, 'attentions') and outputs.attentions:
+            attn_list = [outputs.attentions[i] for i in self._semantic_layer_indices
+                         if i < len(outputs.attentions) and outputs.attentions[i] is not None]
+            if attn_list:
+                attn_weights = torch.stack(attn_list, dim=0).mean(dim=0)
+
+        # =====================================================
+        # Step 1: Register Filter M(t)
+        # =====================================================
+        register_mask = None
+        if value_states is not None and self.config.enable_register_filter:
+            register_mask, _ = compute_register_mask(
+                value_states,
+                ema_state=None,  # Fresh for batch mode
+                kurtosis_threshold=self.config.kurtosis_threshold,
+                sink_token_count=self.config.sink_token_count,
+                ema_decay=self.config.ema_decay,
+                update_ema=False,  # No state update in batch mode
+            )
+
+        # =====================================================
+        # Step 2: Authority Flow 𝒜(t) - Vectorized for batch
+        # =====================================================
+        if attn_weights is not None and self.config.enable_authority_flow:
+            # Use vectorized version for batch evaluation
+            authority = compute_authority_flow_vectorized(
+                attention_weights=attn_weights,
+                prompt_length=response_start,
+                register_mask=register_mask,
+                attention_mask=attention_mask,
+            )
+        else:
+            # Fallback: uniform authority
+            authority = torch.ones(B, seq_len, device=self.device, dtype=self.dtype)
+            authority[:, response_start:] = 0.5
+
+        # =====================================================
+        # Step 3: Spectral Roughness δ(t)
+        # =====================================================
+        roughness = torch.zeros(B, seq_len, device=self.device, dtype=self.dtype)
+        if (h_attn is not None and value_states is not None and
+                attn_weights is not None and self.config.enable_spectral_roughness):
+            roughness = compute_spectral_roughness(
+                h_attn=h_attn,
+                value_vectors=value_states,
+                attention_weights=attn_weights,
+                attention_mask=attention_mask,
+            )
+
+        # =====================================================
+        # Step 4: Final Authority Score
+        # =====================================================
+        lambda_roughness = self.config.lambda_roughness
+        authority_final = authority / (1.0 + lambda_roughness * roughness)
+        authority_final = authority_final.clamp(0.0, 1.0)
+
+        # Compute mean hallucination score over response tokens
+        response_mask = torch.zeros_like(attention_mask, dtype=self.dtype)
+        response_mask[:, response_start:] = 1.0
+
+        # Hallucination score = 1 - authority
+        hallucination_scores = (1.0 - authority_final) * response_mask
+        num_response_tokens = response_mask.sum()
+        mean_hallucination = (hallucination_scores.sum() / num_response_tokens).item() if num_response_tokens > 0 else 0.0
+
+        if return_details:
+            return {
+                'uncertainty': mean_hallucination,
+                'metric': 'v3.1_authority',
+                'authority': authority_final,
+                'authority_raw': authority,
+                'roughness': roughness,
+                'register_mask': register_mask,
+                'response_start': response_start,
+                'input_ids': input_ids,
+                'attention_mask': attention_mask,
+                'logits': outputs.logits,
+            }
+
+        return mean_hallucination
+
+    @torch.inference_mode()
+    def process_prompt(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        """
+        Process the prompt phase of v3.1 streaming inference.
+
+        Initializes authority to 1.0 for all prompt tokens (source of truth),
+        sets up EMA state for register filter, and caches value vectors.
+
+        Args:
+            input_ids: (1, prompt_len) prompt token IDs
+            attention_mask: (1, prompt_len) optional attention mask
+
+        Returns:
+            Dict with prompt processing results:
+            - prompt_length: Number of prompt tokens
+            - authority: (1, prompt_len) authority scores (all 1.0)
+            - ema_state: Initialized EMA state
+        """
+        self.reset()  # Clear any previous state
+
+        B, prompt_len = input_ids.shape
+        device = input_ids.device
+
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+
+        # Forward pass to populate hooks
+        with torch.no_grad():
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_attentions=False,
+            )
+
+        # Extract v3.1 captures
+        h_attn, value_states, attn_weights = self._extract_v31_captures()
+
+        # Initialize authority: prompt tokens = 1.0 (source of truth)
+        self._authority_history = torch.ones(B, prompt_len, device=device, dtype=self.dtype)
+        self._prompt_length = prompt_len
+        self._is_prompt_phase = False  # Prompt done, ready for generation
+
+        # Initialize EMA state from prompt's value vectors
+        if value_states is not None and self.config.enable_register_filter:
+            _, self._ema_state = compute_register_mask(
+                value_states,
+                ema_state=None,  # Initialize fresh
+                kurtosis_threshold=self.config.kurtosis_threshold,
+                sink_token_count=self.config.sink_token_count,
+                ema_decay=self.config.ema_decay,
+                update_ema=True,
+            )
+
+        # Cache vectors for spectral roughness
+        if value_states is not None:
+            self._value_history = value_states
+        if h_attn is not None:
+            self._h_attn_history = h_attn
+
+        return {
+            'prompt_length': prompt_len,
+            'authority': self._authority_history.clone(),
+            'ema_state': self._ema_state,
+            'logits': outputs.logits,
+        }
+
+    @torch.inference_mode()
+    def process_step(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        return_details: bool = False,
+    ) -> Union[float, Dict[str, Any]]:
+        """
+        Process one generation step with v3.1 Recursive Authority Flow.
+
+        Implements the v3.1 pipeline per token:
+        1. Register Filter: M(t) = (t > 4) × Sigmoid(-Z(t) + τ)
+        2. Authority Flow: 𝒜(t) = [Σ_Prompt A_{t,j}] + [Σ_Gen A_{t,j} × 𝒜(j)] × M(t)
+        3. Spectral Roughness: δ(t) = ||h_attn - Σ A_{t,j} × v_j||_2
+        4. Final Score: 𝒜_final(t) = 𝒜(t) / (1 + λ × δ(t))
+
+        Args:
+            input_ids: (1, seq_len) full sequence including new token
+            attention_mask: (1, seq_len) optional attention mask
+            return_details: If True, return dict with all intermediate values
+
+        Returns:
+            If return_details=False: Hallucination score (1 - authority) in [0, 1]
+            If return_details=True: Dict with authority, roughness, mask, etc.
+
+        Raises:
+            RuntimeError: If called before process_prompt
+        """
+        if self._is_prompt_phase:
+            raise RuntimeError(
+                "Must call process_prompt before process_step. "
+                "Use reset() to start a new sequence."
+            )
+
+        B, seq_len = input_ids.shape
+        device = input_ids.device
+        t = seq_len - 1  # Current token index
+
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+
+        # Forward pass for this step
+        with torch.no_grad():
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_attentions=True,  # Need attention for authority flow
+            )
+
+        # Extract v3.1 captures
+        h_attn, value_states, attn_weights = self._extract_v31_captures()
+
+        # Fallback: use model's attention if hooks didn't capture
+        if attn_weights is None and hasattr(outputs, 'attentions') and outputs.attentions:
+            # Mean over layers and select semantic layers, filtering None
+            attn_list = [outputs.attentions[i] for i in self._semantic_layer_indices
+                         if i < len(outputs.attentions) and outputs.attentions[i] is not None]
+            if attn_list:
+                attn_weights = torch.stack(attn_list, dim=0).mean(dim=0)
+
+        # =====================================================
+        # Step 1: Register Filter M(t)
+        # =====================================================
+        register_mask = None
+        if value_states is not None and self.config.enable_register_filter:
+            register_mask, self._ema_state = compute_register_mask(
+                value_states,
+                ema_state=self._ema_state,
+                kurtosis_threshold=self.config.kurtosis_threshold,
+                sink_token_count=self.config.sink_token_count,
+                ema_decay=self.config.ema_decay,
+                update_ema=True,
+            )
+
+        # =====================================================
+        # Step 2: Authority Flow 𝒜(t)
+        # =====================================================
+        if attn_weights is not None and self.config.enable_authority_flow:
+            # Extend authority history to current sequence length
+            if self._authority_history.size(1) < seq_len:
+                # Pad with zeros for new token position
+                padding = torch.zeros(
+                    B, seq_len - self._authority_history.size(1),
+                    device=device, dtype=self.dtype
+                )
+                self._authority_history = torch.cat([self._authority_history, padding], dim=1)
+
+            # Compute authority for current token
+            authority = compute_authority_flow(
+                attention_weights=attn_weights,
+                prompt_length=self._prompt_length,
+                register_mask=register_mask,
+                previous_authority=self._authority_history,
+                attention_mask=attention_mask,
+            )
+            self._authority_history = authority
+        else:
+            # Fallback: use vectorized approximation
+            if attn_weights is not None:
+                authority = compute_authority_flow_vectorized(
+                    attention_weights=attn_weights,
+                    prompt_length=self._prompt_length,
+                    register_mask=register_mask,
+                    attention_mask=attention_mask,
+                )
+            else:
+                # No attention available, use default authority
+                authority = torch.ones(B, seq_len, device=device, dtype=self.dtype)
+                authority[:, self._prompt_length:] = 0.5  # Uncertain for generated tokens
+
+            # Still update authority history for state tracking
+            self._authority_history = authority
+
+        # =====================================================
+        # Step 3: Spectral Roughness δ(t)
+        # =====================================================
+        roughness = torch.zeros(B, seq_len, device=device, dtype=self.dtype)
+        if (h_attn is not None and value_states is not None and
+                attn_weights is not None and self.config.enable_spectral_roughness):
+            roughness = compute_spectral_roughness(
+                h_attn=h_attn,
+                value_vectors=value_states,
+                attention_weights=attn_weights,
+                attention_mask=attention_mask,
+            )
+            # Update cached vectors
+            self._value_history = value_states
+            self._h_attn_history = h_attn
+
+        # =====================================================
+        # Step 4: Final Authority Score
+        # =====================================================
+        # Apply spectral penalty: 𝒜_final = 𝒜 / (1 + λ × δ)
+        lambda_roughness = self.config.lambda_roughness
+        authority_final = authority / (1.0 + lambda_roughness * roughness)
+        authority_final = authority_final.clamp(0.0, 1.0)
+
+        # Current token's hallucination score (1 - authority)
+        current_authority = authority_final[0, t].item()
+        hallucination_score = 1.0 - current_authority
+
+        if return_details:
+            return {
+                'hallucination_score': hallucination_score,
+                'authority': authority_final[0, t].item(),
+                'authority_raw': authority[0, t].item() if authority is not None else None,
+                'roughness': roughness[0, t].item(),
+                'register_mask': register_mask[0, t].item() if register_mask is not None else None,
+                'token_position': t,
+                'prompt_length': self._prompt_length,
+                'full_authority': authority_final,
+                'full_roughness': roughness,
+                'logits': outputs.logits,
+            }
+
+        return hallucination_score
+
+    def reset(self) -> None:
+        """
+        Reset v3.1 streaming state for a new generation.
+
+        Call this before processing a new prompt-response sequence.
+        Clears authority history, EMA state, and all accumulated vectors.
+
+        Example:
+            >>> ag_sar.reset()
+            >>> ag_sar.process_prompt(prompt_ids, prompt_logits)
+            >>> for token in generation:
+            ...     score = ag_sar.process_step(token_id, token_logits)
+        """
+        self._authority_history = None
+        self._ema_state = None
+        self._prompt_length = 0
+        self._is_prompt_phase = True
+        self._value_history = None
+        self._h_attn_history = None
+        # Clear extractor caches
+        self.extractor.clear_cache()
 
     def cleanup(self) -> None:
         """Remove hooks and free resources."""

@@ -135,6 +135,11 @@ class AttentionExtractor:
         # Storage for extracted data (cleared after each forward)
         self._attention_weights: Dict[int, torch.Tensor] = {}
         self._value_norms: Dict[int, torch.Tensor] = {}
+        # v3.1 additions: full value states and attention outputs for spectral roughness
+        self._value_states: Dict[int, torch.Tensor] = {}   # Full V vectors (B, S, D)
+        self._attn_outputs: Dict[int, torch.Tensor] = {}   # h_attn before MLP (B, S, D)
+        # v3.2 addition: block outputs for MLP Divergence metric (Llama-3)
+        self._block_outputs: Dict[int, torch.Tensor] = {}  # h_final after MLP (B, S, D)
         # Q/K storage for post-hoc attention reconstruction (SDPA compatibility)
         self._query_states: Dict[int, torch.Tensor] = {}
         self._key_states: Dict[int, torch.Tensor] = {}
@@ -142,6 +147,7 @@ class AttentionExtractor:
         self._query_states_pre_rope: Dict[int, torch.Tensor] = {}
         self._key_states_pre_rope: Dict[int, torch.Tensor] = {}
         self._hooks: List[torch.utils.hooks.RemovableHandle] = []
+        self._block_hooks: List[torch.utils.hooks.RemovableHandle] = []
 
         # Llama-specific: store original forward methods for cleanup
         self._original_forwards: Dict[int, Callable] = {}
@@ -196,8 +202,9 @@ class AttentionExtractor:
 
         CRITICAL: GPT-2 c_attn outputs (batch, seq, 3 * hidden_dim).
         We split into Q, K, V and:
-        1. Compute V norms immediately (for sink-aware centrality)
-        2. Store Q, K for post-hoc attention reconstruction (SDPA compatibility)
+        1. Store full V vectors for spectral roughness (v3.1)
+        2. Compute V norms immediately (for sink-aware centrality)
+        3. Store Q, K for post-hoc attention reconstruction (SDPA compatibility)
 
         This enables zero-latency inference with Flash Attention while still
         allowing attention graph construction.
@@ -208,6 +215,9 @@ class AttentionExtractor:
 
             # Split into Q, K, V (each is hidden_dim sized)
             q, k, v = output.split(self.hidden_size, dim=-1)
+
+            # v3.1: Store full value vectors (B, S, D) for spectral roughness
+            self._value_states[layer_idx] = v.detach().to(self.dtype)
 
             # Reshape to (batch, num_heads, seq, head_dim) for attention computation
             q_heads = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
@@ -230,14 +240,23 @@ class AttentionExtractor:
 
     def _make_attn_hook(self, layer_idx: int):
         """
-        Create hook for attention weights.
+        Create hook for attention weights and attention output (h_attn).
 
         GPT2Attention.forward returns (attn_output, present, attn_weights)
         when output_attentions=True.
+
+        v3.1: Also captures attn_output (h_attn) for spectral roughness.
         """
         def hook_fn(module, input_args, output):
             # GPT2Attention output is tuple: (attn_output, present, attn_weights) or (attn_output, attn_weights)
             if isinstance(output, tuple):
+                # v3.1: Capture attention output (h_attn) - first element is always attn_output
+                # This is after c_proj but before residual/MLP
+                attn_output = output[0]
+                if isinstance(attn_output, torch.Tensor) and attn_output.dim() == 3:
+                    # Shape: (batch, seq, hidden_size)
+                    self._attn_outputs[layer_idx] = attn_output.detach().to(self.dtype)
+
                 # Find attention weights in output
                 for item in output:
                     if isinstance(item, torch.Tensor) and item.dim() == 4:
@@ -301,7 +320,7 @@ class AttentionExtractor:
             # ★★★ CAPTURE POST-ROPE Q/K HERE ★★★
             extractor._query_states[layer_idx] = query_states.detach().to(extractor.dtype)
             extractor._key_states[layer_idx] = key_states.detach().to(extractor.dtype)
-            # Compute V norms
+            # Compute V norms (before repeat_kv)
             v_norms = torch.norm(value_states, dim=-1, p=2)
             extractor._value_norms[layer_idx] = v_norms.detach().to(extractor.dtype)
             # ★★★ END CAPTURE ★★★
@@ -316,17 +335,32 @@ class AttentionExtractor:
             key_states = repeat_kv(key_states, attn.num_key_value_groups)
             value_states = repeat_kv(value_states, attn.num_key_value_groups)
 
+            # v3.1: Store full value vectors AFTER repeat_kv (B, S, hidden_size)
+            # This ensures shape matches h_attn for roughness computation
+            v_flat = value_states.transpose(1, 2).reshape(bsz, q_len, -1)
+            extractor._value_states[layer_idx] = v_flat.detach().to(extractor.dtype)
+
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(attn.head_dim)
 
             if attention_mask is not None:
                 attn_weights = attn_weights + attention_mask
 
             attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+
+            # ★★★ v3.1: CAPTURE attention weights BEFORE dropout ★★★
+            extractor._attention_weights[layer_idx] = attn_weights.detach().to(extractor.dtype)
+            # ★★★ END CAPTURE ★★★
+
             attn_weights = F.dropout(attn_weights, p=attn.attention_dropout, training=attn.training)
             attn_output = torch.matmul(attn_weights, value_states)
 
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.reshape(bsz, q_len, attn.hidden_size)
+
+            # ★★★ v3.1: CAPTURE h_attn BEFORE o_proj ★★★
+            extractor._attn_outputs[layer_idx] = attn_output.detach().to(extractor.dtype)
+            # ★★★ END CAPTURE ★★★
+
             attn_output = attn.o_proj(attn_output)
 
             if not output_attentions:
@@ -388,6 +422,7 @@ class AttentionExtractor:
             # ★★★ CAPTURE POST-ROPE Q/K HERE ★★★
             extractor._query_states[layer_idx] = query_states.detach().to(extractor.dtype)
             extractor._key_states[layer_idx] = key_states.detach().to(extractor.dtype)
+            # Compute V norms (before repeat_kv)
             v_norms = torch.norm(value_states, dim=-1, p=2)
             extractor._value_norms[layer_idx] = v_norms.detach().to(extractor.dtype)
             # ★★★ END CAPTURE ★★★
@@ -402,17 +437,31 @@ class AttentionExtractor:
             key_states = repeat_kv(key_states, attn.num_key_value_groups)
             value_states = repeat_kv(value_states, attn.num_key_value_groups)
 
+            # v3.1: Store full value vectors AFTER repeat_kv (B, S, hidden_size)
+            v_flat = value_states.transpose(1, 2).reshape(bsz, q_len, -1)
+            extractor._value_states[layer_idx] = v_flat.detach().to(extractor.dtype)
+
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(attn.head_dim)
 
             if attention_mask is not None:
                 attn_weights = attn_weights + attention_mask
 
             attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+
+            # ★★★ v3.1: CAPTURE attention weights BEFORE dropout ★★★
+            extractor._attention_weights[layer_idx] = attn_weights.detach().to(extractor.dtype)
+            # ★★★ END CAPTURE ★★★
+
             attn_weights = F.dropout(attn_weights, p=attn.attention_dropout, training=attn.training)
             attn_output = torch.matmul(attn_weights, value_states)
 
             attn_output = attn_output.transpose(1, 2).contiguous()
-            attn_output = attn_output.reshape(bsz, q_len, attn.hidden_size)
+            attn_output = attn_output.reshape(bsz, q_len, -1)
+
+            # ★★★ v3.1: CAPTURE h_attn BEFORE o_proj ★★★
+            extractor._attn_outputs[layer_idx] = attn_output.detach().to(extractor.dtype)
+            # ★★★ END CAPTURE ★★★
+
             attn_output = attn.o_proj(attn_output)
 
             if not output_attentions:
@@ -426,6 +475,8 @@ class AttentionExtractor:
     def _patch_llama_attention(self, layer_idx: int) -> None:
         """
         Copy-paste patch for LlamaAttention.forward with POST-RoPE capture.
+
+        v3.1: Full copy-paste to capture h_attn before o_proj.
         """
         from transformers.models.llama.modeling_llama import (
             apply_rotary_pos_emb,
@@ -464,21 +515,53 @@ class AttentionExtractor:
             # ★★★ CAPTURE POST-ROPE Q/K HERE ★★★
             extractor._query_states[layer_idx] = query_states.detach().to(extractor.dtype)
             extractor._key_states[layer_idx] = key_states.detach().to(extractor.dtype)
+            # Compute V norms (before repeat_kv)
             v_norms = torch.norm(value_states, dim=-1, p=2)
             extractor._value_norms[layer_idx] = v_norms.detach().to(extractor.dtype)
             # ★★★ END CAPTURE ★★★
 
-            # Call original for the rest of the computation
-            return original_forward(
-                hidden_states,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_value,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-                cache_position=cache_position,
-                **kwargs
-            )
+            if past_key_value is not None:
+                # Handle cache for generation
+                cache_kwargs = {"sin": sin, "cos": cos}
+                if hasattr(past_key_value, 'update'):
+                    key_states, value_states = past_key_value.update(
+                        key_states, value_states, layer_idx, cache_kwargs
+                    )
+
+            # Repeat K/V for GQA
+            key_states = repeat_kv(key_states, attn.num_key_value_groups)
+            value_states = repeat_kv(value_states, attn.num_key_value_groups)
+
+            # v3.1: Store full value vectors AFTER repeat_kv (B, S, hidden_size)
+            v_flat = value_states.transpose(1, 2).reshape(bsz, q_len, -1)
+            extractor._value_states[layer_idx] = v_flat.detach().to(extractor.dtype)
+
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(attn.head_dim)
+
+            if attention_mask is not None:
+                attn_weights = attn_weights + attention_mask
+
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+
+            # ★★★ v3.1: CAPTURE attention weights ★★★
+            extractor._attention_weights[layer_idx] = attn_weights.detach().to(extractor.dtype)
+            # ★★★ END CAPTURE ★★★
+
+            attn_output = torch.matmul(attn_weights, value_states)
+
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.reshape(bsz, q_len, -1)
+
+            # ★★★ v3.1: CAPTURE h_attn BEFORE o_proj ★★★
+            extractor._attn_outputs[layer_idx] = attn_output.detach().to(extractor.dtype)
+            # ★★★ END CAPTURE ★★★
+
+            attn_output = attn.o_proj(attn_output)
+
+            if not output_attentions:
+                attn_weights = None
+
+            return attn_output, attn_weights, past_key_value
 
         attn.forward = patched_forward
         self._llama_patched = True
@@ -496,6 +579,33 @@ class AttentionExtractor:
 
         self._original_forwards.clear()
         self._llama_patched = False
+
+    def _make_block_hook(self, layer_idx: int):
+        """
+        Create hook for decoder block output (post-MLP).
+
+        v3.2: Captures h_final for MLP Divergence metric on Llama-3.
+        The MLP Divergence measures: 1 - CosineSim(h_attn, h_final)
+
+        Args:
+            layer_idx: Index of the decoder layer
+
+        Returns:
+            Hook function that captures block output
+        """
+        def hook_fn(module, input_args, output):
+            # Decoder layer output is tuple: (hidden_states, ...)
+            # hidden_states is after Attention + MLP + Residuals
+            if isinstance(output, tuple):
+                hidden_states = output[0]
+            else:
+                hidden_states = output
+
+            if isinstance(hidden_states, torch.Tensor) and hidden_states.dim() == 3:
+                # Shape: (batch, seq, hidden_size)
+                self._block_outputs[layer_idx] = hidden_states.detach().to(self.dtype)
+
+        return hook_fn
 
     def register_hooks(self) -> None:
         """Register forward hooks on attention layers."""
@@ -529,12 +639,25 @@ class AttentionExtractor:
                 else:
                     self._patch_llama_attention(layer_idx)
 
+                # v3.2: Register block hooks for MLP Divergence metric
+                # Block output = hidden state after Attention + MLP + Residuals
+                layer = self.transformer.layers[layer_idx]
+                block_handle = layer.register_forward_hook(
+                    self._make_block_hook(layer_idx)
+                )
+                self._block_hooks.append(block_handle)
+
     def remove_hooks(self) -> None:
         """Remove all registered hooks and restore patched methods."""
         # Remove GPT-2 style hooks
         for handle in self._hooks:
             handle.remove()
         self._hooks.clear()
+
+        # Remove block hooks (v3.2)
+        for handle in self._block_hooks:
+            handle.remove()
+        self._block_hooks.clear()
 
         # Restore Llama patched forward methods
         if self._llama_patched:
@@ -544,6 +667,9 @@ class AttentionExtractor:
         """Clear stored attention weights, value norms, and Q/K states."""
         self._attention_weights.clear()
         self._value_norms.clear()
+        self._value_states.clear()
+        self._attn_outputs.clear()
+        self._block_outputs.clear()
         self._query_states.clear()
         self._key_states.clear()
         self._query_states_pre_rope.clear()

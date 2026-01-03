@@ -15,9 +15,6 @@ results/
 .idea/
 *.swp
 
-# Claude Code
-CLAUDE.md
-
 # OS
 .DS_Store
 Thumbs.db
@@ -85,3 +82,12 @@ virtualenv/
 datasets/
 raw_data/
 processed_data/
+
+# Resources (research papers, consolidated LaTeX)
+resources/
+*.tar.gz
+*.tex
+
+# Jupyter notebooks outputs
+.ipynb_checkpoints/
+*.ipynb

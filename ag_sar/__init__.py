@@ -1,15 +1,19 @@
 """
-AG-SAR: Attention-Graph Shifting Attention to Relevance
+AG-SAR v3.1: Recursive Authority Flow for Zero-Latency Hallucination Detection
 
-Zero-latency uncertainty quantification for LLMs by analyzing
-internal attention graph structure.
+Implements the unified mathematical model from literature synthesis:
+- Mechanism 1: Register Filter (Papers 1 & 2) - EMA Z-score + Sigmoid gate
+- Mechanism 2: Authority Flow (Paper 6 corrected) - Prompt Recharge + Gen Flow
+- Mechanism 3: Spectral Roughness (Paper 9) - Pre-MLP deviation metric
+- Mechanism 4: SnapKV Eviction (Paper 5) - Authority-weighted voting
 
 Example:
-    >>> from transformers import GPT2LMHeadModel, GPT2Tokenizer
-    >>> from ag_sar import AGSAR
-    >>> model = GPT2LMHeadModel.from_pretrained('gpt2')
-    >>> tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-    >>> ag_sar = AGSAR(model, tokenizer)
+    >>> from transformers import AutoModelForCausalLM, AutoTokenizer
+    >>> from ag_sar import AGSAR, AGSARConfig
+    >>> model = AutoModelForCausalLM.from_pretrained('gpt2')
+    >>> tokenizer = AutoTokenizer.from_pretrained('gpt2')
+    >>> config = AGSARConfig(enable_register_filter=True, lambda_roughness=10.0)
+    >>> ag_sar = AGSAR(model, tokenizer, config)
     >>> result = ag_sar.compute_uncertainty("The capital of France is", "Paris")
 """
 
@@ -40,8 +44,23 @@ from .multi_gpu import (
     get_optimal_gpu_count,
     distribute_samples,
 )
+# v3.1: Pure PyTorch operations for O(N) streaming inference
+from .ops import (
+    fisher_kurtosis,
+    welford_update,
+    compute_register_mask,
+    compute_spectral_roughness,
+    compute_spectral_roughness_gqa,
+    compute_authority_flow,
+    compute_authority_flow_vectorized,
+    compute_snapkv_eviction,
+    compress_kv_cache,
+    align_gqa_heads,
+    get_gqa_config,
+    EMAState,
+)
 
-__version__ = "0.1.0"
+__version__ = "0.3.1"
 
 __all__ = [
     # Main class
@@ -72,4 +91,17 @@ __all__ = [
     "compute_graph_shifted_entropy",
     "detect_hallucination",
     "compute_per_token_uncertainty",
+    # v3.1: Pure PyTorch O(N) operations
+    "fisher_kurtosis",
+    "welford_update",
+    "compute_register_mask",
+    "compute_spectral_roughness",
+    "compute_spectral_roughness_gqa",
+    "compute_authority_flow",
+    "compute_authority_flow_vectorized",
+    "compute_snapkv_eviction",
+    "compress_kv_cache",
+    "align_gqa_heads",
+    "get_gqa_config",
+    "EMAState",
 ]

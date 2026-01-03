@@ -1,139 +1,0 @@
-/home/ubuntu/.local/lib/python3.10/site-packages/huggingface_hub/file_download.py:942: FutureWarning: `resume_download` is deprecated and will be removed in version 1.0.0. Downloads always resume when possible. If you want to force a new download, use `force_download=True`.
-  warnings.warn(
-======================================================================
-AG-SAR EVALUATION FRAMEWORK
-Started: 2026-01-01 09:44:06
-Model: qwen
-Chapters: [2, 4]
-Quick mode: True
-Seeds: [42]
-NLI labeling: False
-torch.compile: False
-Dataset: triviaqa
-======================================================================
-Using device: cuda
-GPU: NVIDIA H100 80GB HBM3
-Memory: 85.0 GB
-
-Loading Qwen/Qwen2.5-7B...
-  Detected Qwen architecture (RoPE + GQA)
-Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:00,  3.26it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:00<00:00,  3.26it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:00<00:00,  3.30it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:01<00:00,  3.43it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:01<00:00,  3.37it/s]
-/home/ubuntu/.local/lib/python3.10/site-packages/huggingface_hub/file_download.py:942: FutureWarning: `resume_download` is deprecated and will be removed in version 1.0.0. Downloads always resume when possible. If you want to force a new download, use `force_download=True`.
-  warnings.warn(
-Special tokens have been added in the vocabulary, make sure the associated word embeddings are fine-tuned or trained.
-Some weights of RobertaModel were not initialized from the model checkpoint at roberta-large and are newly initialized: ['roberta.pooler.dense.bias', 'roberta.pooler.dense.weight']
-You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
-  Using bfloat16 precision
-Initializing AG-SAR...
-Initializing Predictive Entropy baseline...
-Initializing Original SAR baseline (loading RoBERTa-Large)...
-Loading roberta-large for perturbation analysis...
-
-======================================================================
-CHAPTER 2: HALLUCINATION DETECTION
-Dataset: triviaqa
-======================================================================
-
---- Experiment 3: AUROC Benchmark ---
-============================================================
-Experiment 3: AUROC Benchmark - Hallucination Detection
-Dataset: triviaqa
-============================================================
-
-Loading triviaqa (50 samples)...
-
-Processing 100 samples...
-(Note: Original SAR is O(N) and will be slower)
-Evaluating:   0%|          | 0/100 [00:00<?, ?it/s]2026-01-01 09:44:21.455372: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
-2026-01-01 09:44:21.468033: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
-WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
-E0000 00:00:1767260661.482503  107709 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
-E0000 00:00:1767260661.487784  107709 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
-W0000 00:00:1767260661.498219  107709 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1767260661.498240  107709 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1767260661.498244  107709 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1767260661.498246  107709 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-2026-01-01 09:44:21.501497: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
-To enable the following instructions: AVX512F AVX512_VNNI AVX512_BF16 AVX512_FP16 AVX_VNNI, in other operations, rebuild TensorFlow with the appropriate compiler flags.
-Evaluating:   1%|          | 1/100 [00:04<07:35,  4.61s/it]Evaluating:   2%|▏         | 2/100 [00:05<03:59,  2.45s/it]Evaluating:   3%|▎         | 3/100 [00:06<02:53,  1.79s/it]Evaluating:   4%|▍         | 4/100 [00:07<02:21,  1.47s/it]Evaluating:   5%|▌         | 5/100 [00:08<02:09,  1.36s/it]Evaluating:   6%|▌         | 6/100 [00:09<01:59,  1.28s/it]Evaluating:   9%|▉         | 9/100 [00:09<00:50,  1.79it/s]Evaluating:  11%|█         | 11/100 [00:10<00:35,  2.54it/s]Evaluating:  12%|█▏        | 12/100 [00:11<00:45,  1.92it/s]Evaluating:  13%|█▎        | 13/100 [00:11<00:37,  2.34it/s]Evaluating:  15%|█▌        | 15/100 [00:12<00:39,  2.16it/s]Evaluating:  17%|█▋        | 17/100 [00:13<00:42,  1.96it/s]Evaluating:  18%|█▊        | 18/100 [00:14<00:51,  1.60it/s]Evaluating:  20%|██        | 20/100 [00:14<00:34,  2.34it/s]Evaluating:  23%|██▎       | 23/100 [00:15<00:31,  2.42it/s]Evaluating:  24%|██▍       | 24/100 [00:17<00:43,  1.74it/s]Evaluating:  25%|██▌       | 25/100 [00:18<00:51,  1.46it/s]Evaluating:  26%|██▌       | 26/100 [00:19<00:56,  1.30it/s]Evaluating:  27%|██▋       | 27/100 [00:20<01:01,  1.19it/s]Evaluating:  28%|██▊       | 28/100 [00:21<01:03,  1.13it/s]Evaluating:  30%|███       | 30/100 [00:21<00:38,  1.83it/s]Evaluating:  32%|███▏      | 32/100 [00:22<00:38,  1.78it/s]Evaluating:  34%|███▍      | 34/100 [00:23<00:26,  2.49it/s]Evaluating:  35%|███▌      | 35/100 [00:23<00:22,  2.90it/s]Evaluating:  37%|███▋      | 37/100 [00:23<00:15,  3.99it/s]Evaluating:  38%|███▊      | 38/100 [00:24<00:26,  2.31it/s]Evaluating:  40%|████      | 40/100 [00:24<00:18,  3.27it/s]Evaluating:  42%|████▏     | 42/100 [00:24<00:13,  4.34it/s]Evaluating:  43%|████▎     | 43/100 [00:25<00:11,  4.87it/s]Evaluating:  45%|████▌     | 45/100 [00:25<00:09,  6.03it/s]Evaluating:  49%|████▉     | 49/100 [00:26<00:11,  4.51it/s]Evaluating:  51%|█████     | 51/100 [00:26<00:08,  5.59it/s]Evaluating:  54%|█████▍    | 54/100 [00:26<00:05,  7.85it/s]Evaluating:  57%|█████▋    | 57/100 [00:26<00:04, 10.36it/s]Evaluating:  59%|█████▉    | 59/100 [00:27<00:08,  4.88it/s]Evaluating:  61%|██████    | 61/100 [00:28<00:11,  3.52it/s]Evaluating:  65%|██████▌   | 65/100 [00:28<00:06,  5.71it/s]Evaluating:  68%|██████▊   | 68/100 [00:29<00:04,  7.58it/s]Evaluating:  71%|███████   | 71/100 [00:29<00:02,  9.75it/s]Evaluating:  74%|███████▍  | 74/100 [00:29<00:02, 12.10it/s]Evaluating:  78%|███████▊  | 78/100 [00:29<00:01, 16.03it/s]Evaluating:  81%|████████  | 81/100 [00:29<00:01, 18.14it/s]Evaluating:  84%|████████▍ | 84/100 [00:29<00:00, 20.03it/s]Evaluating:  87%|████████▋ | 87/100 [00:29<00:00, 21.61it/s]Evaluating:  90%|█████████ | 90/100 [00:29<00:00, 22.92it/s]Evaluating:  94%|█████████▍| 94/100 [00:29<00:00, 26.36it/s]Evaluating:  97%|█████████▋| 97/100 [00:30<00:00, 26.52it/s]Evaluating: 100%|██████████| 100/100 [00:30<00:00, 26.66it/s]Evaluating: 100%|██████████| 100/100 [00:30<00:00,  3.32it/s]
-/home/ubuntu/.local/lib/python3.10/site-packages/sklearn/metrics/_ranking.py:1201: UndefinedMetricWarning: No positive samples in y_true, true positive value should be meaningless
-  warnings.warn(
-/home/ubuntu/.local/lib/python3.10/site-packages/sklearn/metrics/_ranking.py:1046: UserWarning: No positive class found in y_true, recall is set to one for all thresholds.
-  warnings.warn(
-/home/ubuntu/.local/lib/python3.10/site-packages/sklearn/metrics/_ranking.py:1201: UndefinedMetricWarning: No positive samples in y_true, true positive value should be meaningless
-  warnings.warn(
-/home/ubuntu/.local/lib/python3.10/site-packages/sklearn/metrics/_ranking.py:1201: UndefinedMetricWarning: No positive samples in y_true, true positive value should be meaningless
-  warnings.warn(
-/home/ubuntu/.local/lib/python3.10/site-packages/sklearn/metrics/_ranking.py:1201: UndefinedMetricWarning: No positive samples in y_true, true positive value should be meaningless
-  warnings.warn(
-
-============================================================
-RESULTS:
-============================================================
-
-Method                         AUROC      AUPRC    Samples
-------------------------------------------------------------
-ag_sar                         0.898      0.908         93
-original_sar                     nan      0.000         46
-predictive_entropy             0.716      0.738         93
-
-============================================================
-RESULT: PASS
-AG-SAR: 0.898, PE: 0.716, SAR: nan
-============================================================
-
-Results saved to: results/exp3_auroc.json
-
---- Experiment 4: Calibration Error ---
-============================================================
-Experiment 4: Calibration Error (ECE)
-Dataset: triviaqa
-============================================================
-
-Loading triviaqa (80 samples)...
-
-Processing 160 samples...
-Evaluating:   0%|          | 0/160 [00:00<?, ?it/s]Evaluating:   2%|▏         | 3/160 [00:00<00:06, 25.83it/s]Evaluating:   4%|▍         | 6/160 [00:00<00:05, 25.82it/s]Evaluating:   6%|▋         | 10/160 [00:00<00:05, 29.92it/s]Evaluating:   8%|▊         | 13/160 [00:00<00:05, 28.03it/s]Evaluating:  10%|█         | 16/160 [00:00<00:05, 27.15it/s]Evaluating:  12%|█▏        | 19/160 [00:00<00:05, 26.77it/s]Evaluating:  14%|█▍        | 23/160 [00:00<00:04, 29.23it/s]Evaluating:  16%|█▋        | 26/160 [00:00<00:04, 28.03it/s]Evaluating:  18%|█▊        | 29/160 [00:01<00:04, 27.36it/s]Evaluating:  20%|██        | 32/160 [00:01<00:05, 25.45it/s]Evaluating:  22%|██▏       | 35/160 [00:01<00:05, 24.84it/s]Evaluating:  24%|██▍       | 38/160 [00:01<00:04, 25.25it/s]Evaluating:  26%|██▌       | 41/160 [00:01<00:04, 25.72it/s]Evaluating:  28%|██▊       | 44/160 [00:01<00:04, 26.09it/s]Evaluating:  31%|███       | 49/160 [00:01<00:03, 31.65it/s]Evaluating:  33%|███▎      | 53/160 [00:01<00:03, 30.01it/s]Evaluating:  36%|███▌      | 57/160 [00:03<00:11,  8.86it/s]Evaluating:  38%|███▊      | 60/160 [00:03<00:09, 10.61it/s]Evaluating:  39%|███▉      | 63/160 [00:03<00:07, 12.57it/s]Evaluating:  41%|████▏     | 66/160 [00:03<00:06, 14.61it/s]Evaluating:  43%|████▎     | 69/160 [00:03<00:05, 16.59it/s]Evaluating:  45%|████▌     | 72/160 [00:03<00:04, 18.40it/s]Evaluating:  47%|████▋     | 75/160 [00:03<00:04, 20.04it/s]Evaluating:  49%|████▉     | 78/160 [00:03<00:03, 21.37it/s]Evaluating:  51%|█████     | 81/160 [00:03<00:03, 22.54it/s]Evaluating:  52%|█████▎    | 84/160 [00:04<00:03, 23.48it/s]Evaluating:  54%|█████▍    | 87/160 [00:04<00:03, 24.12it/s]Evaluating:  57%|█████▋    | 91/160 [00:04<00:02, 26.94it/s]Evaluating:  59%|█████▉    | 94/160 [00:04<00:02, 26.60it/s]Evaluating:  61%|██████    | 97/160 [00:04<00:02, 26.35it/s]Evaluating:  62%|██████▎   | 100/160 [00:04<00:02, 26.09it/s]Evaluating:  64%|██████▍   | 103/160 [00:04<00:02, 25.97it/s]Evaluating:  66%|██████▋   | 106/160 [00:04<00:02, 25.98it/s]Evaluating:  68%|██████▊   | 109/160 [00:05<00:06,  8.38it/s]Evaluating:  70%|███████   | 112/160 [00:05<00:04, 10.49it/s]Evaluating:  72%|███████▏  | 115/160 [00:06<00:03, 12.73it/s]Evaluating:  74%|███████▍  | 118/160 [00:07<00:07,  5.90it/s]Evaluating:  76%|███████▌  | 121/160 [00:07<00:05,  7.65it/s]Evaluating:  78%|███████▊  | 124/160 [00:07<00:03,  9.69it/s]Evaluating:  79%|███████▉  | 127/160 [00:07<00:02, 11.91it/s]Evaluating:  81%|████████▏ | 130/160 [00:07<00:02, 14.18it/s]Evaluating:  83%|████████▎ | 133/160 [00:07<00:01, 16.42it/s]Evaluating:  85%|████████▌ | 136/160 [00:07<00:01, 18.45it/s]Evaluating:  87%|████████▋ | 139/160 [00:08<00:01, 20.19it/s]Evaluating:  89%|████████▉ | 142/160 [00:08<00:00, 21.66it/s]Evaluating:  91%|█████████ | 145/160 [00:08<00:00, 22.67it/s]Evaluating:  92%|█████████▎| 148/160 [00:08<00:00, 23.61it/s]Evaluating:  96%|█████████▌| 153/160 [00:09<00:00,  8.95it/s]Evaluating:  98%|█████████▊| 156/160 [00:09<00:00, 10.84it/s]Evaluating:  99%|█████████▉| 159/160 [00:09<00:00, 12.93it/s]Evaluating: 100%|██████████| 160/160 [00:09<00:00, 16.47it/s]
-
-============================================================
-RESULTS:
-============================================================
-
-Method                           ECE        MCE    Samples
-------------------------------------------------------------
-ag_sar                        0.1926     0.4253        153
-predictive_entropy            0.0942     0.2545        153
-
-============================================================
-RESULT: FAIL
-AG-SAR ECE: 0.1926 (threshold: 0.15)
-============================================================
-
-Results saved to: results/exp4_calibration.json
-
-======================================================================
-CHAPTER 4: HEAD SPECIALIZATION ANALYSIS
-======================================================================
-
---- Experiment 8: Head Specialization ---
-============================================================
-Experiment 8: Head Specialization Analysis
-============================================================
-Model architecture: llama
-Num layers: 28
-Num heads: 28
-Num KV heads: 4
-
-Analyzing per-head centrality contributions...
-Traceback (most recent call last):
-  File "/lambda/nfs/lambda-cloud-data/AG-SAR/scripts/run_eval.py", line 451, in <module>
-    sys.exit(main())
-  File "/lambda/nfs/lambda-cloud-data/AG-SAR/scripts/run_eval.py", line 401, in main
-    results = run_chapter_4(ag_sar, config, args.quick)
-  File "/lambda/nfs/lambda-cloud-data/AG-SAR/scripts/run_eval.py", line 277, in run_chapter_4
-    head_results = run_head_specialization_experiment(ag_sar, config, num_samples=num_samples)
-  File "/lambda/nfs/lambda-cloud-data/AG-SAR/eval/experiments/exp8_head_specialization.py", line 184, in run_head_specialization_experiment
-    head_analysis = analyze_per_head_centrality(ag_sar, prompts, responses)
-  File "/lambda/nfs/lambda-cloud-data/AG-SAR/eval/experiments/exp8_head_specialization.py", line 61, in analyze_per_head_centrality
-    head_contrib = per_head.abs().mean(dim=(0, 2)).cpu().numpy()
-TypeError: Got unsupported ScalarType BFloat16
