@@ -71,6 +71,7 @@ htmlcov/
 
 # Python virtual environments
 venv/
+venv311/
 .venv/
 env/
 .env/
@@ -82,12 +83,24 @@ virtualenv/
 datasets/
 raw_data/
 processed_data/
+embeddings/
+cache/
 
 # Resources (research papers, consolidated LaTeX)
 resources/
 *.tar.gz
 *.tex
 
-# Jupyter notebooks outputs
+# Benchmarks
+.benchmarks/
+benchmarks/
+
+# Notebooks
+notebooks/
 .ipynb_checkpoints/
 *.ipynb
+
+# Experiment outputs and temporary data
+outputs/
+temp/
+tmp/
