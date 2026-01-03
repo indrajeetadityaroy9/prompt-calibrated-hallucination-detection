@@ -77,3 +77,11 @@ venv/
 .venv/
 env/
 .env/
+ENV/
+virtualenv/
+.virtualenv/
+
+# Large datasets
+datasets/
+raw_data/
+processed_data/
