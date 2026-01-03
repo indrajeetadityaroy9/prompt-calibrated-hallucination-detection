@@ -150,56 +150,36 @@ class AGSAR:
 
     def _load_head_scores(self, path: str) -> torch.Tensor:
         """
-        Load head scores for SGSS with auto-detection of format.
+        Load head scores for SGSS.
 
         SGSS uses Z-scored head calibration scores:
         - Positive scores = Truth Heads (upweight when confident)
         - Negative scores = Induction Heads (downweight when confident)
 
-        Auto-detects format:
-        - Native SGSS: {"head_z_scores": [...]}
-        - Legacy sigmoid: {"head_weights": [...]} in [0,1] range
-
-        For legacy format, converts to Z-scores via inverse sigmoid scaling:
-        z = (w - 0.5) * 4.0  # Maps 0.5→0, 0→-2, 1→+2
-
         Args:
-            path: Path to head scores JSON file
+            path: Path to head scores JSON file with {"head_z_scores": [...]}
 
         Returns:
             head_scores: (L*H,) tensor of Z-scored head calibration scores
 
         Raises:
             FileNotFoundError: If scores file doesn't exist
-            ValueError: If file contains neither valid format
+            ValueError: If file doesn't contain head_z_scores key
         """
         import json
         with open(path) as f:
             data = json.load(f)
 
-        if 'head_z_scores' in data:
-            # Native SGSS format (Z-scores)
-            scores = torch.tensor(
-                data['head_z_scores'],
-                dtype=self.dtype,
-                device=self.device
-            )
-        elif 'head_weights' in data:
-            # Legacy format: convert [0,1] sigmoid weights to centered Z-scores
-            # Maps 0.5 → 0 (neutral), 0 → -2 (strong Induction), 1 → +2 (strong Truth)
-            weights = torch.tensor(
-                data['head_weights'],
-                dtype=self.dtype,
-                device=self.device
-            )
-            scores = (weights - 0.5) * 4.0
-        else:
+        if 'head_z_scores' not in data:
             raise ValueError(
-                f"Scores file {path} must contain 'head_z_scores' (native SGSS) "
-                f"or 'head_weights' (legacy sigmoid) key"
+                f"Scores file {path} must contain 'head_z_scores' key"
             )
 
-        return scores
+        return torch.tensor(
+            data['head_z_scores'],
+            dtype=self.dtype,
+            device=self.device
+        )
 
     def _tokenize(
         self,
@@ -273,7 +253,8 @@ class AGSAR:
         if not response or not response.strip():
             if return_details:
                 return {
-                    'gse': 0.0,
+                    'uncertainty': 0.0,
+                    'metric': self.config.uncertainty_metric,
                     'token_entropy': torch.tensor([[]], device=self.device),
                     'relevance': torch.tensor([[]], device=self.device),
                     'centrality': torch.tensor([[]], device=self.device),
@@ -293,7 +274,8 @@ class AGSAR:
             # Response tokens were somehow not added (shouldn't happen, but defensive)
             if return_details:
                 return {
-                    'gse': 0.0,
+                    'uncertainty': 0.0,
+                    'metric': self.config.uncertainty_metric,
                     'token_entropy': torch.zeros(1, seq_len, device=self.device, dtype=self.dtype),
                     'relevance': torch.zeros(1, seq_len, device=self.device, dtype=self.dtype),
                     'centrality': torch.zeros(1, seq_len, device=self.device, dtype=self.dtype),
@@ -437,8 +419,6 @@ class AGSAR:
             result = {
                 'uncertainty': uncertainty.item(),
                 'metric': self.config.uncertainty_metric,
-                # Legacy key for backwards compatibility
-                'gse': uncertainty.item(),
                 'token_entropy': token_entropy,
                 'relevance': relevance,
                 'centrality': centrality,
@@ -491,10 +471,10 @@ class AGSAR:
 
         # Get full uncertainty details
         details = self.compute_uncertainty(prompt, response, return_details=True)
-        gse = torch.tensor([details['gse']], device=self.device)
+        uncertainty = torch.tensor([details['uncertainty']], device=self.device)
 
         # Apply threshold
-        is_hall, confidence = gse_detect_hallucination(gse, threshold)
+        is_hall, confidence = gse_detect_hallucination(uncertainty, threshold)
 
         return (
             is_hall.item(),
@@ -571,7 +551,7 @@ class AGSAR:
             })
 
         return {
-            'gse': details['gse'],
+            'uncertainty': details['uncertainty'],
             'tokens': token_info,
             'response_start': response_start
         }

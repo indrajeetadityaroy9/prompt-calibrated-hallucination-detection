@@ -143,7 +143,7 @@ class AttentionExtractor:
         self._key_states_pre_rope: Dict[int, torch.Tensor] = {}
         self._hooks: List[torch.utils.hooks.RemovableHandle] = []
 
-        # Llama-specific: store original forward methods for cleanup (legacy)
+        # Llama-specific: store original forward methods for cleanup
         self._original_forwards: Dict[int, Callable] = {}
         self._llama_patched: bool = False
 
@@ -255,7 +255,6 @@ class AttentionExtractor:
         This copies the exact model code and inserts capture lines after RoPE.
         No math re-computation - we just grab the already-computed variables.
         """
-        import warnings
         from transformers.models.qwen2.modeling_qwen2 import (
             apply_rotary_pos_emb,
             repeat_kv,
@@ -277,10 +276,6 @@ class AttentionExtractor:
             use_cache: bool = False,
             **kwargs,
         ):
-            if "padding_mask" in kwargs:
-                warnings.warn(
-                    "Passing `padding_mask` is deprecated. Please use `attention_mask` instead."
-                )
             bsz, q_len, _ = hidden_states.size()
 
             query_states = attn.q_proj(hidden_states)
@@ -350,7 +345,6 @@ class AttentionExtractor:
         The main difference is the sliding window attention, but we don't
         need to modify that - we just capture Q/K after RoPE.
         """
-        import warnings
         from transformers.models.mistral.modeling_mistral import (
             apply_rotary_pos_emb,
             repeat_kv,
@@ -372,10 +366,6 @@ class AttentionExtractor:
             use_cache: bool = False,
             **kwargs,
         ):
-            if "padding_mask" in kwargs:
-                warnings.warn(
-                    "Passing `padding_mask` is deprecated. Please use `attention_mask` instead."
-                )
             bsz, q_len, _ = hidden_states.size()
 
             query_states = attn.q_proj(hidden_states)

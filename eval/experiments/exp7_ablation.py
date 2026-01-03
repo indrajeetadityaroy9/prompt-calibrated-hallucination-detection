@@ -6,16 +6,14 @@ Systematically disables AG-SAR components to measure their contribution.
 Components ablated:
 1. Full AG-SAR (baseline)
 2. No Residual Correction (skip 0.5A + 0.5I)
-3. No Head Filtering (use all heads)
-4. No Value Norms (centrality only, no R = C × ||v||)
-5. Uniform Graph (no attention topology)
+3. No Value Norms (centrality only, no R = C × ||v||)
+4. Uniform Graph (no attention topology)
 
 Success Criteria: Full AG-SAR > all ablated versions on AUROC
 
 Ablation Implementation:
     - Config-based: Create separate AGSAR instances with modified AGSARConfig
     - "No residual": residual_weight=0.0
-    - "No head filter": entropy_threshold_low=0.0, entropy_threshold_high=1.0
     - "No value norms": Use raw centrality instead of relevance (post-hoc)
     - "Uniform graph": Replace attention-based relevance with uniform weights
 """
@@ -40,7 +38,6 @@ class AblationConfig:
     name: str
     description: str
     use_residual: bool = True
-    use_head_filter: bool = True
     use_value_norms: bool = True
     use_attention_graph: bool = True
 
@@ -52,7 +49,6 @@ def get_ablation_configs() -> List[AblationConfig]:
             name="full",
             description="Full AG-SAR (all components enabled)",
             use_residual=True,
-            use_head_filter=True,
             use_value_norms=True,
             use_attention_graph=True
         ),
@@ -60,15 +56,6 @@ def get_ablation_configs() -> List[AblationConfig]:
             name="no_residual",
             description="No residual correction (A only, no 0.5A + 0.5I)",
             use_residual=False,
-            use_head_filter=True,
-            use_value_norms=True,
-            use_attention_graph=True
-        ),
-        AblationConfig(
-            name="no_head_filter",
-            description="No head filtering (use all attention heads)",
-            use_residual=True,
-            use_head_filter=False,
             use_value_norms=True,
             use_attention_graph=True
         ),
@@ -76,7 +63,6 @@ def get_ablation_configs() -> List[AblationConfig]:
             name="no_value_norms",
             description="No value norms (centrality only, skip ||v|| weighting)",
             use_residual=True,
-            use_head_filter=True,
             use_value_norms=False,
             use_attention_graph=True
         ),
@@ -84,7 +70,6 @@ def get_ablation_configs() -> List[AblationConfig]:
             name="uniform_graph",
             description="Uniform attention (no topology from model)",
             use_residual=True,
-            use_head_filter=True,
             use_value_norms=True,
             use_attention_graph=False
         )
@@ -113,12 +98,6 @@ def create_ablated_ag_sar(
     if not abl_config.use_residual:
         # Disable residual by setting weight to 0
         ag_config = AGSARConfig(residual_weight=0.0)
-    elif not abl_config.use_head_filter:
-        # Disable head filtering by accepting all entropy values
-        ag_config = AGSARConfig(
-            entropy_threshold_low=0.0,
-            entropy_threshold_high=1.0
-        )
     else:
         # Default config for full AG-SAR and other ablations
         ag_config = AGSARConfig()
@@ -285,8 +264,6 @@ def run_ablation_experiment(
         # Config-based ablations need their own instance
         if not abl_config.use_residual:
             cache_key = 'no_residual'
-        elif not abl_config.use_head_filter:
-            cache_key = 'no_head_filter'
         else:
             cache_key = 'default'
 
@@ -331,7 +308,6 @@ def run_ablation_experiment(
             'description': abl_config.description,
             'settings': {
                 'use_residual': abl_config.use_residual,
-                'use_head_filter': abl_config.use_head_filter,
                 'use_value_norms': abl_config.use_value_norms,
                 'use_attention_graph': abl_config.use_attention_graph
             },
@@ -411,7 +387,6 @@ def plot_ablation_comparison(
     display_names = {
         'full': 'Full AG-SAR',
         'no_residual': 'No Residual',
-        'no_head_filter': 'No Head Filter',
         'no_value_norms': 'No Value Norms',
         'uniform_graph': 'Uniform Graph'
     }
@@ -462,8 +437,8 @@ def plot_ablation_heatmap(
     import matplotlib.pyplot as plt
 
     configs = list(results['configurations'].keys())
-    components = ['use_residual', 'use_head_filter', 'use_value_norms', 'use_attention_graph']
-    component_labels = ['Residual', 'Head Filter', 'Value Norms', 'Attention Graph']
+    components = ['use_residual', 'use_value_norms', 'use_attention_graph']
+    component_labels = ['Residual', 'Value Norms', 'Attention Graph']
 
     # Build matrix
     matrix = []

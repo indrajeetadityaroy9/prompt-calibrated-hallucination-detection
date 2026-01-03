@@ -15,14 +15,47 @@ results/
 .idea/
 *.swp
 
+# Claude Code
+CLAUDE.md
+
 # OS
 .DS_Store
 Thumbs.db
 
-# Data (too large)
+# Data and model files (too large)
 data/
 *.bin
 *.pt
+*.pth
+*.ckpt
+*.safetensors
+*.gguf
+*.ggml
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.parquet
+*.arrow
+*.feather
+*.msgpack
+
+# Hugging Face cache
+.cache/
+huggingface/
+~/.cache/huggingface/
+
+# Model checkpoints and weights
+checkpoints/
+weights/
+models/
+*.model
+
+# Large log files
+*.log
+logs/
 
 # Python
 .eggs/
@@ -38,12 +71,6 @@ htmlcov/
 
 # Type checking
 .mypy_cache/
-
-# Python virtual environments
-venv/
-.venv/
-env/
-.env/
 
 # Python virtual environments
 venv/

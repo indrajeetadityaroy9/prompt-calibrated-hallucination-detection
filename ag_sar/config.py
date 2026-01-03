@@ -81,7 +81,7 @@ class AGSARConfig:
     use_spectral_steering: bool = False
     steering_alpha: float = 2.0  # Strength of steering intervention
     steering_beta: float = 5.0   # Gate sensitivity (surprisal threshold)
-    head_scores_path: Optional[str] = None  # Path to Z-scores JSON (or legacy weights)
+    head_scores_path: Optional[str] = None  # Path to Z-scores JSON
 
     def __post_init__(self):
         """Validate configuration values."""
@@ -164,25 +164,8 @@ class AGSARConfig:
         }
 
     @classmethod
-    def _migrate_legacy_config(cls, config_dict: dict) -> dict:
-        """Filter deprecated keys for backwards compatibility."""
-        deprecated = {
-            'value_norm_type', 'compile_mode', 'use_residual_correction',
-            'entropy_threshold_low', 'entropy_threshold_high', 'use_flash_attn',
-            'use_head_weighting', 'head_weights_path', 'align_with_tokens',
-        }
-        return {k: v for k, v in config_dict.items() if k not in deprecated}
-
-    @classmethod
     def from_dict(cls, config_dict: dict) -> 'AGSARConfig':
         """Create config from dictionary."""
-        # Filter out deprecated keys
-        config_dict = cls._migrate_legacy_config(config_dict)
-
-        # Handle legacy 'use_compile' -> 'use_torch_compile' migration
-        if 'use_compile' in config_dict:
-            config_dict['use_torch_compile'] = config_dict.pop('use_compile')
-
         # Handle dtype conversion
         if 'preferred_dtype' in config_dict:
             dtype_str = config_dict['preferred_dtype']

@@ -102,21 +102,6 @@ class TestAGSARConfig:
         assert config.uncertainty_metric == 'mcss'
         assert config.use_spectral_steering is True
 
-    def test_from_dict_deprecated_keys(self):
-        """Test that deprecated keys are filtered out."""
-        d = {
-            'semantic_layers': 3,
-            'entropy_threshold_low': 0.3,  # Deprecated
-            'entropy_threshold_high': 0.9,  # Deprecated
-            'use_flash_attn': True,  # Deprecated
-            'use_head_weighting': True,  # Deprecated (replaced by SGSS)
-            'head_weights_path': '/path/to/weights.json',  # Deprecated
-            'align_with_tokens': False,  # Deprecated (now always True)
-        }
-        # Should not raise, deprecated keys should be filtered
-        config = AGSARConfig.from_dict(d)
-        assert config.semantic_layers == 3
-
     def test_fp16_warning(self):
         """Test warning for float16 usage."""
         with pytest.warns(UserWarning, match="float16"):

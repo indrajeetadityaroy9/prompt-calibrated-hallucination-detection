@@ -13,7 +13,7 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn.functional as F
 
-from .kernels.centrality_flash import centrality_flash_fwd
+from .kernels import centrality_flash_fwd
 
 
 def matrix_free_power_iteration(
