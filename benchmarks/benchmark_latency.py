@@ -7,6 +7,12 @@ Verifies the "Zero-Latency" promise by measuring overhead of:
 3. Spectral Roughness calculation
 4. Register Filter (kurtosis + EMA)
 
+H100 Optimizations:
+- Flash Attention 2 with bfloat16
+- torch.compile with Inductor backend
+- Multi-GPU support with balanced device_map
+- DataLoader with parallel workers
+
 Pass Criteria:
 - < 10% overhead relative to baseline model forward pass
 - OR < 2ms absolute overhead per step
@@ -18,10 +24,73 @@ import time
 from typing import Optional
 
 import torch
+from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
 from ag_sar.ag_sar import AGSAR
 from ag_sar.config import AGSARConfig
+from ag_sar.utils import enable_h100_optimizations, is_h100, get_optimal_dtype
+from ag_sar.modeling import load_model_h100
+
+
+# =============================================================================
+# H100 Optimized Data Loading
+# =============================================================================
+
+class SyntheticBenchmarkDataset(Dataset):
+    """Synthetic dataset for benchmark data loading."""
+
+    def __init__(self, num_samples: int, seq_len: int, vocab_size: int = 50000):
+        self.num_samples = num_samples
+        self.seq_len = seq_len
+        self.vocab_size = vocab_size
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        return torch.randint(2, self.vocab_size, (self.seq_len,))
+
+
+def get_h100_dataloader(
+    num_samples: int,
+    seq_len: int,
+    batch_size: int = 32,
+    num_workers: int = 16,
+    pin_memory: bool = True,
+    prefetch_factor: int = 4,
+) -> DataLoader:
+    """
+    Create DataLoader optimized for H100 GPU throughput.
+
+    Args:
+        num_samples: Number of samples in dataset
+        seq_len: Sequence length per sample
+        batch_size: Batch size (default 32 for H100's 80GB)
+        num_workers: Parallel workers (default 16 for dual-socket systems)
+        pin_memory: Pin memory for fast GPU transfer
+        prefetch_factor: Batches to prefetch per worker
+
+    Returns:
+        DataLoader configured for H100 performance
+    """
+    dataset = SyntheticBenchmarkDataset(num_samples, seq_len)
+
+    # Adjust workers if CUDA not available
+    if not torch.cuda.is_available():
+        num_workers = 0
+        pin_memory = False
+        prefetch_factor = 2
+
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        persistent_workers=num_workers > 0,
+    )
 
 
 def get_memory_usage() -> float:
@@ -38,6 +107,8 @@ def benchmark_model(
     num_iterations: int = 50,
     device: str = "auto",
     use_small_model: bool = False,
+    use_h100_optimizations: bool = True,
+    batch_size: int = 1,
 ) -> dict:
     """
     Benchmark AG-SAR overhead against baseline model inference.
@@ -49,17 +120,30 @@ def benchmark_model(
         num_iterations: Number of timed iterations
         device: Device to run on ("auto", "cuda", "cpu")
         use_small_model: Use a small random-weight model for fast testing
+        use_h100_optimizations: Enable H100-specific optimizations
+        batch_size: Batch size for throughput testing
 
     Returns:
         Dictionary with benchmark results
     """
+    # Enable H100 optimizations at start
+    if use_h100_optimizations:
+        enable_h100_optimizations()
+
     # Device setup
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # Detect hardware
+    h100_detected = is_h100() if torch.cuda.is_available() else False
+    optimal_dtype = get_optimal_dtype() if torch.cuda.is_available() else torch.float32
+
     print(f"Device: {device}")
+    print(f"H100 Detected: {h100_detected}")
+    print(f"Optimal Dtype: {optimal_dtype}")
     print(f"Model: {model_id}")
     print(f"Sequence Length: {seq_len}")
+    print(f"Batch Size: {batch_size}")
     print("-" * 50)
 
     # Load model
@@ -72,14 +156,24 @@ def benchmark_model(
         config.vocab_size = 1000
         model = AutoModelForCausalLM.from_config(config)
         model_id = "gpt2-small-test"
+        model = model.to(device)
+    elif h100_detected and use_h100_optimizations:
+        # Use H100-optimized loading
+        print(f"Loading {model_id} with H100 optimizations...")
+        model, tokenizer = load_model_h100(
+            model_id,
+            dtype=optimal_dtype,
+            attn_implementation="flash_attention_2",
+            device_map="balanced" if torch.cuda.device_count() > 1 else "auto",
+        )
     else:
         print(f"Loading {model_id}...")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
         )
+        model = model.to(device)
 
-    model = model.to(device)
     model.eval()
 
     # Create mock tokenizer for small model
@@ -111,8 +205,8 @@ def benchmark_model(
     )
     engine = AGSAR(model, tokenizer, ag_config)
 
-    # Create input
-    input_ids = torch.randint(2, 1000, (1, seq_len), device=device)
+    # Create input (batch size support for throughput testing)
+    input_ids = torch.randint(2, 1000, (batch_size, seq_len), device=device)
 
     # =========================================================================
     # 1. Baseline Latency (Standard Forward Pass)
@@ -163,7 +257,7 @@ def benchmark_model(
     current_ids = prompt_ids.clone()
     for _ in range(num_warmup):
         with torch.no_grad():
-            new_token = torch.randint(2, 1000, (1, 1), device=device)
+            new_token = torch.randint(2, 1000, (batch_size, 1), device=device)
             temp_ids = torch.cat([current_ids, new_token], dim=-1)
             _ = engine.process_step(temp_ids)
 
@@ -185,7 +279,7 @@ def benchmark_model(
     for i in range(num_iterations):
         with torch.no_grad():
             # Simulate one generation step
-            new_token = torch.randint(2, 1000, (1, 1), device=device)
+            new_token = torch.randint(2, 1000, (batch_size, 1), device=device)
             current_ids = torch.cat([current_ids, new_token], dim=-1)
 
             # AG-SAR processing
@@ -272,7 +366,10 @@ def benchmark_model(
     return {
         "model": model_id,
         "device": device,
+        "h100_detected": h100_detected,
+        "dtype": str(optimal_dtype),
         "seq_len": seq_len,
+        "batch_size": batch_size,
         "baseline_ms": baseline_per_iter * 1000,
         "agsar_ms": agsar_per_iter * 1000,
         "overhead_ms": overhead_ms,
@@ -295,6 +392,12 @@ def main():
         type=int,
         default=128,
         help="Sequence length (default: 128)"
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Batch size for throughput testing (default: 1, H100 recommended: 32)"
     )
     parser.add_argument(
         "--warmup",
@@ -320,6 +423,11 @@ def main():
         action="store_true",
         help="Use small random-weight model for fast testing"
     )
+    parser.add_argument(
+        "--no-h100-opt",
+        action="store_true",
+        help="Disable H100-specific optimizations (Flash Attention 2, TF32, etc.)"
+    )
 
     args = parser.parse_args()
 
@@ -330,6 +438,8 @@ def main():
         num_iterations=args.iterations,
         device=args.device,
         use_small_model=args.small,
+        use_h100_optimizations=not args.no_h100_opt,
+        batch_size=args.batch_size,
     )
 
     return 0 if results["passed"] else 1

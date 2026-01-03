@@ -1,24 +1,13 @@
 # AG-SAR Documentation
 
-## Directory Structure
+This directory contains documentation for the AG-SAR project.
 
-```
-docs/
-└── design/           # Internal design documents
-    ├── ag-sar-proposal.md           # Theoretical foundation
-    └── ag-sar-implementation-plan.md # Module design
-```
+## Contents
 
-## Design Documents
+- `archive/` - Historical design documents (internal reference only)
 
-- **ag-sar-proposal.md**: Core equations, algorithmic contributions, and theoretical justification
-- **ag-sar-implementation-plan.md**: Module structure, interface contracts, and evaluation methodology
+## Quick Links
 
-## References
-
-Paper sources are located in the `/resources/` directory at the repository root:
-
-- AttentionFlow, GAF - Attention mechanism analysis
-- SAR, TOHA - Uncertainty quantification baselines
-- StreamingLLM, VATP - Attention sink phenomenon
-- TDA_Uncertainty - Topological methods for uncertainty
+- [Main README](../README.md) - Installation and usage
+- [Examples](../examples/) - Runnable demos
+- [Benchmarks](../benchmarks/) - Evaluation framework

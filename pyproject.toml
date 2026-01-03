@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ag-sar"
-version = "0.3.1"
-description = "Recursive Authority Flow for Zero-Latency Hallucination Detection"
+version = "0.4.0"
+description = "Attention-Graph Shifting Attention to Relevance: Zero-Latency Hallucination Detection"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -51,6 +51,7 @@ eval = [
     "nltk>=3.8",               # Tokenization utilities
     "spacy>=3.5",              # NLP pipeline
     "sentence-transformers>=2.2",  # Embedding models
+    "pyyaml>=6.0",             # Config file parsing
 ]
 dev = [
     "pytest>=7.0",
@@ -68,8 +69,12 @@ Homepage = "https://github.com/indrajeetadityaroy9/AG-SAR"
 Repository = "https://github.com/indrajeetadityaroy9/AG-SAR"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["ag_sar*", "eval*"]
+where = ["src"]
+include = ["ag_sar*"]
+
+# Legacy package location (backward compatibility)
+[tool.setuptools.package-dir]
+"" = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

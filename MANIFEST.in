@@ -1,0 +1,11 @@
+include LICENSE
+include README.md
+include CLAUDE.md
+include pyproject.toml
+
+recursive-include src/ag_sar/assets *.json
+
+prune tests
+prune benchmarks
+prune examples
+prune .git
