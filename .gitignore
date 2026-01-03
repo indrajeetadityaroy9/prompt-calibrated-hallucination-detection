@@ -91,9 +91,10 @@ resources/
 *.tar.gz
 *.tex
 
-# Benchmarks
+# Benchmark outputs (not source code in benchmarks/)
 .benchmarks/
-benchmarks/
+benchmark_results/
+*.benchmark.json
 
 # Notebooks
 notebooks/
@@ -104,3 +105,34 @@ notebooks/
 outputs/
 temp/
 tmp/
+
+# AG-SAR specific data/artifacts
+*.json.gz
+*.csv.gz
+eval_results/
+calibration_data/
+truth_heads/
+
+# Triton cache (generated at runtime)
+.triton/
+__triton_cache__/
+
+# Ruff cache
+.ruff_cache/
+
+# Benchmark result artifacts
+benchmarks/results/
+icml_comparison_results.json
+
+# Hugging Face datasets cache (very large)
+~/.cache/huggingface/datasets/
+.hf_cache/
+
+# Torch hub cache
+.torch/
+torch_cache/
+
+# CUDA/Triton compilation cache
+.cuda_cache/
+*.cubin
+*.ptx

@@ -27,9 +27,8 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
-from ag_sar.ag_sar import AGSAR
-from ag_sar.config import AGSARConfig
-from ag_sar.utils import enable_h100_optimizations, is_h100, get_optimal_dtype
+from ag_sar import AGSAR, AGSARConfig
+from ag_sar import enable_h100_optimizations, is_h100, get_optimal_dtype
 from ag_sar.modeling import load_model_h100
 
 
@@ -238,55 +237,44 @@ def benchmark_model(
     print(f"  Baseline: {baseline_per_iter * 1000:.2f} ms/iter")
 
     # =========================================================================
-    # 2. AG-SAR Latency (With Hooks + Authority Flow)
+    # 2. AG-SAR Latency (With Hooks + Uncertainty Computation)
     # =========================================================================
     print("\n[2/3] Measuring AG-SAR latency...")
 
-    # Reset and initialize engine
-    engine.reset()
-
-    # Split into prompt and generation
-    prompt_len = seq_len // 2
-    prompt_ids = input_ids[:, :prompt_len]
-
-    # Initialize with prompt
-    with torch.no_grad():
-        engine.process_prompt(prompt_ids)
+    # Use compute_uncertainty with tokenized input directly via internal API
+    # This measures the full pipeline: hooks + centrality + entropy
 
     # Warmup
-    current_ids = prompt_ids.clone()
     for _ in range(num_warmup):
         with torch.no_grad():
-            new_token = torch.randint(2, 1000, (batch_size, 1), device=device)
-            temp_ids = torch.cat([current_ids, new_token], dim=-1)
-            _ = engine.process_step(temp_ids)
+            Q_stack, K_stack, value_norms, output = engine._adapter.extract(input_ids)
+            from ag_sar.measures import compute_sink_aware_centrality, aggregate_value_norms
+            agg_norms = aggregate_value_norms(value_norms)
+            relevance, centrality, _ = compute_sink_aware_centrality(
+                value_norms=agg_norms,
+                Q_stack=Q_stack,
+                K_stack=K_stack,
+            )
 
     if device == "cuda":
         torch.cuda.synchronize()
 
-    # Reset for clean measurement
-    engine.reset()
-    with torch.no_grad():
-        engine.process_prompt(prompt_ids)
-
-    # Timed runs (simulating per-token generation)
+    # Timed runs
     gc.collect()
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    current_ids = prompt_ids.clone()
     start = time.perf_counter()
     for i in range(num_iterations):
         with torch.no_grad():
-            # Simulate one generation step
-            new_token = torch.randint(2, 1000, (batch_size, 1), device=device)
-            current_ids = torch.cat([current_ids, new_token], dim=-1)
-
-            # AG-SAR processing
-            _ = engine.process_step(current_ids)
-
-        # Clear cache to simulate streaming (memory-bounded)
-        engine.extractor.clear_cache()
+            Q_stack, K_stack, value_norms, output = engine._adapter.extract(input_ids)
+            from ag_sar.measures import compute_sink_aware_centrality, aggregate_value_norms
+            agg_norms = aggregate_value_norms(value_norms)
+            relevance, centrality, _ = compute_sink_aware_centrality(
+                value_norms=agg_norms,
+                Q_stack=Q_stack,
+                K_stack=K_stack,
+            )
 
     if device == "cuda":
         torch.cuda.synchronize()
@@ -296,39 +284,30 @@ def benchmark_model(
     print(f"  AG-SAR:   {agsar_per_iter * 1000:.2f} ms/iter")
 
     # =========================================================================
-    # 3. Pure AG-SAR Math Overhead (No Model Forward)
+    # 3. Pure AG-SAR Overhead (Extraction + Centrality only)
     # =========================================================================
-    print("\n[3/3] Measuring pure math overhead...")
-
-    engine.reset()
-    with torch.no_grad():
-        engine.process_prompt(prompt_ids)
-
-    # Pre-compute model output to isolate math overhead
-    with torch.no_grad():
-        outputs = model(input_ids, output_attentions=True)
+    print("\n[3/3] Measuring extraction overhead...")
 
     gc.collect()
     if device == "cuda":
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
-    # Time just the AG-SAR math (no model forward)
+    # Time just the extraction (no centrality computation)
     start = time.perf_counter()
     for i in range(num_iterations):
-        # Simulate the math operations only
         with torch.no_grad():
-            # Extract captures (would normally be from hooks)
-            h_attn, v_states, attn_weights = engine._extract_v31_captures()
-
-            # The actual step computation is inside process_step
-            # but we can approximate by looking at the config's operations
+            Q_stack, K_stack, value_norms, output = engine._adapter.extract(input_ids)
 
     if device == "cuda":
         torch.cuda.synchronize()
-    math_total = time.perf_counter() - start
-    math_per_iter = math_total / num_iterations
+    extract_total = time.perf_counter() - start
+    extract_per_iter = extract_total / num_iterations
 
+    print(f"  Extract:  {extract_per_iter * 1000:.4f} ms/iter")
+
+    # Compute math-only overhead (centrality computation)
+    math_per_iter = agsar_per_iter - extract_per_iter
     print(f"  Math:     {math_per_iter * 1000:.4f} ms/iter")
 
     # =========================================================================

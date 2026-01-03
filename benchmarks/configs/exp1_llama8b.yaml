@@ -1,0 +1,52 @@
+# Experiment 1: Confident Hallucination Detection
+# Target: AUROC > 0.82 on samples where model confidence > 0.9
+
+experiment_name: "exp1_confident_hallucination_8b"
+dataset: "halueval_qa"  # Try QA instead of summarization
+num_samples: 500  # 500 samples → 1000 eval samples (500 hall + 500 correct)
+
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  batch_size: 64          # H100 optimized batch size
+  dtype: "bfloat16"
+  attn_implementation: "sdpa"  # SDPA provides attention weights, flash_attention_2 doesn't
+  device_map: "cuda:0"    # Single GPU - 8B fits in 80GB H100
+
+config:
+  # --- v3.1/v3.2 Core Pipeline ---
+  # Mechanism 1: Register Filter (Kurtosis-based sink detection)
+  enable_register_filter: false  # Disabled - causes over-filtering on Llama
+  ema_decay: 0.995
+  kurtosis_threshold: 2.0
+  sink_token_count: 4
+
+  # Mechanism 2: Authority Flow (Recursive prompt recharge)
+  enable_authority_flow: true
+  recharge_weight: 1.0
+
+  # Mechanism 3: MLP Divergence (v3.2 - cosine divergence detection)
+  enable_spectral_roughness: false  # Disabled for debugging
+  lambda_roughness: 0.0
+
+  # Centrality computation
+  semantic_layers: 4
+  residual_weight: 0.5
+  power_iteration_steps: 3
+
+  # H100 optimizations
+  use_tf32: true
+  use_torch_compile: false  # Disabled to avoid dynamo cache issues
+
+evaluation:
+  confidence_threshold: 0.7  # Adjusted based on observed confidence distribution
+  metrics:
+    - auroc
+    - auprc
+    - f1
+    - precision
+    - recall
+
+output:
+  save_predictions: true
+  save_scores: true
+  output_dir: "results/exp1_llama8b"

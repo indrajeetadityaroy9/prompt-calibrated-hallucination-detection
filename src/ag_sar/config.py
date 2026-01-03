@@ -13,10 +13,10 @@ class AGSARConfig:
     Implements Recursive Authority Flow for Zero-Latency Hallucination Detection.
     Optimized for NVIDIA H100 with bfloat16 precision and Flash Attention 2.
 
-    v3.1 Mechanisms:
-        1. Register Filter: EMA Z-score + Sigmoid gate
-        2. Authority Flow: Prompt Recharge + Gen Flow
-        3. Spectral Roughness: Pre-MLP deviation / MLP Divergence
+    v3.1/v3.2 Mechanisms:
+        1. Register Filter: EMA Z-score + Sigmoid gate (kurtosis-based)
+        2. Authority Flow: Prompt Recharge + Gen Flow (recursive)
+        3. MLP Divergence: Detects when MLP overrides attention (cosine distance)
 
     H100 Optimizations:
         - BFloat16 precision (3x faster than FP32, stable numerics)
@@ -34,7 +34,7 @@ class AGSARConfig:
     enable_authority_flow: bool = True
     recharge_weight: float = 1.0
 
-    # ===== Spectral Roughness (Mechanism 3) =====
+    # ===== MLP Divergence / Spectral Roughness (Mechanism 3) =====
     enable_spectral_roughness: bool = True
     lambda_roughness: float = 10.0
 
@@ -78,16 +78,7 @@ class AGSARConfig:
     sink_token_count: int = 4
 
     # ===== Uncertainty Metric =====
-    uncertainty_metric: str = "gse"  # gse, gss, mcss, v31, authority
-    mcss_beta: float = 5.0
-    mcss_hebbian_tau: float = 0.1
-    mcss_penalty_weight: float = 1.0
-
-    # ===== SGSS (Surprisal-Gated Spectral Steering) =====
-    use_spectral_steering: bool = False
-    steering_alpha: float = 2.0
-    steering_beta: float = 5.0
-    head_scores_path: Optional[str] = None
+    uncertainty_metric: str = "v31"  # v31 or authority
 
     def __post_init__(self):
         """Validate configuration."""
@@ -105,7 +96,7 @@ class AGSARConfig:
                 UserWarning
             )
 
-        valid_metrics = ("gse", "gss", "mcss", "v31", "authority")
+        valid_metrics = ("v31", "authority")
         if self.uncertainty_metric not in valid_metrics:
             raise ValueError(f"uncertainty_metric must be one of {valid_metrics}")
 
@@ -143,16 +134,8 @@ class AGSARConfig:
             # Model
             'model_architecture': self.model_architecture,
             'sink_token_count': self.sink_token_count,
-            # Metrics
+            # Metric
             'uncertainty_metric': self.uncertainty_metric,
-            'mcss_beta': self.mcss_beta,
-            'mcss_hebbian_tau': self.mcss_hebbian_tau,
-            'mcss_penalty_weight': self.mcss_penalty_weight,
-            # SGSS
-            'use_spectral_steering': self.use_spectral_steering,
-            'steering_alpha': self.steering_alpha,
-            'steering_beta': self.steering_beta,
-            'head_scores_path': self.head_scores_path,
         }
 
     @classmethod

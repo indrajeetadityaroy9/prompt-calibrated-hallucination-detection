@@ -28,7 +28,7 @@ classifiers = [
 # THE CORE (Zero-Latency, O(N) operations only)
 dependencies = [
     "torch>=2.2.0",            # Required for FlashAttn and torch.compile
-    "transformers>=4.40.0,<4.45.0",  # Model loading and hooks (4.45+ has breaking changes)
+    "transformers>=4.40.0",    # Model loading and hooks
     "numpy>=1.20.0",           # Array utilities
     "accelerate>=0.26.0",      # Efficient model loading (device_map)
     # Triton is strictly Linux-only. On Mac/Windows, the custom kernel

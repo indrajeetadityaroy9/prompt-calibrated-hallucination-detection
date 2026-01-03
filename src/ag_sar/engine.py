@@ -6,14 +6,13 @@ It coordinates the modeling, measures, and ops layers to provide a clean API.
 
 Example:
     >>> from ag_sar import AGSAR, AGSARConfig
-    >>> config = AGSARConfig(semantic_layers=4, uncertainty_metric='gse')
+    >>> config = AGSARConfig(uncertainty_metric='v31')
     >>> agsar = AGSAR(model, tokenizer, config)
     >>> score = agsar.compute_uncertainty(prompt, response)
     >>> is_hallucination, confidence, details = agsar.detect_hallucination(prompt, response)
 """
 
-from typing import Optional, Tuple, Dict, Any, List
-import json
+from typing import Optional, Tuple, Dict, Any, Union
 import torch
 import torch.nn as nn
 
@@ -23,17 +22,9 @@ from .measures import (
     compute_authority_score,
     compute_register_mask,
     compute_mlp_divergence,
-    compute_sink_aware_centrality,
-    aggregate_value_norms,
-    compute_hebbian_weights,
-    compute_token_entropy,
-    compute_graph_shifted_entropy,
-    detect_hallucination,
-    compute_bounded_surprisal,
-    compute_manifold_consistent_spectral_surprisal,
 )
 from .ops import EMAState
-from .utils import enable_tf32, get_model_dtype, get_model_device
+from .utils import get_model_dtype, get_model_device
 
 
 class AGSAR:
@@ -43,11 +34,10 @@ class AGSAR:
     Provides zero-latency hallucination detection by analyzing internal
     attention graph structure without external semantic models.
 
-    Supports multiple uncertainty metrics:
-        - GSE: Graph-Shifted Entropy (default)
-        - GSS: Graph-Shifted Surprisal (for forced responses)
-        - MC-SS: Manifold-Consistent Spectral Surprisal
-        - v31/authority: Authority Flow with optional roughness penalty
+    Uses v3.1/v3.2 Authority Flow + MLP Divergence architecture:
+        1. Register Filter: Kurtosis-based token classification
+        2. Authority Flow: Recursive prompt recharge
+        3. MLP Divergence: Detects when MLP overrides attention
 
     Example:
         >>> agsar = AGSAR(model, tokenizer)
@@ -76,6 +66,10 @@ class AGSAR:
         self.dtype = get_model_dtype(model)
         self.device = get_model_device(model)
 
+        # For multi-GPU models (device_map="balanced"), determine compute device
+        # Use the device where the output layer resides for tensor aggregation
+        self._compute_device = self._get_compute_device(model)
+
         # Determine semantic layers to analyze
         if hasattr(model, 'config') and hasattr(model.config, 'num_hidden_layers'):
             num_layers = model.config.num_hidden_layers
@@ -97,29 +91,43 @@ class AGSAR:
         )
         self._adapter.register()
 
-        # Load SGSS head scores if configured
-        self._head_scores = None
-        if self.config.use_spectral_steering and self.config.head_scores_path:
-            self._load_head_scores()
-
         # v3.1 streaming state
         self._ema_state: Optional[EMAState] = None
-        self._authority_history: Optional[torch.Tensor] = None
-        self._prompt_length: int = 0
-        self._value_history: Optional[torch.Tensor] = None
-        self._h_attn_history: Optional[torch.Tensor] = None
 
-    def _load_head_scores(self):
-        """Load pre-calibrated head scores for SGSS."""
-        try:
-            with open(self.config.head_scores_path) as f:
-                data = json.load(f)
-            scores = torch.tensor(data['head_z_scores'], dtype=self.dtype, device=self.device)
-            self._head_scores = scores
-        except Exception as e:
-            import warnings
-            warnings.warn(f"Failed to load head scores: {e}")
-            self._head_scores = None
+    def _get_compute_device(self, model: nn.Module) -> torch.device:
+        """
+        Determine the compute device for tensor aggregation.
+
+        For multi-GPU models using Accelerate's device_map, finds the device
+        where the LM head (output layer) resides. This is where logits are
+        computed and is the natural aggregation point.
+
+        Returns:
+            torch.device: The compute device for tensor operations
+        """
+        # Check for Accelerate's device map (set by device_map="balanced" etc.)
+        if hasattr(model, 'hf_device_map') and model.hf_device_map:
+            device_map = model.hf_device_map
+            # Find the output layer device (lm_head for causal LM)
+            for key in ['lm_head', 'embed_out', 'output']:
+                if key in device_map:
+                    device_id = device_map[key]
+                    if isinstance(device_id, int):
+                        return torch.device(f"cuda:{device_id}")
+                    elif isinstance(device_id, str) and device_id != 'cpu':
+                        return torch.device(device_id)
+            # Fallback: use the last layer's device
+            layer_keys = [k for k in device_map.keys() if 'layer' in k.lower()]
+            if layer_keys:
+                last_layer = sorted(layer_keys)[-1]
+                device_id = device_map[last_layer]
+                if isinstance(device_id, int):
+                    return torch.device(f"cuda:{device_id}")
+
+        # Single GPU or CPU: use model's device
+        if torch.cuda.is_available():
+            return torch.device("cuda:0")
+        return self.device
 
     def _tokenize(
         self,
@@ -127,6 +135,12 @@ class AGSAR:
         response: str
     ) -> Tuple[torch.Tensor, torch.Tensor, int]:
         """Tokenize prompt and response, returning combined sequence."""
+        # Input validation
+        if not prompt or not prompt.strip():
+            raise ValueError("prompt must be a non-empty string")
+        if not response or not response.strip():
+            raise ValueError("response must be a non-empty string")
+
         prompt_enc = self.tokenizer(prompt, return_tensors='pt', add_special_tokens=True)
         response_enc = self.tokenizer(response, return_tensors='pt', add_special_tokens=False)
 
@@ -145,9 +159,11 @@ class AGSAR:
         prompt: str,
         response: str,
         return_details: bool = False
-    ) -> Any:
+    ) -> Union[float, Dict[str, Any]]:
         """
         Compute uncertainty score for a prompt-response pair.
+
+        Uses v3.1 Authority Flow with optional MLP Divergence penalty.
 
         Args:
             prompt: Input prompt
@@ -155,109 +171,18 @@ class AGSAR:
             return_details: Return dict with intermediate values
 
         Returns:
-            If return_details=False: float uncertainty score
-            If return_details=True: dict with score, entropy, relevance, etc.
+            If return_details=False: float uncertainty score (0=confident, 1=uncertain)
+            If return_details=True: dict with score, authority, metric, etc.
         """
-        # Route to appropriate metric
-        metric = self.config.uncertainty_metric
-
-        if metric in ('v31', 'authority'):
-            return self.compute_uncertainty_v31(prompt, response, return_details)
-
-        # Tokenize
         input_ids, attention_mask, response_start = self._tokenize(prompt, response)
-        input_ids = input_ids.to(self.device)
-        attention_mask = attention_mask.to(self.device)
+
+        # Use pre-computed device for multi-GPU tensor aggregation
+        compute_device = self._compute_device
+
+        input_ids = input_ids.to(compute_device)
+        attention_mask = attention_mask.to(compute_device)
 
         # Extract attention data
-        Q_stack, K_stack, value_norms_dict, model_output = self._adapter.extract(
-            input_ids, attention_mask
-        )
-
-        # Aggregate value norms
-        value_norms = aggregate_value_norms(
-            value_norms_dict, self.config.semantic_layers
-        )
-
-        logits = model_output.logits
-
-        # Compute surprisal for SGSS if enabled
-        surprisal = None
-        if self.config.use_spectral_steering:
-            from .measures.spectral import compute_token_surprisal
-            surprisal = compute_token_surprisal(logits, input_ids, attention_mask)
-
-        # Compute centrality
-        hebbian_weights = None
-        if metric == 'mcss':
-            hebbian_weights = compute_hebbian_weights(
-                K_stack, response_start, self.config.mcss_hebbian_tau, attention_mask
-            )
-
-        relevance, centrality, _ = compute_sink_aware_centrality(
-            value_norms=value_norms,
-            Q_stack=Q_stack,
-            K_stack=K_stack,
-            attention_mask=attention_mask,
-            num_iterations=self.config.power_iteration_steps,
-            tol=self.config.power_iteration_tol,
-            residual_weight=self.config.residual_weight,
-            sink_token_count=self.config.sink_token_count,
-            hebbian_weights=hebbian_weights,
-            use_hebbian=(metric == 'mcss'),
-            surprisal=surprisal,
-            head_scores=self._head_scores,
-            steering_alpha=self.config.steering_alpha,
-            steering_beta=self.config.steering_beta,
-            response_start=response_start,
-        )
-
-        # Compute metric-specific score
-        if metric == 'gse':
-            entropy = compute_token_entropy(logits, attention_mask)
-            score = compute_graph_shifted_entropy(entropy, relevance, attention_mask)
-            uncertainty = score.item()
-        elif metric == 'gss':
-            from .measures.spectral import compute_token_surprisal, compute_graph_shifted_surprisal
-            token_surprisal = compute_token_surprisal(logits, input_ids, attention_mask)
-            score = compute_graph_shifted_surprisal(token_surprisal, relevance, attention_mask)
-            uncertainty = score.item()
-        elif metric == 'mcss':
-            bounded_surprisal = compute_bounded_surprisal(
-                logits, input_ids, self.config.mcss_beta, attention_mask
-            )
-            score = compute_manifold_consistent_spectral_surprisal(
-                bounded_surprisal, centrality, attention_mask, self.config.mcss_penalty_weight
-            )
-            uncertainty = score.item()
-        else:
-            raise ValueError(f"Unknown metric: {metric}")
-
-        if return_details:
-            return {
-                'score': uncertainty,
-                'metric': metric,
-                'response_start': response_start,
-                'sequence_length': input_ids.size(1),
-            }
-
-        return uncertainty
-
-    def compute_uncertainty_v31(
-        self,
-        prompt: str,
-        response: str,
-        return_details: bool = False
-    ) -> Any:
-        """
-        Compute v3.1 Authority Flow uncertainty.
-
-        Uses Register Filter + Recursive Authority Flow + Optional Roughness.
-        """
-        input_ids, attention_mask, response_start = self._tokenize(prompt, response)
-        input_ids = input_ids.to(self.device)
-        attention_mask = attention_mask.to(self.device)
-
         Q_stack, K_stack, value_norms_dict, model_output = self._adapter.extract(
             input_ids, attention_mask
         )
@@ -272,6 +197,10 @@ class AGSAR:
         last_layer = self._semantic_layer_indices[-1]
         v_states = value_states.get(last_layer)
 
+        # Move captured tensors to compute device for multi-GPU compatibility
+        if v_states is not None:
+            v_states = v_states.to(compute_device)
+
         register_mask = None
         if self.config.enable_register_filter and v_states is not None:
             register_mask, self._ema_state = compute_register_mask(
@@ -281,12 +210,20 @@ class AGSAR:
                 self.config.sink_token_count,
                 self.config.ema_decay,
             )
+            # Move register_mask to compute device for multi-GPU compatibility
+            if register_mask is not None:
+                register_mask = register_mask.to(compute_device)
 
         # Compute authority flow
         attn = attention_weights.get(last_layer)
         if attn is None:
-            # Fall back to GSE if no attention weights
-            return self.compute_uncertainty(prompt, response, return_details)
+            raise RuntimeError(
+                "Attention weights not captured. This may indicate hook registration "
+                "failed or architecture mismatch. Check that the model architecture "
+                "is supported (GPT-2, Llama, Mistral, Qwen)."
+            )
+        # Move attention to compute device for multi-GPU compatibility
+        attn = attn.to(compute_device)
 
         authority = compute_authority_score(
             attn, response_start, register_mask,
@@ -296,13 +233,16 @@ class AGSAR:
             use_vectorized=True,
         )
 
-        # Compute roughness penalty
+        # Compute MLP divergence penalty
         roughness = None
         if self.config.enable_spectral_roughness:
             h_attn = attn_outputs.get(last_layer)
             h_block = block_outputs.get(last_layer)
 
             if h_attn is not None and h_block is not None:
+                # Move to compute device for multi-GPU compatibility
+                h_attn = h_attn.to(compute_device)
+                h_block = h_block.to(compute_device)
                 roughness = compute_mlp_divergence(h_attn, h_block, attention_mask)
 
         # Apply roughness penalty
@@ -315,11 +255,21 @@ class AGSAR:
         uncertainty = 1.0 - response_authority
 
         if return_details:
+            # Compute model confidence (mean probability of response tokens)
+            # Move logits to compute device for multi-GPU compatibility
+            logits = model_output.logits.to(compute_device)
+            log_probs = torch.log_softmax(logits[:, response_start-1:-1, :], dim=-1)
+            response_tokens = input_ids[:, response_start:]
+            token_log_probs = log_probs.gather(2, response_tokens.unsqueeze(-1)).squeeze(-1)
+            model_confidence = token_log_probs.exp().mean().item()
+
             return {
                 'score': uncertainty,
                 'authority': response_authority,
+                'model_confidence': model_confidence,
                 'metric': 'v31',
                 'response_start': response_start,
+                'sequence_length': input_ids.size(1),
             }
 
         return uncertainty
@@ -340,24 +290,26 @@ class AGSAR:
 
         Returns:
             is_hallucination: True if likely hallucinating
-            confidence: How confident the detection is
+            confidence: How confident the detection is (distance from threshold)
             details: Dict with intermediate values
         """
         threshold = threshold or self.config.hallucination_threshold
+
+        # Validate threshold bounds
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError(f"threshold must be in [0.0, 1.0], got {threshold}")
+
         details = self.compute_uncertainty(prompt, response, return_details=True)
 
         score = details['score']
-        is_hall, conf = detect_hallucination(torch.tensor([score]), threshold)
+        is_hallucination = score > threshold
+        confidence = abs(score - threshold)  # Distance from decision boundary
 
-        return is_hall.item(), conf.item(), details
+        return is_hallucination, confidence, details
 
     def reset(self):
         """Reset streaming state (call before new prompt-response pair)."""
         self._ema_state = None
-        self._authority_history = None
-        self._prompt_length = 0
-        self._value_history = None
-        self._h_attn_history = None
 
     def cleanup(self):
         """Release resources."""

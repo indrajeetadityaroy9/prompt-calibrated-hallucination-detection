@@ -22,8 +22,6 @@ if sys.platform != "linux":
 import triton
 import triton.language as tl
 import torch
-import math
-from typing import Optional
 
 
 def _is_hopper() -> bool:
@@ -41,54 +39,52 @@ def _get_autotune_configs():
     H100 has:
         - 50MB L2 cache (vs 40MB on A100)
         - 256KB shared memory per SM
-        - Higher register count
+        - Higher register count (but still limited per thread)
         - TMA (Tensor Memory Accelerator)
 
-    Larger block sizes reduce memory round-trips and better utilize
-    the massive on-chip memory hierarchy.
+    Note: Large block sizes can cause register spilling. We use moderate
+    block sizes with higher warp counts for better occupancy on H100.
     """
-    # Base configs that work on all GPUs
+    # Conservative configs that work on all GPUs including H100
+    # Smaller blocks reduce register pressure while maintaining throughput
     configs = [
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_warps=4, num_stages=3),
+        # Small blocks - lowest register pressure, works everywhere
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32}, num_warps=4, num_stages=2),
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 64}, num_warps=4, num_stages=2),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 32}, num_warps=4, num_stages=2),
+        # Medium blocks - good balance
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_warps=4, num_stages=2),
         triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_warps=8, num_stages=3),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=2),
     ]
 
-    # H100-specific configs with larger blocks and higher warp counts
+    # H100-specific configs - use moderate blocks with more warps
     if _is_hopper():
         configs.extend([
-            # H100 sweetspots: larger blocks, more warps, more stages
-            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=16, num_stages=3),
-            triton.Config({'BLOCK_M': 256, 'BLOCK_N': 128}, num_warps=8, num_stages=4),
-            triton.Config({'BLOCK_M': 256, 'BLOCK_N': 256}, num_warps=16, num_stages=3),
-            # Maximum block size for H100's SRAM
-            triton.Config({'BLOCK_M': 256, 'BLOCK_N': 256}, num_warps=16, num_stages=4),
+            # H100: moderate blocks, high warp count for occupancy
+            triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_warps=8, num_stages=3),
+            triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=8, num_stages=2),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_warps=8, num_stages=2),
+            # Slightly larger for high-memory cases
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=2),
         ])
     else:
-        # Conservative configs for A100/older GPUs
+        # A100/older GPU configs
         configs.extend([
-            triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32}, num_warps=4, num_stages=3),
-            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=16, num_stages=2),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_warps=8, num_stages=3),
+            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=2),
         ])
 
     return configs
 
 
-@triton.autotune(configs=_get_autotune_configs(), key=['S', 'D'])
+@triton.autotune(configs=_get_autotune_configs(), key=['D'])  # Only key on D, not S - avoids recompile per sequence
 @triton.jit
 def _centrality_kernel(
     Q_ptr, K_ptr, v_ptr, Out_ptr,
-    surprisal_ptr, head_scores_ptr,
-    USE_SGSS: tl.constexpr,
-    STEERING_ALPHA: tl.constexpr,
-    STEERING_BETA: tl.constexpr,
-    RESPONSE_START: tl.constexpr,
     stride_qb, stride_qh, stride_qs, stride_qd,
     stride_kb, stride_kh, stride_ks, stride_kd,
     stride_vb, stride_vs,
     stride_ob, stride_oh, stride_os,
-    stride_sb, stride_ss,
     S: tl.constexpr, D: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_D: tl.constexpr,
 ):
@@ -155,11 +151,6 @@ def centrality_kernel(
     Q: torch.Tensor,
     K: torch.Tensor,
     v: torch.Tensor,
-    surprisal: Optional[torch.Tensor] = None,
-    head_scores: Optional[torch.Tensor] = None,
-    steering_alpha: float = 2.0,
-    steering_beta: float = 5.0,
-    response_start: int = 0,
 ) -> torch.Tensor:
     """
     Launch Triton centrality kernel.
@@ -168,11 +159,6 @@ def centrality_kernel(
         Q: (B, H, S, D) Query vectors
         K: (B, H, S, D) Key vectors
         v: (B, S) Value signal
-        surprisal: Optional (B, S) surprisal for SGSS
-        head_scores: Optional (H,) head calibration scores
-        steering_alpha: SGSS strength
-        steering_beta: SGSS sensitivity
-        response_start: Response token start index
 
     Returns:
         out: (B, H, S) Attention-weighted centrality
@@ -180,27 +166,23 @@ def centrality_kernel(
     B, H, S, D = Q.shape
     device = Q.device
 
-    out = torch.empty((B, H, S), device=device, dtype=Q.dtype)
+    # Triton requires current CUDA device to match tensor device
+    with torch.cuda.device(device):
+        out = torch.empty((B, H, S), device=device, dtype=Q.dtype)
 
-    USE_SGSS = surprisal is not None and head_scores is not None
-    if not USE_SGSS:
-        surprisal = torch.zeros((B, S), device=device, dtype=Q.dtype)
-        head_scores = torch.zeros((H,), device=device, dtype=Q.dtype)
+        BLOCK_D = triton.next_power_of_2(D)
 
-    BLOCK_D = triton.next_power_of_2(D)
+        # Use minimum BLOCK_M (32) for safe grid sizing - kernel handles bounds internally
+        # This ensures grid covers all tokens regardless of which autotune config is selected
+        grid = (B, H, triton.cdiv(S, 32))
 
-    grid = (B, H, triton.cdiv(S, 64))
-
-    _centrality_kernel[grid](
-        Q, K, v, out,
-        surprisal, head_scores,
-        USE_SGSS, steering_alpha, steering_beta, response_start,
-        Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3),
-        K.stride(0), K.stride(1), K.stride(2), K.stride(3),
-        v.stride(0), v.stride(1),
-        out.stride(0), out.stride(1), out.stride(2),
-        surprisal.stride(0), surprisal.stride(1),
-        S=S, D=D, BLOCK_D=BLOCK_D,
-    )
+        _centrality_kernel[grid](
+            Q, K, v, out,
+            Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3),
+            K.stride(0), K.stride(1), K.stride(2), K.stride(3),
+            v.stride(0), v.stride(1),
+            out.stride(0), out.stride(1), out.stride(2),
+            S=S, D=D, BLOCK_D=BLOCK_D,
+        )
 
     return out

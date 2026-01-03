@@ -31,9 +31,9 @@ def gpt2_model():
 class TestAttentionExtractor:
     """Test attention extraction with real GPT-2 model."""
 
-    def test_extract_attention_shapes(self, gpt2_model):
-        """Test that extracted attention has correct shapes."""
-        from ag_sar.attention_extractor import AttentionExtractor
+    def test_extract_qk_shapes(self, gpt2_model):
+        """Test that extracted Q/K stacks have correct shapes."""
+        from ag_sar.modeling import ModelAdapter
 
         model, tokenizer = gpt2_model
         device = next(model.parameters()).device
@@ -41,25 +41,29 @@ class TestAttentionExtractor:
         input_ids = tokenizer.encode("Hello world", return_tensors='pt').to(device)
         seq_len = input_ids.size(1)
 
-        extractor = AttentionExtractor(model)
-        extractor.register_hooks()
+        adapter = ModelAdapter(model)
+        adapter.register()
         try:
-            attn_weights, value_norms, output = extractor.extract(input_ids)
+            Q_stack, K_stack, value_norms, output = adapter.extract(input_ids)
         finally:
-            extractor.remove_hooks()
+            adapter.cleanup()
 
-        # Should have attention from all layers
-        assert len(attn_weights) > 0
+        # Check Q/K stack shapes: (B, L*H, S, D)
+        # Default semantic_layers=4, GPT-2 has 12 heads
+        num_layers = len(adapter.layers)
+        num_heads = model.config.n_head
+        head_dim = model.config.n_embd // num_heads
 
-        # Check shapes
-        for layer_idx, attn in attn_weights.items():
-            batch, heads, s1, s2 = attn.shape
-            assert batch == 1
-            assert heads == model.config.n_head
-            assert s1 == seq_len
-            assert s2 == seq_len
+        assert Q_stack.shape[0] == 1, f"Batch mismatch: {Q_stack.shape[0]}"
+        assert Q_stack.shape[1] == num_layers * num_heads, f"L*H mismatch: {Q_stack.shape[1]}"
+        assert Q_stack.shape[2] == seq_len, f"Seq len mismatch: {Q_stack.shape[2]}"
+        assert Q_stack.shape[3] == head_dim, f"Head dim mismatch: {Q_stack.shape[3]}"
 
-        # Check value norms
+        # K_stack should match Q_stack
+        assert K_stack.shape == Q_stack.shape
+
+        # Check value norms: dict with (B, H, S) tensors
+        assert len(value_norms) > 0
         for layer_idx, norms in value_norms.items():
             batch, heads, seq = norms.shape
             assert batch == 1
@@ -100,11 +104,10 @@ class TestFullPipeline:
         )
 
         assert isinstance(result, dict)
-        assert 'gse' in result
-        assert 'token_entropy' in result
-        assert 'relevance' in result
-        assert 'centrality' in result
+        assert 'score' in result
+        assert 'metric' in result
         assert 'response_start' in result
+        assert 'sequence_length' in result
         ag_sar.cleanup()
 
     def test_detect_hallucination(self, gpt2_model):
@@ -125,42 +128,28 @@ class TestFullPipeline:
         assert isinstance(details, dict)
         ag_sar.cleanup()
 
-    def test_batch_compute_uncertainty(self, gpt2_model):
-        """Test batch uncertainty computation."""
+    def test_multiple_calls(self, gpt2_model):
+        """Test multiple sequential uncertainty computations."""
         from ag_sar import AGSAR
 
         model, tokenizer = gpt2_model
         ag_sar = AGSAR(model, tokenizer)
 
+        # Run multiple computations sequentially
         prompts = [
             "The capital of France is",
             "2 + 2 equals"
         ]
         responses = ["Paris", "4"]
 
-        scores = ag_sar.batch_compute_uncertainty(prompts, responses)
+        scores = []
+        for prompt, response in zip(prompts, responses):
+            score = ag_sar.compute_uncertainty(prompt, response)
+            scores.append(score)
 
         assert len(scores) == 2
         assert all(isinstance(s, float) for s in scores)
         assert all(s >= 0 for s in scores)
-        ag_sar.cleanup()
-
-    def test_token_contributions(self, gpt2_model):
-        """Test per-token contribution analysis."""
-        from ag_sar import AGSAR
-
-        model, tokenizer = gpt2_model
-        ag_sar = AGSAR(model, tokenizer)
-
-        result = ag_sar.get_token_contributions(
-            prompt="The capital of France is",
-            response="Paris"
-        )
-
-        assert 'gse' in result
-        assert 'tokens' in result
-        assert len(result['tokens']) > 0
-        assert all('entropy' in t and 'relevance' in t for t in result['tokens'])
         ag_sar.cleanup()
 
 
@@ -186,10 +175,9 @@ class TestDtypeHandling:
             return_details=True
         )
 
-        # Check for NaN values
-        assert not torch.isnan(torch.tensor(result['gse']))
-        assert not torch.any(torch.isnan(result['token_entropy']))
-        assert not torch.any(torch.isnan(result['relevance']))
+        # Check for NaN values in returned score
+        assert not torch.isnan(torch.tensor(result['score'])), "Score is NaN"
+        assert isinstance(result['score'], float), "Score should be a float"
         ag_sar.cleanup()
 
 

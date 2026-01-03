@@ -238,8 +238,11 @@ class ModelAdapter:
             handle.remove()
         self._hooks.clear()
 
-        for layer_idx, original in self._original_forwards.items():
-            self.backbone.layers[layer_idx].self_attn.forward = original
+        # Architecture-specific cleanup: restore original forward methods
+        if self.architecture in ("llama", "mistral", "qwen"):
+            for layer_idx, original in self._original_forwards.items():
+                self.backbone.layers[layer_idx].self_attn.forward = original
+        # GPT-2 uses hooks only, no monkey-patching to undo
         self._original_forwards.clear()
 
         self._is_registered = False
@@ -284,15 +287,16 @@ class ModelAdapter:
             batch_size, seq_len, _ = output.shape
             q, k, v = output.split(self.hidden_size, dim=-1)
 
-            self.capture.value_states[layer_idx] = v.detach().to(self.dtype)
+            tensor_device = v.device
+            self.capture.value_states[layer_idx] = v.detach().to(device=tensor_device, dtype=self.dtype)
 
             q_heads = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
             k_heads = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
             v_heads = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-            self.capture.query_states[layer_idx] = q_heads.detach().to(self.dtype)
-            self.capture.key_states[layer_idx] = k_heads.detach().to(self.dtype)
-            self.capture.value_norms[layer_idx] = torch.norm(v_heads, dim=-1, p=2).detach().to(self.dtype)
+            self.capture.query_states[layer_idx] = q_heads.detach().to(device=tensor_device, dtype=self.dtype)
+            self.capture.key_states[layer_idx] = k_heads.detach().to(device=tensor_device, dtype=self.dtype)
+            self.capture.value_norms[layer_idx] = torch.norm(v_heads, dim=-1, p=2).detach().to(device=tensor_device, dtype=self.dtype)
 
         return hook_fn
 
@@ -302,7 +306,9 @@ class ModelAdapter:
             if isinstance(output, tuple):
                 attn_output = output[0]
                 if isinstance(attn_output, torch.Tensor) and attn_output.dim() == 3:
-                    self.capture.attn_outputs[layer_idx] = attn_output.detach().to(self.dtype)
+                    self.capture.attn_outputs[layer_idx] = attn_output.detach().to(
+                        device=attn_output.device, dtype=self.dtype
+                    )
 
         return hook_fn
 
@@ -315,7 +321,9 @@ class ModelAdapter:
                 hidden_states = output
 
             if isinstance(hidden_states, torch.Tensor) and hidden_states.dim() == 3:
-                self.capture.block_outputs[layer_idx] = hidden_states.detach().to(self.dtype)
+                self.capture.block_outputs[layer_idx] = hidden_states.detach().to(
+                    device=hidden_states.device, dtype=self.dtype
+                )
 
         return hook_fn
 
@@ -351,10 +359,11 @@ class ModelAdapter:
             cos, sin = attn.rotary_emb(value_states, position_ids)
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-            # CAPTURE POST-ROPE
-            adapter.capture.query_states[layer_idx] = query_states.detach().to(adapter.dtype)
-            adapter.capture.key_states[layer_idx] = key_states.detach().to(adapter.dtype)
-            adapter.capture.value_norms[layer_idx] = torch.norm(value_states, dim=-1, p=2).detach().to(adapter.dtype)
+            # CAPTURE POST-ROPE (preserve native device for multi-GPU)
+            tensor_device = query_states.device
+            adapter.capture.query_states[layer_idx] = query_states.detach().to(device=tensor_device, dtype=adapter.dtype)
+            adapter.capture.key_states[layer_idx] = key_states.detach().to(device=tensor_device, dtype=adapter.dtype)
+            adapter.capture.value_norms[layer_idx] = torch.norm(value_states, dim=-1, p=2).detach().to(device=tensor_device, dtype=adapter.dtype)
 
             if past_key_value is not None:
                 cache_kwargs = {"sin": sin, "cos": cos}
@@ -367,7 +376,7 @@ class ModelAdapter:
             value_states = repeat_kv(value_states, attn.num_key_value_groups)
 
             v_flat = value_states.transpose(1, 2).reshape(bsz, q_len, -1)
-            adapter.capture.value_states[layer_idx] = v_flat.detach().to(adapter.dtype)
+            adapter.capture.value_states[layer_idx] = v_flat.detach().to(device=tensor_device, dtype=adapter.dtype)
 
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(attn.head_dim)
 
@@ -376,13 +385,13 @@ class ModelAdapter:
 
             attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
 
-            adapter.capture.attention_weights[layer_idx] = attn_weights.detach().to(adapter.dtype)
+            adapter.capture.attention_weights[layer_idx] = attn_weights.detach().to(device=tensor_device, dtype=adapter.dtype)
 
             attn_output = torch.matmul(attn_weights, value_states)
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.reshape(bsz, q_len, -1)
 
-            adapter.capture.attn_outputs[layer_idx] = attn_output.detach().to(adapter.dtype)
+            adapter.capture.attn_outputs[layer_idx] = attn_output.detach().to(device=tensor_device, dtype=adapter.dtype)
 
             attn_output = attn.o_proj(attn_output)
 
@@ -430,10 +439,11 @@ class ModelAdapter:
             cos, sin = attn.rotary_emb(value_states, seq_len=kv_seq_len)
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
-            # CAPTURE
-            adapter.capture.query_states[layer_idx] = query_states.detach().to(adapter.dtype)
-            adapter.capture.key_states[layer_idx] = key_states.detach().to(adapter.dtype)
-            adapter.capture.value_norms[layer_idx] = torch.norm(value_states, dim=-1, p=2).detach().to(adapter.dtype)
+            # CAPTURE (preserve native device for multi-GPU)
+            tensor_device = query_states.device
+            adapter.capture.query_states[layer_idx] = query_states.detach().to(device=tensor_device, dtype=adapter.dtype)
+            adapter.capture.key_states[layer_idx] = key_states.detach().to(device=tensor_device, dtype=adapter.dtype)
+            adapter.capture.value_norms[layer_idx] = torch.norm(value_states, dim=-1, p=2).detach().to(device=tensor_device, dtype=adapter.dtype)
 
             if past_key_value is not None:
                 cache_kwargs = {"sin": sin, "cos": cos}
@@ -445,7 +455,7 @@ class ModelAdapter:
             value_states = repeat_kv(value_states, attn.num_key_value_groups)
 
             v_flat = value_states.transpose(1, 2).reshape(bsz, q_len, -1)
-            adapter.capture.value_states[layer_idx] = v_flat.detach().to(adapter.dtype)
+            adapter.capture.value_states[layer_idx] = v_flat.detach().to(device=tensor_device, dtype=adapter.dtype)
 
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(attn.head_dim)
 
@@ -454,7 +464,7 @@ class ModelAdapter:
 
             attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
 
-            adapter.capture.attention_weights[layer_idx] = attn_weights.detach().to(adapter.dtype)
+            adapter.capture.attention_weights[layer_idx] = attn_weights.detach().to(device=tensor_device, dtype=adapter.dtype)
 
             attn_weights = F.dropout(attn_weights, p=attn.attention_dropout, training=attn.training)
             attn_output = torch.matmul(attn_weights, value_states)
@@ -462,7 +472,7 @@ class ModelAdapter:
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.reshape(bsz, q_len, attn.hidden_size)
 
-            adapter.capture.attn_outputs[layer_idx] = attn_output.detach().to(adapter.dtype)
+            adapter.capture.attn_outputs[layer_idx] = attn_output.detach().to(device=tensor_device, dtype=adapter.dtype)
 
             attn_output = attn.o_proj(attn_output)
 
@@ -509,10 +519,11 @@ class ModelAdapter:
             cos, sin = attn.rotary_emb(value_states, seq_len=kv_seq_len)
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
-            # CAPTURE
-            adapter.capture.query_states[layer_idx] = query_states.detach().to(adapter.dtype)
-            adapter.capture.key_states[layer_idx] = key_states.detach().to(adapter.dtype)
-            adapter.capture.value_norms[layer_idx] = torch.norm(value_states, dim=-1, p=2).detach().to(adapter.dtype)
+            # CAPTURE (preserve native device for multi-GPU)
+            tensor_device = query_states.device
+            adapter.capture.query_states[layer_idx] = query_states.detach().to(device=tensor_device, dtype=adapter.dtype)
+            adapter.capture.key_states[layer_idx] = key_states.detach().to(device=tensor_device, dtype=adapter.dtype)
+            adapter.capture.value_norms[layer_idx] = torch.norm(value_states, dim=-1, p=2).detach().to(device=tensor_device, dtype=adapter.dtype)
 
             if past_key_value is not None:
                 cache_kwargs = {"sin": sin, "cos": cos}
@@ -524,7 +535,7 @@ class ModelAdapter:
             value_states = repeat_kv(value_states, attn.num_key_value_groups)
 
             v_flat = value_states.transpose(1, 2).reshape(bsz, q_len, -1)
-            adapter.capture.value_states[layer_idx] = v_flat.detach().to(adapter.dtype)
+            adapter.capture.value_states[layer_idx] = v_flat.detach().to(device=tensor_device, dtype=adapter.dtype)
 
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(attn.head_dim)
 
@@ -533,7 +544,7 @@ class ModelAdapter:
 
             attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
 
-            adapter.capture.attention_weights[layer_idx] = attn_weights.detach().to(adapter.dtype)
+            adapter.capture.attention_weights[layer_idx] = attn_weights.detach().to(device=tensor_device, dtype=adapter.dtype)
 
             attn_weights = F.dropout(attn_weights, p=attn.attention_dropout, training=attn.training)
             attn_output = torch.matmul(attn_weights, value_states)
@@ -541,7 +552,7 @@ class ModelAdapter:
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.reshape(bsz, q_len, -1)
 
-            adapter.capture.attn_outputs[layer_idx] = attn_output.detach().to(adapter.dtype)
+            adapter.capture.attn_outputs[layer_idx] = attn_output.detach().to(device=tensor_device, dtype=adapter.dtype)
 
             attn_output = attn.o_proj(attn_output)
 

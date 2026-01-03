@@ -10,7 +10,6 @@ This naturally filters attention sinks (high centrality, low value norms).
 
 from typing import Dict, Optional, Tuple
 import torch
-import torch.nn.functional as F
 
 from ..ops import centrality_kernel
 
@@ -24,12 +23,6 @@ def compute_centrality(
     attention_mask: Optional[torch.Tensor] = None,
     value_norms: Optional[torch.Tensor] = None,
     return_per_head: bool = False,
-    # SGSS parameters
-    surprisal: Optional[torch.Tensor] = None,
-    head_scores: Optional[torch.Tensor] = None,
-    steering_alpha: float = 2.0,
-    steering_beta: float = 5.0,
-    response_start: int = 0,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
     Compute eigenvector centrality via matrix-free power iteration.
@@ -52,11 +45,6 @@ def compute_centrality(
         attention_mask: (B, S) padding mask
         value_norms: (B, S) value vector norms for signal injection
         return_per_head: Return per-head contributions
-        surprisal: (B, S) per-token surprisal for SGSS
-        head_scores: (L*H,) Z-scored head calibration scores for SGSS
-        steering_alpha: SGSS steering strength
-        steering_beta: SGSS gate sensitivity
-        response_start: Start index for response tokens
 
     Returns:
         centrality: (B, S) normalized eigenvector centrality
@@ -66,6 +54,10 @@ def compute_centrality(
     device = Q_stack.device
     dtype = Q_stack.dtype
 
+    # Ensure attention_mask is on correct device
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(device=device)
+
     # Initialize uniform centrality
     v = torch.ones(B, S, device=device, dtype=dtype) / S
 
@@ -73,11 +65,12 @@ def compute_centrality(
         v = v * attention_mask.float()
         v = v / v.sum(dim=-1, keepdim=True).clamp(min=1e-10)
 
-    # Pre-compute signal filter from value norms
+    # Pre-compute signal filter from value norms (ensure device and dtype consistency)
     signal_filter = None
     if value_norms is not None:
+        value_norms = value_norms.to(device=device, dtype=dtype)
         signal_filter = value_norms / (value_norms.max(dim=-1, keepdim=True)[0] + 1e-6)
-        signal_filter = signal_filter.to(dtype)
+        signal_filter = signal_filter.to(device=device, dtype=dtype)
 
     final_per_head_out = None
 
@@ -90,14 +83,7 @@ def compute_centrality(
             v_in = v
 
         # Triton/PyTorch kernel: attention-weighted sum per head
-        per_head_out = centrality_kernel(
-            Q_stack, K_stack, v_in,
-            surprisal=surprisal,
-            head_scores=head_scores,
-            steering_alpha=steering_alpha,
-            steering_beta=steering_beta,
-            response_start=response_start,
-        )
+        per_head_out = centrality_kernel(Q_stack, K_stack, v_in)
 
         if return_per_head:
             final_per_head_out = per_head_out.clone()
@@ -134,14 +120,6 @@ def compute_sink_aware_centrality(
     residual_weight: float = 0.5,
     return_raw: bool = False,
     sink_token_count: int = 0,
-    hebbian_weights: Optional[torch.Tensor] = None,
-    use_hebbian: bool = False,
-    # SGSS parameters
-    surprisal: Optional[torch.Tensor] = None,
-    head_scores: Optional[torch.Tensor] = None,
-    steering_alpha: float = 2.0,
-    steering_beta: float = 5.0,
-    response_start: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """
     Compute sink-aware relevance: R(t_i) = C_eigen(t_i) * ||v_i||_2
@@ -159,13 +137,6 @@ def compute_sink_aware_centrality(
         residual_weight: Residual weight
         return_raw: Return per-head contributions
         sink_token_count: First N tokens to zero out
-        hebbian_weights: (B, S) Hebbian weights for MC-SS
-        use_hebbian: Use Hebbian-filtered iteration
-        surprisal: (B, S) per-token surprisal for SGSS
-        head_scores: (L*H,) head calibration scores for SGSS
-        steering_alpha: SGSS steering strength
-        steering_beta: SGSS gate sensitivity
-        response_start: Start index for response tokens
 
     Returns:
         relevance: (B, S) sink-aware relevance scores
@@ -175,11 +146,6 @@ def compute_sink_aware_centrality(
     if Q_stack is None or K_stack is None:
         raise ValueError("Q_stack and K_stack required for Flash Centrality")
 
-    # Optionally modulate value norms with Hebbian weights
-    effective_value_norms = value_norms
-    if use_hebbian and hebbian_weights is not None:
-        effective_value_norms = value_norms * hebbian_weights
-
     centrality, per_head_contrib = compute_centrality(
         Q_stack=Q_stack,
         K_stack=K_stack,
@@ -187,13 +153,8 @@ def compute_sink_aware_centrality(
         residual_weight=residual_weight,
         tol=tol,
         attention_mask=attention_mask,
-        value_norms=effective_value_norms,
+        value_norms=value_norms,
         return_per_head=return_raw,
-        surprisal=surprisal,
-        head_scores=head_scores,
-        steering_alpha=steering_alpha,
-        steering_beta=steering_beta,
-        response_start=response_start,
     )
 
     # Sink-aware relevance
@@ -207,64 +168,6 @@ def compute_sink_aware_centrality(
         relevance = relevance * attention_mask.float()
 
     return relevance, centrality, per_head_contrib
-
-
-def compute_hebbian_weights(
-    K_stack: torch.Tensor,
-    prompt_end_idx: int,
-    tau: float = 0.1,
-    attention_mask: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """
-    Compute Hebbian weights using consensus embedding.
-
-    Uses "Anchored Centroid" approach: compute centroid from PROMPT tokens
-    only, then measure similarity of all tokens to this anchor.
-
-    Args:
-        K_stack: (B, H_total, S, D) stacked key vectors
-        prompt_end_idx: Index where prompt ends
-        tau: Similarity threshold for Hebbian prior
-        attention_mask: (B, S) optional padding mask
-
-    Returns:
-        hebbian_weights: (B, S) in [0, 1]
-    """
-    B, total_heads, S, D = K_stack.shape
-
-    # Consensus embedding: mean over heads
-    K_consensus = K_stack.mean(dim=1)
-
-    # Handle edge cases
-    prompt_end_idx = max(1, min(prompt_end_idx, S))
-
-    # Prompt centroid
-    K_prompt = K_consensus[:, :prompt_end_idx, :]
-
-    if attention_mask is not None:
-        prompt_mask = attention_mask[:, :prompt_end_idx].unsqueeze(-1).float()
-        K_prompt_masked = K_prompt * prompt_mask
-        valid_count = prompt_mask.sum(dim=1).clamp(min=1)
-        centroid = K_prompt_masked.sum(dim=1) / valid_count
-    else:
-        centroid = K_prompt.mean(dim=1)
-
-    # Cosine similarity
-    orig_dtype = K_consensus.dtype
-    K_norm = F.normalize(K_consensus.float(), p=2, dim=-1)
-    C_norm = F.normalize(centroid.unsqueeze(1).float(), p=2, dim=-1)
-
-    sim = torch.matmul(K_norm, C_norm.transpose(1, 2)).squeeze(-1)
-    sim = sim.to(orig_dtype)
-
-    # ReLU threshold + max-normalize
-    weights = torch.relu(sim - tau)
-    weights = weights / (weights.max(dim=-1, keepdim=True).values + 1e-6)
-
-    if attention_mask is not None:
-        weights = weights * attention_mask.float()
-
-    return weights
 
 
 def aggregate_value_norms(

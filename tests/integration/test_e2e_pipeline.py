@@ -13,8 +13,7 @@ import torch
 import pytest
 from transformers import GPT2LMHeadModel, GPT2Tokenizer, AutoConfig, AutoModelForCausalLM
 
-from ag_sar.ag_sar import AGSAR
-from ag_sar.config import AGSARConfig
+from ag_sar import AGSAR, AGSARConfig
 
 
 class TestFullGenerationFlow:

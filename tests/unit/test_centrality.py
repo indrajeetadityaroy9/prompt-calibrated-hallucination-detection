@@ -2,7 +2,7 @@
 
 import pytest
 import torch
-from ag_sar.centrality import (
+from ag_sar.measures import (
     compute_sink_aware_centrality,
     aggregate_value_norms,
 )

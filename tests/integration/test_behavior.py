@@ -20,8 +20,7 @@ import pytest
 import gc
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
-from ag_sar.ag_sar import AGSAR
-from ag_sar.config import AGSARConfig
+from ag_sar import AGSAR, AGSARConfig
 from ag_sar.ops import (
     compute_authority_flow,
     compute_spectral_roughness,
@@ -176,7 +175,7 @@ class TestPreMLPIntegrity:
         causing Spectral Roughness to detect MLP non-linearities
         as hallucinations (False Positives).
         """
-        from ag_sar.attention_extractor import AttentionExtractor
+        from ag_sar.modeling import ModelAdapter as AttentionExtractor
 
         extractor = AttentionExtractor(
             model=small_model,

@@ -9,7 +9,7 @@ Key Features:
     - Optimized for NVIDIA H100 with bfloat16 precision and TF32 acceleration
     - Zero external latency: pure internal model analysis
     - Supports GPT-2, Llama-3/3.1/3.2, Mistral, and Qwen architectures
-    - Core metrics: GSE, MC-SS, Authority Flow
+    - Core metric: v3.1 Authority Flow + v3.2 MLP Divergence
 
 Example:
     >>> from ag_sar import AGSAR, AGSARConfig
@@ -43,17 +43,8 @@ from .measures import (
     compute_centrality,
     compute_sink_aware_centrality,
     aggregate_value_norms,
-    compute_hebbian_weights,
     # Entropy
     compute_token_entropy,
-    compute_graph_shifted_entropy,
-    normalize_relevance,
-    detect_hallucination,
-    # Spectral
-    compute_bounded_surprisal,
-    compute_manifold_consistent_spectral_surprisal,
-    compute_token_surprisal,
-    compute_graph_shifted_surprisal,
 )
 
 # Operations (for custom pipelines)
@@ -98,17 +89,8 @@ __all__ = [
     "compute_centrality",
     "compute_sink_aware_centrality",
     "aggregate_value_norms",
-    "compute_hebbian_weights",
     # Measures - Entropy
     "compute_token_entropy",
-    "compute_graph_shifted_entropy",
-    "normalize_relevance",
-    "detect_hallucination",
-    # Measures - Spectral
-    "compute_bounded_surprisal",
-    "compute_manifold_consistent_spectral_surprisal",
-    "compute_token_surprisal",
-    "compute_graph_shifted_surprisal",
     # Operations
     "EMAState",
     "fisher_kurtosis",

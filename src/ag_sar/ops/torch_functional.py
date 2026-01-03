@@ -35,11 +35,15 @@ def _should_compile() -> bool:
 
 
 # Decorator for compiled hot paths
-def _compile_if_available(mode: str = "reduce-overhead"):
-    """Conditionally apply torch.compile based on hardware."""
+def _compile_if_available(mode: str = "default"):
+    """Conditionally apply torch.compile based on hardware.
+
+    Uses mode="default" to avoid CUDAGraph issues with dynamic shapes.
+    """
     def decorator(func):
         if _should_compile():
-            return torch.compile(func, mode=mode, fullgraph=True)
+            # Use default mode (no CUDAGraphs) to handle dynamic sequence lengths
+            return torch.compile(func, mode="default", dynamic=True)
         return func
     return decorator
 
@@ -284,13 +288,17 @@ def compute_register_mask(
 
     # Initialize or update EMA state
     if ema_state is None:
-        # First call: initialize with current batch statistics
+        # First call: initialize with reasonable defaults from calibration
+        # Use init_var=4.0 based on empirical kurtosis variance across models
+        # This allows meaningful z-scores on first batch instead of disabling the filter
         ema_state = EMAState(
-            mean=kurt.mean().unsqueeze(0),
-            var=kurt.var().unsqueeze(0).clamp(min=1e-6),
+            mean=torch.tensor([0.0], device=device, dtype=dtype),
+            var=torch.tensor([4.0], device=device, dtype=dtype),
             count=1,
         )
-        z_score = torch.zeros_like(kurt)
+        # Compute z-score with initial defaults (not zeros)
+        sigma = (ema_state.var + 1e-6).sqrt()
+        z_score = (kurt - ema_state.mean) / sigma
     else:
         # Compute Z-score with current EMA statistics
         sigma = (ema_state.var + 1e-6).sqrt()
@@ -846,11 +854,6 @@ def centrality_kernel_fallback(
     Q: torch.Tensor,
     K: torch.Tensor,
     v: torch.Tensor,
-    surprisal: Optional[torch.Tensor] = None,
-    head_scores: Optional[torch.Tensor] = None,
-    steering_alpha: float = 2.0,
-    steering_beta: float = 5.0,
-    response_start: int = 0,
 ) -> torch.Tensor:
     """
     Pure PyTorch fallback for centrality_flash_fwd.
@@ -865,29 +868,24 @@ def centrality_kernel_fallback(
         Q: (B, H, S, D) Query vectors
         K: (B, H, S, D) Key vectors
         v: (B, S) Value signal (centrality input)
-        surprisal: (B, S) Optional per-token surprisal for SGSS
-        head_scores: (H,) Optional Z-scored head calibration scores
-        steering_alpha: SGSS steering strength
-        steering_beta: SGSS gate sensitivity
-        response_start: Start index for response tokens
 
     Returns:
         out: (B, H, S) Attention-weighted centrality per head
     """
     B, H, S, D = Q.shape
     device = Q.device
-    dtype = Q.dtype
 
     # Compute attention scores: (B, H, S, S)
     scale = 1.0 / (D ** 0.5)
     attn_scores = torch.matmul(Q, K.transpose(-1, -2)) * scale
 
     # Apply causal mask: j <= i
+    # Use large negative (-1e9) instead of -inf to avoid NaN in softmax edge cases
     causal_mask = torch.triu(
         torch.ones(S, S, device=device, dtype=torch.bool),
         diagonal=1
     )
-    attn_scores = attn_scores.masked_fill(causal_mask, float('-inf'))
+    attn_scores = attn_scores.masked_fill(causal_mask, -1e9)
 
     # Softmax over keys
     attn_probs = F.softmax(attn_scores, dim=-1)
@@ -897,36 +895,6 @@ def centrality_kernel_fallback(
 
     # Weighted sum: (B, H, S, S) * (B, 1, 1, S) -> sum over S -> (B, H, S)
     out = (attn_probs * v_expanded).sum(dim=-1)
-
-    # Apply SGSS if enabled
-    if surprisal is not None and head_scores is not None:
-        # SGSS gate: g = 1 - tanh(S / beta)
-        # For low surprisal (confident), g is high -> steering is active
-        gate = 1.0 - torch.tanh(surprisal / steering_beta)  # (B, S)
-
-        # SGSS weight per head: w_h = max(0, 1 + alpha * g * Omega_h)
-        # Omega_h is the Z-scored head calibration score
-        # Positive Omega = Truth Head (upweight when confident)
-        # Negative Omega = Induction Head (downweight when confident)
-
-        # gate: (B, S) -> (B, 1, S)
-        # head_scores: (H,) -> (1, H, 1)
-        gate_expanded = gate.unsqueeze(1)  # (B, 1, S)
-        head_scores_expanded = head_scores.unsqueeze(0).unsqueeze(-1)  # (1, H, 1)
-
-        # w = max(0, 1 + alpha * g * Omega)
-        w_sgss = torch.clamp(
-            1.0 + steering_alpha * gate_expanded * head_scores_expanded,
-            min=0.0
-        )  # (B, H, S)
-
-        # Only apply to response tokens
-        if response_start > 0:
-            mask = torch.zeros(S, device=device, dtype=dtype)
-            mask[response_start:] = 1.0
-            w_sgss = 1.0 + (w_sgss - 1.0) * mask.unsqueeze(0).unsqueeze(0)
-
-        out = out * w_sgss
 
     return out
 

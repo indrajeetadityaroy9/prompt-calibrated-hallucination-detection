@@ -8,9 +8,12 @@ All operations are O(N) memory and designed for streaming inference.
 import sys
 
 # Backend selection: Triton on Linux, PyTorch fallback elsewhere
+# Environment variable AG_SAR_USE_TORCH=1 forces PyTorch fallback
+import os
 _TRITON_AVAILABLE = False
+_FORCE_TORCH = os.environ.get("AG_SAR_USE_TORCH", "0") == "1"
 
-if sys.platform == "linux":
+if sys.platform == "linux" and not _FORCE_TORCH:
     try:
         import triton
         from .triton_kernels import centrality_kernel
