@@ -12,6 +12,28 @@ AG-SAR (Attention-Graph Shifting Attention to Relevance) is a zero-latency uncer
 - Supports GPT-2, Llama-3/3.1/3.2, Mistral, and Qwen architectures
 - Core metric: v3.1 Authority Flow + v3.2 MLP Divergence
 
+## H100 Installation
+
+Follow this specific order to avoid CUDA version mismatches on H100 systems:
+
+```bash
+# 1. Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# 2. Install PyTorch with explicit CUDA index (do not let pip guess)
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Post-install setup for baselines (NLTK sentence tokenization)
+python -m nltk.downloader punkt
+
+# 5. Verify environment
+python -c "import torch; import transformers; print(f'PyTorch: {torch.__version__} | CUDA: {torch.version.cuda}'); print(f'Transformers: {transformers.__version__}'); print(f'H100 Detected: {torch.cuda.get_device_capability()[0] >= 9}')"
+```
+
 ## Commands
 
 ```bash

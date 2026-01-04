@@ -29,6 +29,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from ag_sar import enable_h100_optimizations, get_optimal_dtype
 
+# Phase 0.2: Set global seed BEFORE any model or data loading
+from experiments.core.determinism import set_global_seed, DEFAULT_SEED
+set_global_seed(DEFAULT_SEED)
+
 from experiments.configs.schema import ExperimentConfig
 from experiments.core.engine import BenchmarkEngine
 from experiments.data.halueval import HaluEvalDataset

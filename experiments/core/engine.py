@@ -1,6 +1,12 @@
 """
 BenchmarkEngine: Orchestrates M methods × N datasets evaluation.
 
+Phase 5.3 Compliant (Crash Resilience):
+- JSONL streaming output (one line per sample)
+- Incremental writing with flush() for crash safety
+- Resume logic to skip already-processed samples
+- Progress tracking with tqdm
+
 Handles:
 - Method initialization and lifecycle
 - Dataset loading and iteration
@@ -12,14 +18,17 @@ Key design: Uses streaming JSONL writes to prevent OOM on large datasets
 and ensure crash recovery (99% of data saved if crash at 99%).
 """
 
+import json
+import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
 from tqdm import tqdm
 
 from experiments.data.base import EvaluationDataset
 from experiments.methods.base import UncertaintyMethod
 from experiments.core.metrics import MetricsCalculator
-from experiments.core.logging import JSONLLogger
+from experiments.core.logging import JSONLLogger, load_jsonl_results
 from experiments.configs.schema import ExperimentConfig
 
 
@@ -71,6 +80,7 @@ class BenchmarkEngine:
         config: ExperimentConfig,
         methods: Dict[str, UncertaintyMethod],
         datasets: Dict[str, EvaluationDataset],
+        resume_from: Optional[str] = None,
     ):
         """
         Initialize benchmark engine.
@@ -79,10 +89,12 @@ class BenchmarkEngine:
             config: Experiment configuration
             methods: Dict of {method_name: UncertaintyMethod instance}
             datasets: Dict of {dataset_name: EvaluationDataset instance}
+            resume_from: Optional path to JSONL file to resume from (Phase 5.3)
         """
         self.config = config
         self.methods = methods
         self.datasets = datasets
+        self.resume_from = resume_from
 
         self.metrics_calc = MetricsCalculator(
             bootstrap_samples=config.evaluation.bootstrap_samples,
@@ -91,6 +103,41 @@ class BenchmarkEngine:
 
         self.logger = JSONLLogger(config.output.output_dir)
         self.results: List[BenchmarkResult] = []
+
+        # Phase 5.3: Resume logic - track already processed samples
+        self._processed_ids: Set[Tuple[str, str, int]] = set()
+        if resume_from:
+            self._load_processed_ids(resume_from)
+
+    def _load_processed_ids(self, resume_path: str) -> None:
+        """
+        Load already-processed sample IDs from an existing JSONL file.
+
+        Phase 5.3: Resume Logic - skip already-processed samples on restart.
+        """
+        path = Path(resume_path)
+        if not path.exists():
+            print(f"Resume file not found: {resume_path}")
+            return
+
+        try:
+            with open(path, "r") as f:
+                for line in f:
+                    try:
+                        record = json.loads(line.strip())
+                        if "_type" not in record:  # Skip summaries
+                            key = (
+                                record.get("method", ""),
+                                record.get("dataset", ""),
+                                record.get("sample_idx", -1),
+                            )
+                            self._processed_ids.add(key)
+                    except json.JSONDecodeError:
+                        continue
+
+            print(f"Resuming: Found {len(self._processed_ids)} already-processed samples")
+        except Exception as e:
+            print(f"Warning: Could not load resume file: {e}")
 
     def run(self) -> List[BenchmarkResult]:
         """
@@ -155,6 +202,8 @@ class BenchmarkEngine:
     ) -> BenchmarkResult:
         """
         Run a single method on a single dataset with streaming output.
+
+        Phase 5.3: Includes resume logic and NaN-based error handling.
         """
         scores = []
         labels = []
@@ -163,8 +212,16 @@ class BenchmarkEngine:
 
         dataset.load()
 
+        skipped = 0
+
         # Use tqdm for progress
         for idx, sample in enumerate(tqdm(dataset, desc=f"    {method_name}", leave=False)):
+            # Phase 5.3: Resume logic - skip already-processed samples
+            sample_key = (method_name, dataset_name, idx)
+            if sample_key in self._processed_ids:
+                skipped += 1
+                continue
+
             try:
                 result = method.compute_score(sample.prompt, sample.response)
 
@@ -186,8 +243,8 @@ class BenchmarkEngine:
                 )
 
             except Exception as e:
-                # Log error but continue
-                scores.append(0.5)  # Neutral score
+                # Phase 1.5: Use NaN for errors, not 0.5 (which distorts metrics)
+                scores.append(float("nan"))
                 labels.append(sample.label)
                 latencies.append(0.0)
                 confidences.append(None)
@@ -196,12 +253,15 @@ class BenchmarkEngine:
                     method_name=method_name,
                     dataset_name=dataset_name,
                     sample_idx=idx,
-                    score=0.5,
+                    score=float("nan"),
                     label=sample.label,
                     latency_ms=0.0,
                     confidence=None,
-                    extra={"error": str(e)[:100]},
+                    extra={"status": "DROP", "error": str(e)[:100]},
                 )
+
+        if skipped > 0:
+            print(f"    (Skipped {skipped} already-processed samples)")
 
         return BenchmarkResult(
             method_name=method_name,

@@ -18,6 +18,11 @@
 
 set -e
 
+# H100 NVLink optimizations
+export NCCL_P2P_LEVEL=NVL
+export OMP_NUM_THREADS=16
+export HF_TOKEN="${HF_TOKEN:-}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -46,28 +51,54 @@ print_error() {
 # Check dependencies
 check_dependencies() {
     print_header "Checking dependencies..."
-    
+
     python -c "import ag_sar" 2>/dev/null || {
         print_error "ag_sar not installed. Run: pip install -e ."
         exit 1
     }
-    
+
     python -c "import pydantic" 2>/dev/null || {
         print_error "pydantic not installed. Run: pip install -e '.[dev]'"
         exit 1
     }
-    
+
     python -c "import sklearn" 2>/dev/null || {
         print_error "scikit-learn not installed. Run: pip install -e '.[eval]'"
         exit 1
     }
-    
+
     python -c "import datasets" 2>/dev/null || {
         print_error "datasets not installed. Run: pip install -e '.[eval]'"
         exit 1
     }
-    
+
     echo "All dependencies satisfied."
+}
+
+# Verify datasets before running experiments
+verify_datasets() {
+    print_header "Verifying Datasets (Hard Gate)"
+
+    python scripts/verify_datasets.py
+    if [ $? -ne 0 ]; then
+        print_error "Dataset verification failed. Fix issues before running experiments."
+        exit 1
+    fi
+
+    echo -e "${GREEN}Dataset verification passed.${NC}"
+}
+
+# Run latency verification
+run_latency_check() {
+    local dry_run=$1
+
+    print_header "Verifying Zero-Latency Constraint"
+
+    if [[ "$dry_run" == "true" ]]; then
+        echo "[DRY RUN] Would run: python -m experiments.analysis.benchmark_latency --model gpt2 --seq-len 128"
+    else
+        python -m experiments.analysis.benchmark_latency --model gpt2 --seq-len 128
+    fi
 }
 
 # Run single experiment
@@ -141,7 +172,13 @@ main() {
     fi
     
     check_dependencies
-    
+
+    # Verify datasets (hard gate)
+    verify_datasets
+
+    # Run latency verification first
+    run_latency_check "$dry_run"
+
     print_header "AG-SAR Paper Reproduction"
     echo "Experiments to run: ${experiments[*]}"
     echo "Dry run: $dry_run"

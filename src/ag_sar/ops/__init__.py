@@ -41,6 +41,8 @@ from .torch_functional import (
     compute_spectral_roughness,
     compute_spectral_roughness_gqa,
     compute_mlp_divergence,
+    # v7.0 Context-Dependent Gating
+    compute_stability_gate,
     # SnapKV Eviction (Mechanism 4)
     compute_snapkv_eviction,
     compress_kv_cache,
@@ -65,6 +67,8 @@ __all__ = [
     "compute_spectral_roughness",
     "compute_spectral_roughness_gqa",
     "compute_mlp_divergence",
+    # v7.0 Gating
+    "compute_stability_gate",
     # SnapKV
     "compute_snapkv_eviction",
     "compress_kv_cache",

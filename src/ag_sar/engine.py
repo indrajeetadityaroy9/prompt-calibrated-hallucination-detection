@@ -22,6 +22,19 @@ from .measures import (
     compute_authority_score,
     compute_register_mask,
     compute_mlp_divergence,
+    compute_lid_penalty,
+    compute_lid_with_calibration,
+    compute_lid_fast,
+    compute_manifold_signature,
+    compute_adaptive_lid_penalty,
+    ManifoldSignature,
+    # v6.0 Spectral-Structural
+    compute_laplacian_entropy_per_token,
+    compute_layer_divergence,
+    # v7.0 Context-Dependent Gating
+    compute_v7_gated_authority,
+    # v8.0 Semantic Dispersion
+    compute_v8_semantic_authority,
 )
 from .ops import EMAState
 from .utils import get_model_dtype, get_model_device
@@ -83,6 +96,17 @@ class AGSAR:
         start_layer = max(0, num_layers - self.config.semantic_layers)
         self._semantic_layer_indices = list(range(start_layer, num_layers))
 
+        # v6.0 Spectral: Compute early and late layer indices for DoLa
+        if self.config.enable_spectral:
+            self._early_layer = int(num_layers * self.config.early_layer_ratio)
+            self._late_layer = int(num_layers * self.config.late_layer_ratio)
+            # Ensure early layer is captured
+            if self._early_layer not in self._semantic_layer_indices:
+                self._semantic_layer_indices = [self._early_layer] + self._semantic_layer_indices
+        else:
+            self._early_layer = None
+            self._late_layer = self._semantic_layer_indices[-1] if self._semantic_layer_indices else None
+
         # Initialize model adapter for attention extraction
         self._adapter = ModelAdapter(
             model=model,
@@ -90,6 +114,19 @@ class AGSAR:
             dtype=self.dtype,
         )
         self._adapter.register()
+
+        # v8.0 Semantic Dispersion: Capture output embedding matrix
+        # This is the "unembedding" matrix that maps hidden states to vocab
+        self._embed_matrix = None
+        if self.config.enable_semantic_dispersion:
+            try:
+                output_embeddings = model.get_output_embeddings()
+                if output_embeddings is not None:
+                    self._embed_matrix = output_embeddings.weight.detach()
+            except Exception:
+                # Fallback: some models don't have get_output_embeddings
+                if hasattr(model, 'lm_head') and hasattr(model.lm_head, 'weight'):
+                    self._embed_matrix = model.lm_head.weight.detach()
 
         # v3.1 streaming state
         self._ema_state: Optional[EMAState] = None
@@ -225,17 +262,73 @@ class AGSAR:
         # Move attention to compute device for multi-GPU compatibility
         attn = attn.to(compute_device)
 
-        authority = compute_authority_score(
-            attn, response_start, register_mask,
-            roughness=None,  # Applied separately
-            lambda_roughness=0,
-            attention_mask=attention_mask,
-            use_vectorized=True,
-        )
+        # v7.0/v8.0 Context-Dependent Gating: Unified RAG + Free Gen
+        # v7.0: Uses stability gate + raw confidence
+        # v8.0: Uses stability gate + semantic dispersion (consistency over confidence)
+        if self.config.enable_v7_gating:
+            h_attn = attn_outputs.get(last_layer)
+            h_block = block_outputs.get(last_layer)
 
-        # Compute MLP divergence penalty
+            if h_attn is not None and h_block is not None:
+                h_attn = h_attn.to(compute_device)
+                h_block = h_block.to(compute_device)
+                logits = model_output.logits.to(compute_device)
+
+                # v8.0: Semantic Dispersion (Consistency over Confidence)
+                if self.config.enable_semantic_dispersion and self._embed_matrix is not None:
+                    embed_matrix = self._embed_matrix.to(compute_device)
+                    authority = compute_v8_semantic_authority(
+                        attention_weights=attn,
+                        prompt_length=response_start,
+                        h_attn=h_attn,
+                        h_block=h_block,
+                        logits=logits,
+                        embed_matrix=embed_matrix,
+                        register_mask=register_mask,
+                        attention_mask=attention_mask,
+                        stability_sensitivity=self.config.stability_sensitivity,
+                        parametric_weight=self.config.parametric_weight,
+                        dispersion_k=self.config.dispersion_k,
+                        dispersion_sensitivity=self.config.dispersion_sensitivity,
+                    )
+                else:
+                    # v7.0: Raw confidence
+                    authority = compute_v7_gated_authority(
+                        attention_weights=attn,
+                        prompt_length=response_start,
+                        h_attn=h_attn,
+                        h_block=h_block,
+                        logits=logits,
+                        register_mask=register_mask,
+                        attention_mask=attention_mask,
+                        stability_sensitivity=self.config.stability_sensitivity,
+                        parametric_weight=self.config.parametric_weight,
+                    )
+            else:
+                # Fallback to regular authority if hidden states not captured
+                authority = compute_authority_score(
+                    attn, response_start, register_mask,
+                    roughness=None,
+                    lambda_roughness=0,
+                    attention_mask=attention_mask,
+                    use_vectorized=True,
+                )
+        else:
+            # Standard v3.1 Authority Flow
+            authority = compute_authority_score(
+                attn, response_start, register_mask,
+                roughness=None,  # Applied separately
+                lambda_roughness=0,
+                attention_mask=attention_mask,
+                use_vectorized=True,
+                subject_boost=self.config.subject_boost,
+                subject_token_count=self.config.subject_token_count,
+            )
+
+        # Compute MLP divergence penalty (v3.2) - only if v7 not enabled
+        # v7.0 incorporates divergence into the gating mechanism
         roughness = None
-        if self.config.enable_spectral_roughness:
+        if self.config.enable_spectral_roughness and not self.config.enable_v7_gating:
             h_attn = attn_outputs.get(last_layer)
             h_block = block_outputs.get(last_layer)
 
@@ -245,10 +338,108 @@ class AGSAR:
                 h_block = h_block.to(compute_device)
                 roughness = compute_mlp_divergence(h_attn, h_block, attention_mask)
 
+                # v4.0 Enhancement: Entropy-Weighted Divergence
+                # Amplifies divergence when model is uncertain (high entropy)
+                # Targets WikiBio-style free generation where guesses have high entropy
+                if self.config.entropy_beta > 0:
+                    logits = model_output.logits.to(compute_device)
+                    # Compute per-token entropy: H(p) = -sum(p * log(p))
+                    probs = torch.softmax(logits, dim=-1)
+                    log_probs = torch.log(probs + 1e-10)
+                    token_entropy = -torch.sum(probs * log_probs, dim=-1)  # [B, S]
+                    # Normalize entropy by log(vocab_size) to get [0, 1] range
+                    vocab_size = logits.size(-1)
+                    normalized_entropy = token_entropy / torch.log(torch.tensor(vocab_size, device=compute_device, dtype=logits.dtype))
+                    # Weight roughness: high entropy = amplify divergence penalty
+                    entropy_weight = 1.0 + self.config.entropy_beta * normalized_entropy
+                    roughness = roughness * entropy_weight
+
         # Apply roughness penalty
         if roughness is not None and self.config.lambda_roughness > 0:
             authority = authority / (1.0 + self.config.lambda_roughness * roughness)
             authority = authority.clamp(0.0, 1.0)
+
+        # v5.0/v5.1 Enhancement: Local Intrinsic Dimension (LID) penalty
+        # Detects confabulation by measuring manifold complexity
+        # High LID = disordered manifold = hallucination
+        if self.config.enable_lid:
+            h_block = block_outputs.get(last_layer)
+            if h_block is not None:
+                h_block = h_block.to(compute_device)
+
+                if self.config.lid_calibration == "prompt":
+                    # v5.1: Prompt-anchored calibration (zero-shot)
+                    # Use the prompt's manifold as the baseline
+                    lid_penalty, _ = compute_lid_with_calibration(
+                        h_block,
+                        prompt_length=response_start,
+                        k=self.config.lid_k,
+                        sensitivity=self.config.lid_weight,
+                    )
+                else:
+                    # Legacy: Fixed calibration (deprecated)
+                    lid_penalty = compute_lid_penalty(
+                        h_block,
+                        k=self.config.lid_k,
+                        lid_mean=self.config.lid_mean,
+                        lid_std=self.config.lid_std,
+                    )
+
+                # Apply LID penalty: high LID crushes authority
+                # Use smoother application: authority *= (1 - penalty)
+                authority = authority * (1.0 - lid_penalty)
+                authority = authority.clamp(0.0, 1.0)
+
+        # v6.0 Enhancement: Spectral-Structural penalty
+        # Combines Laplacian Spectral Entropy (attention graph structure) with
+        # Layer-Contrastive Divergence (DoLa-style depth dynamics)
+        if self.config.enable_spectral:
+            # 1. Laplacian Spectral Entropy: measures attention graph structure
+            # High entropy = diffuse/random graph = hallucination
+            # Low entropy = star/clique graph = structured reasoning (fact)
+            last_layer = self._semantic_layer_indices[-1]
+            attn_weights = self._adapter.capture.attention_weights.get(last_layer)
+            if attn_weights is not None:
+                attn_weights = attn_weights.to(compute_device)
+                laplacian_entropy = compute_laplacian_entropy_per_token(
+                    attn_weights,
+                    window_size=self.config.spectral_window,
+                    normalize=True,
+                )
+
+                # 2. Layer-Contrastive Divergence (DoLa-style)
+                # High divergence = late layer corrected early layer = fact retrieval
+                # Low divergence = late layer followed early layer = autocomplete/hallucination
+                layer_divergence = None
+                if self._early_layer is not None and self._late_layer is not None:
+                    h_early = block_outputs.get(self._early_layer)
+                    h_late = block_outputs.get(self._late_layer)
+
+                    if h_early is not None and h_late is not None:
+                        h_early = h_early.to(compute_device)
+                        h_late = h_late.to(compute_device)
+
+                        # Project hidden states to logits via LM head
+                        lm_head = self.model.lm_head if hasattr(self.model, 'lm_head') else None
+                        if lm_head is not None:
+                            with torch.no_grad():
+                                logits_early = lm_head(h_early)
+                                logits_late = lm_head(h_late)
+                            layer_divergence = compute_layer_divergence(logits_early, logits_late)
+
+                # Combine: score = alpha * entropy - beta * divergence
+                # High entropy (bad) and low divergence (bad) = hallucination
+                spectral_score = self.config.spectral_alpha * laplacian_entropy
+                if layer_divergence is not None:
+                    spectral_score = spectral_score - self.config.spectral_beta * layer_divergence
+
+                # Convert to penalty (sigmoid to [0, 1])
+                # Positive spectral_score = likely hallucination = reduce authority
+                spectral_penalty = torch.sigmoid(spectral_score)
+
+                # Apply penalty: authority *= (1 - penalty)
+                authority = authority * (1.0 - spectral_penalty)
+                authority = authority.clamp(0.0, 1.0)
 
         # Hallucination score = 1 - authority (over response tokens)
         response_authority = authority[:, response_start:].mean().item()

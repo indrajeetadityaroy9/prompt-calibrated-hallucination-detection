@@ -183,12 +183,15 @@ class ModelAdapter:
         model_type = getattr(self.model.config, 'model_type', '').lower()
         if 'gpt2' in model_type:
             return "gpt2"
-        if any(arch in model_type for arch in ['llama', 'qwen', 'mistral']):
+        # MoE architectures (Mixtral, Qwen-MoE) use standard attention
+        # MoE only affects FFN layers (sparse experts), not attention hooks
+        # Qwen1.5-MoE uses 'qwen2_moe', Mixtral uses 'mixtral'
+        if any(arch in model_type for arch in ['llama', 'qwen', 'mistral', 'mixtral', 'moe']):
             return "llama"
 
         raise ValueError(
             f"Unknown architecture for model_type='{model_type}'. "
-            "Supported: gpt2, llama, qwen, mistral."
+            "Supported: gpt2, llama, qwen, mistral, mixtral, qwen-moe."
         )
 
     def _setup_architecture(self):
@@ -252,15 +255,21 @@ class ModelAdapter:
         for layer_idx in self.layers:
             block = self.backbone.h[layer_idx]
 
-            # Hook c_attn for QKV
+            # Hook c_attn for QKV and attention weights
             handle = block.attn.c_attn.register_forward_hook(
                 self._make_gpt2_qkv_hook(layer_idx)
             )
             self._hooks.append(handle)
 
-            # Hook attention for h_attn
+            # Hook attention for h_attn (attention output)
             handle = block.attn.register_forward_hook(
                 self._make_gpt2_attn_hook(layer_idx)
+            )
+            self._hooks.append(handle)
+
+            # Block hook for MLP divergence (GPT-2 block output)
+            handle = block.register_forward_hook(
+                self._make_block_hook(layer_idx)
             )
             self._hooks.append(handle)
 
@@ -297,6 +306,15 @@ class ModelAdapter:
             self.capture.query_states[layer_idx] = q_heads.detach().to(device=tensor_device, dtype=self.dtype)
             self.capture.key_states[layer_idx] = k_heads.detach().to(device=tensor_device, dtype=self.dtype)
             self.capture.value_norms[layer_idx] = torch.norm(v_heads, dim=-1, p=2).detach().to(device=tensor_device, dtype=self.dtype)
+
+            # Compute attention weights for GPT-2 (no RoPE, so Q/K are ready)
+            # GPT-2 uses causal mask internally, but we compute full attention here
+            attn_weights = torch.matmul(q_heads, k_heads.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            # Apply causal mask
+            causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=tensor_device, dtype=torch.bool), diagonal=1)
+            attn_weights = attn_weights.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(self.dtype)
+            self.capture.attention_weights[layer_idx] = attn_weights.detach()
 
         return hook_fn
 
@@ -391,9 +409,10 @@ class ModelAdapter:
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.reshape(bsz, q_len, -1)
 
-            adapter.capture.attn_outputs[layer_idx] = attn_output.detach().to(device=tensor_device, dtype=adapter.dtype)
-
             attn_output = attn.o_proj(attn_output)
+
+            # CAPTURE AFTER o_proj to match block_outputs hidden_size
+            adapter.capture.attn_outputs[layer_idx] = attn_output.detach().to(device=tensor_device, dtype=adapter.dtype)
 
             if not output_attentions:
                 attn_weights = None
@@ -472,9 +491,10 @@ class ModelAdapter:
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.reshape(bsz, q_len, attn.hidden_size)
 
-            adapter.capture.attn_outputs[layer_idx] = attn_output.detach().to(device=tensor_device, dtype=adapter.dtype)
-
             attn_output = attn.o_proj(attn_output)
+
+            # CAPTURE AFTER o_proj to match block_outputs hidden_size
+            adapter.capture.attn_outputs[layer_idx] = attn_output.detach().to(device=tensor_device, dtype=adapter.dtype)
 
             if not output_attentions:
                 attn_weights = None
@@ -511,13 +531,9 @@ class ModelAdapter:
             key_states = key_states.view(bsz, q_len, attn.num_key_value_heads, attn.head_dim).transpose(1, 2)
             value_states = value_states.view(bsz, q_len, attn.num_key_value_heads, attn.head_dim).transpose(1, 2)
 
-            kv_seq_len = key_states.shape[-2]
-            if past_key_value is not None:
-                if attn.layer_idx is None:
-                    raise ValueError("Cache requires layer index")
-                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, attn.layer_idx)
-            cos, sin = attn.rotary_emb(value_states, seq_len=kv_seq_len)
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+            # Apply RoPE - use position_ids like Llama (modern transformers API)
+            cos, sin = attn.rotary_emb(value_states, position_ids)
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
             # CAPTURE (preserve native device for multi-GPU)
             tensor_device = query_states.device
@@ -552,9 +568,10 @@ class ModelAdapter:
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.reshape(bsz, q_len, -1)
 
-            adapter.capture.attn_outputs[layer_idx] = attn_output.detach().to(device=tensor_device, dtype=adapter.dtype)
-
             attn_output = attn.o_proj(attn_output)
+
+            # CAPTURE AFTER o_proj to match block_outputs hidden_size
+            adapter.capture.attn_outputs[layer_idx] = attn_output.detach().to(device=tensor_device, dtype=adapter.dtype)
 
             if not output_attentions:
                 attn_weights = None

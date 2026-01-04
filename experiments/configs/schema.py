@@ -113,7 +113,17 @@ class EvaluationConfig(BaseModel):
     @field_validator("metrics")
     @classmethod
     def validate_metrics(cls, v):
-        valid = {"auroc", "auprc", "f1", "precision", "recall", "accuracy"}
+        # ICML-grade metrics: discrimination + calibration + utility
+        valid = {
+            # Discrimination
+            "auroc", "auprc",
+            # Classification
+            "f1", "precision", "recall", "accuracy",
+            # Calibration (ICML)
+            "ece", "brier",
+            # Utility (ICML)
+            "aurc",
+        }
         for m in v:
             if m not in valid:
                 raise ValueError(f"Invalid metric '{m}'. Valid: {valid}")

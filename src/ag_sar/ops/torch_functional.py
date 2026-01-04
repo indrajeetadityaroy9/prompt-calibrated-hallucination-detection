@@ -440,6 +440,59 @@ def compute_mlp_divergence(
     return divergence
 
 
+@_compile_if_available(mode="default")
+def compute_stability_gate(
+    h_attn: torch.Tensor,
+    h_block: torch.Tensor,
+    sensitivity: float = 10.0,
+) -> torch.Tensor:
+    """
+    Compute Stability Gate (Conductivity) for v7.0 Context-Dependent Gating.
+
+    The gate measures how much the MLP layer "agreed" with attention.
+    High agreement = stable conductivity = trust Authority Flow
+    Low agreement = MLP override = parametric injection needed
+
+    Gate = exp(-sensitivity × divergence)
+
+    where divergence = 1 - cosine_similarity(h_attn, h_block)
+
+    Physical Interpretation:
+    - RAG scenario: MLP validates context → high gate → trust Flow
+    - Free gen: MLP injects parametric knowledge → low gate → inject Confidence
+
+    Args:
+        h_attn: (B, S, D) attention output BEFORE MLP
+        h_block: (B, S, D) block output AFTER MLP + residuals
+        sensitivity: Controls sharpness of gate (default 10.0)
+                     Higher = sharper transition, more binary behavior
+
+    Returns:
+        gate: (B, S) stability gate in [0, 1]
+            1.0 = MLP agrees with attention (stable, trust Flow)
+            0.0 = MLP strongly overrides (unstable, inject Confidence)
+
+    Example:
+        >>> gate = compute_stability_gate(h_attn, h_block, sensitivity=10.0)
+        >>> # In RAG: gate ≈ 1.0 (attention already has the answer)
+        >>> # In Free Gen: gate ≈ 0.0 (MLP provides parametric memory)
+    """
+    # 1. Normalize vectors for cosine similarity
+    h_a_norm = F.normalize(h_attn, p=2, dim=-1)
+    h_b_norm = F.normalize(h_block, p=2, dim=-1)
+
+    # 2. Cosine Similarity: (B, S)
+    similarity = torch.sum(h_a_norm * h_b_norm, dim=-1)
+
+    # 3. Divergence = 1 - similarity (range [0, 2])
+    divergence = 1.0 - similarity
+
+    # 4. Exponential Gate: high divergence → low gate
+    gate = torch.exp(-sensitivity * divergence)
+
+    return gate
+
+
 def compute_spectral_roughness_gqa(
     h_attn: torch.Tensor,
     v_states: torch.Tensor,
@@ -784,6 +837,8 @@ def compute_authority_flow_vectorized(
     prompt_length: int,
     register_mask: Optional[torch.Tensor] = None,
     attention_mask: Optional[torch.Tensor] = None,
+    subject_boost: float = 0.0,
+    subject_token_count: int = 5,
 ) -> torch.Tensor:
     """
     Vectorized Authority Flow computation (non-recursive approximation).
@@ -798,11 +853,18 @@ def compute_authority_flow_vectorized(
     This captures the intuition that prompt attention provides grounding
     and generated-token attention decays with distance.
 
+    v4.0 Subject Anchor Enhancement (for context-free generation):
+        When prompt_length is small, the first N tokens serve as the "subject anchor".
+        Authority is boosted for attention to these subject tokens:
+        𝒜(t) ≈ Σ_{j ∈ Subject} A_{t,j} × subject_boost + Σ_{j ∈ Other} A_{t,j}
+
     Args:
         attention_weights: (B, H, S, S) or (B, S, S) attention weights
         prompt_length: Index where prompt ends
         register_mask: (B, S) register mask M(t)
         attention_mask: (B, S) padding mask
+        subject_boost: Multiplier for attention to subject tokens (0.0 = disabled)
+        subject_token_count: Number of tokens to treat as subject
 
     Returns:
         authority: (B, S) authority scores in [0, 1]
@@ -830,6 +892,36 @@ def compute_authority_flow_vectorized(
     # Generated tokens: authority = prompt_attention + decayed_gen_attention
     # Simple heuristic: authority ≈ prompt_attn for generated tokens
     authority[:, prompt_length:] = prompt_attn[:, prompt_length:]
+
+    # v4.0 Subject Anchor: Boost attention to subject tokens (first N response tokens)
+    # This helps in WikiBio-style generation where the subject establishes grounding
+    # Key insight: Even with a short prompt, the first few response tokens establish
+    # the subject entity. Valid facts maintain high attention to these tokens.
+    if subject_boost > 0.0 and subject_token_count > 0:
+        # Subject region: first N tokens AFTER prompt (the response subject)
+        subject_start = prompt_length
+        subject_end = min(prompt_length + subject_token_count, S)
+
+        if subject_end > subject_start:
+            # Subject tokens themselves have high authority
+            authority[:, subject_start:subject_end] = 1.0
+
+            # For tokens after the subject region, boost attention to subject
+            if subject_end < S:
+                # Attention to subject tokens (boosted)
+                subject_attn = attn[:, subject_end:, subject_start:subject_end].sum(dim=-1)
+                # Attention to prompt (if any)
+                prompt_attn_post = attn[:, subject_end:, :prompt_length].sum(dim=-1) if prompt_length > 0 else 0
+                # Attention to non-subject tokens
+                non_subject_attn = attn[:, subject_end:, subject_end:].sum(dim=-1)
+
+                # Boosted authority formula:
+                # auth = (prompt_attn + subject_attn * boost + non_subject_attn) / normalization
+                raw_auth = prompt_attn_post + subject_attn * subject_boost + non_subject_attn
+
+                # Normalize: max possible when all attention goes to subject
+                max_possible = 1.0 + subject_boost  # Prompt can contribute 1, subject*boost
+                authority[:, subject_end:] = raw_auth / max_possible
 
     # Apply register mask
     if register_mask is not None:

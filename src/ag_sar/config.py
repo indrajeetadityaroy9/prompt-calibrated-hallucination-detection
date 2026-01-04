@@ -38,6 +38,74 @@ class AGSARConfig:
     enable_spectral_roughness: bool = True
     lambda_roughness: float = 10.0
 
+    # ===== Entropy-Weighted Divergence (v4.0 - WikiBio enhancement) =====
+    # Amplifies divergence when model is uncertain (high entropy)
+    # Score(t) = Divergence(t) * (1 + entropy_beta * H(p_t))
+    entropy_beta: float = 0.0  # 0.0 = disabled, 1.0 = recommended for WikiBio
+
+    # ===== Subject Anchor (v4.0 - WikiBio context-free enhancement) =====
+    # Boosts authority contribution from first N tokens (the "subject")
+    # In WikiBio-style generation without context, the subject serves as anchor
+    # Valid facts link back to subject; hallucinations drift away
+    subject_boost: float = 0.0  # 0.0 = disabled, 5.0 = recommended for WikiBio
+    subject_token_count: int = 5  # First N tokens treated as subject
+
+    # ===== Local Intrinsic Dimension (v5.0/v5.1 - Manifold Geometry) =====
+    # Detects confabulation by measuring manifold complexity
+    # Hallucinations traverse high-dimensional, disordered regions
+    # Factual generations follow low-dimensional, well-worn manifolds
+    # Based on: "Characterizing Truthfulness in LLM Generations with LID" (arXiv 2024)
+    #
+    # v5.1 Enhancement: Prompt-Anchored Calibration
+    # - "prompt": Use prompt's LID as baseline (zero-shot, recommended)
+    # - "fixed": Use hardcoded lid_mean/lid_std (legacy, not recommended)
+    enable_lid: bool = False  # Enable LID-based confabulation detection
+    lid_k: int = 10  # Number of nearest neighbors for LID estimation
+    lid_weight: float = 1.0  # Sensitivity for LID penalty (higher = more aggressive)
+    lid_calibration: Literal["prompt", "fixed"] = "prompt"  # Calibration mode
+    # Legacy fixed calibration (only used if lid_calibration="fixed")
+    lid_mean: float = 6.0  # Expected mean LID (dataset-specific, deprecated)
+    lid_std: float = 2.0  # Expected std of LID (dataset-specific, deprecated)
+
+    # ===== Spectral-Structural Methods (v6.0) =====
+    # Combines Laplacian Spectral Entropy (graph structure) with
+    # Layer-Contrastive Divergence (DoLa-style depth dynamics)
+    # Based on: "Hallucination Detection Using Spectral Features" (arXiv 2025)
+    #           "DoLa: Decoding by Contrasting Layers" (ICLR 2024)
+    enable_spectral: bool = False  # Enable spectral-structural hallucination detection
+    spectral_window: int = 20  # Window size for local Laplacian entropy
+    spectral_alpha: float = 1.0  # Weight for Laplacian entropy (higher entropy = bad)
+    spectral_beta: float = 1.0  # Weight for layer divergence (higher divergence = good)
+    # Layer selection for DoLa-style contrastive divergence
+    early_layer_ratio: float = 0.25  # Early layer = this fraction of total layers
+    late_layer_ratio: float = 0.875  # Late layer = this fraction of total layers
+
+    # ===== Context-Dependent Gating (v7.0) =====
+    # Unified framework for RAG and Free Generation
+    # Dynamically shifts trust between Provenance (Flow) and Confidence (Parametric)
+    # based on whether the model is attending to context or ignoring it.
+    #
+    # Master Equation:
+    #   A(t) = Flow(t) + (1 - Σ A_{prompt}) × Confidence(t) × parametric_weight
+    #
+    # - In RAG: attn_to_context ≈ 1.0 → Injection OFF → Trust Flow
+    # - In Free Gen: attn_to_context ≈ 0.0 → Injection ON → Trust Confidence
+    enable_v7_gating: bool = False  # Enable context-dependent gating
+    stability_sensitivity: float = 1.0  # Controls conductivity gate sharpness (1.0 optimal)
+    parametric_weight: float = 0.5  # Weight for confidence injection when ignoring context
+
+    # ===== Semantic Dispersion (v8.0 - Consistency over Confidence) =====
+    # Replaces raw confidence with semantic consistency of top-k predictions
+    # Key insight: "Confidently wrong" vs "Semantically confused"
+    # - Low dispersion: Top-k tokens are synonyms (US, USA, America) → Grounded
+    # - High dispersion: Top-k tokens are unrelated (Paris, London, Rome) → Hallucination
+    #
+    # Upgrade to Master Equation:
+    #   A(t) = Flow(t) + (1 - Gate(t)) × (1 - Dispersion(t)) × parametric_weight
+    enable_semantic_dispersion: bool = False  # Use semantic dispersion instead of confidence
+    dispersion_k: int = 5  # Number of top tokens to consider
+    dispersion_sensitivity: float = 1.0  # Scale factor for dispersion penalty (1.0 optimal)
+
     # ===== Semantic Layer Selection =====
     semantic_layers: int = 4
 
@@ -116,6 +184,30 @@ class AGSARConfig:
             'recharge_weight': self.recharge_weight,
             'enable_spectral_roughness': self.enable_spectral_roughness,
             'lambda_roughness': self.lambda_roughness,
+            'entropy_beta': self.entropy_beta,
+            'subject_boost': self.subject_boost,
+            'subject_token_count': self.subject_token_count,
+            'enable_lid': self.enable_lid,
+            'lid_k': self.lid_k,
+            'lid_weight': self.lid_weight,
+            'lid_calibration': self.lid_calibration,
+            'lid_mean': self.lid_mean,
+            'lid_std': self.lid_std,
+            # Spectral-Structural (v6.0)
+            'enable_spectral': self.enable_spectral,
+            'spectral_window': self.spectral_window,
+            'spectral_alpha': self.spectral_alpha,
+            'spectral_beta': self.spectral_beta,
+            'early_layer_ratio': self.early_layer_ratio,
+            'late_layer_ratio': self.late_layer_ratio,
+            # v7.0 Context-Dependent Gating
+            'enable_v7_gating': self.enable_v7_gating,
+            'stability_sensitivity': self.stability_sensitivity,
+            'parametric_weight': self.parametric_weight,
+            # v8.0 Semantic Dispersion
+            'enable_semantic_dispersion': self.enable_semantic_dispersion,
+            'dispersion_k': self.dispersion_k,
+            'dispersion_sensitivity': self.dispersion_sensitivity,
             # Computation
             'semantic_layers': self.semantic_layers,
             'residual_weight': self.residual_weight,
