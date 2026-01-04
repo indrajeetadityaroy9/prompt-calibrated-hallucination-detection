@@ -1,11 +1,11 @@
-# Stage 4: Scale Test (70B)
-# Purpose: Verify AG-SAR works at 70B scale
+# Scaling Law Test (Figure 2)
+# Purpose: Verify AG-SAR scales to 70B parameters
 # REQUIREMENTS: 2× H100 80GB (140GB+ VRAM needed)
-# SKIP if running on 1× H100 - use stage4_scale_8b_to_32b.yaml instead
+# Paper Contribution: Demonstrates AG-SAR works at scale
 
 experiment:
-  name: "stage4_scale_70b"
-  description: "Test AG-SAR on Llama-3.1-70B (multi-GPU)"
+  name: "02_scaling_law"
+  description: "AG-SAR scaling test on Llama-3.1-70B"
 
 dataset:
   name: halueval_qa
@@ -29,16 +29,32 @@ methods:
 
 evaluation:
   metrics:
+    # Discrimination (higher=better)
     - auroc
     - auprc
+    - auprc_factual
+    # Classification (higher=better)
+    - f1
+    - precision
+    - recall
+    - accuracy
+    # Calibration (lower=better)
     - ece
     - brier
+    # Coverage & Utility (lower=better)
     - aurc
+    - risk_80
+    - risk_90
+    - risk_95
+    # Correlation (higher=better)
+    - spearman
+    - pearson
+    - pointbiserial
   bootstrap_samples: 200  # Fewer for reduced samples
   confidence_level: 0.95
 
 output:
-  output_dir: "results/stage4_scale_70b"
+  output_dir: "results/02_scaling_law"
   save_predictions: true
   save_scores: true
 

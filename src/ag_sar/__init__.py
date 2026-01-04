@@ -9,11 +9,11 @@ Key Features:
     - Optimized for NVIDIA H100 with bfloat16 precision and TF32 acceleration
     - Zero external latency: pure internal model analysis
     - Supports GPT-2, Llama-3/3.1/3.2, Mistral, and Qwen architectures
-    - Core metric: v3.1 Authority Flow + v3.2 MLP Divergence
+    - Core: Authority Flow + Unified Gating + Semantic Dispersion
 
 Example:
     >>> from ag_sar import AGSAR, AGSARConfig
-    >>> config = AGSARConfig(semantic_layers=4)
+    >>> config = AGSARConfig()  # Uses default settings (semantic dispersion enabled)
     >>> agsar = AGSAR(model, tokenizer, config)
     >>> score = agsar.compute_uncertainty(prompt, response)
     >>> is_hall, conf, details = agsar.detect_hallucination(prompt, response)
@@ -35,16 +35,17 @@ from .modeling import ModelAdapter, AttentionCapture
 
 # Measures (for advanced users)
 from .measures import (
-    # Authority
+    # Authority (core)
     compute_authority_score,
     compute_register_mask,
     compute_mlp_divergence,
-    # Graph
-    compute_centrality,
-    compute_sink_aware_centrality,
-    aggregate_value_norms,
+    compute_gated_authority,
+    compute_semantic_authority,
     # Entropy
     compute_token_entropy,
+    # Semantic Dispersion
+    compute_semantic_dispersion,
+    compute_semantic_trust,
 )
 
 # Operations (for custom pipelines)
@@ -85,12 +86,13 @@ __all__ = [
     "compute_authority_score",
     "compute_register_mask",
     "compute_mlp_divergence",
-    # Measures - Graph
-    "compute_centrality",
-    "compute_sink_aware_centrality",
-    "aggregate_value_norms",
+    "compute_gated_authority",
+    "compute_semantic_authority",
     # Measures - Entropy
     "compute_token_entropy",
+    # Measures - Semantic Dispersion
+    "compute_semantic_dispersion",
+    "compute_semantic_trust",
     # Operations
     "EMAState",
     "fisher_kurtosis",

@@ -113,16 +113,18 @@ class EvaluationConfig(BaseModel):
     @field_validator("metrics")
     @classmethod
     def validate_metrics(cls, v):
-        # ICML-grade metrics: discrimination + calibration + utility
+        # ICML/NeurIPS-grade metrics: discrimination + calibration + utility + correlation
         valid = {
-            # Discrimination
-            "auroc", "auprc",
-            # Classification
+            # Discrimination (higher=better)
+            "auroc", "auprc", "auprc_factual",
+            # Classification (higher=better)
             "f1", "precision", "recall", "accuracy",
-            # Calibration (ICML)
+            # Calibration (lower=better)
             "ece", "brier",
-            # Utility (ICML)
-            "aurc",
+            # Coverage & Utility (lower=better, consistent polarity)
+            "aurc", "risk_80", "risk_90", "risk_95",
+            # Correlation (higher=better)
+            "spearman", "pearson", "pointbiserial",
         }
         for m in v:
             if m not in valid:

@@ -1,17 +1,15 @@
-# Experiment 5: Ablation Study
+# Mechanism Ablation (Table 3)
 # Paper Section 5: Ablation Analysis
 #
 # Tests the contribution of each AG-SAR component:
-# 1. Full AG-SAR (Authority Flow + Register Filter + MLP Divergence)
-# 2. No Register Filter
-# 3. No MLP Divergence (Spectral Roughness)
-# 4. No Authority Flow (just centrality)
-#
-# Run this experiment multiple times with different agsar configs
-# by modifying the methods.agsar section.
+# 1. Full AG-SAR (Authority Flow + Unified Gating + Semantic Dispersion)
+# 2. No Unified Gating (Authority Flow only)
+# 3. No Semantic Dispersion (raw confidence)
+# 4. No Register Filter
+# 5. No MLP Divergence
 
 experiment:
-  name: "exp5_ablation"
+  name: "05_mechanism_ablation"
   description: "Ablation study of AG-SAR components"
 
 dataset:
@@ -46,13 +44,31 @@ methods:
 evaluation:
   confidence_threshold: 0.7
   metrics:
+    # Discrimination (higher=better)
     - auroc
     - auprc
+    - auprc_factual
+    # Classification (higher=better)
     - f1
+    - precision
+    - recall
+    - accuracy
+    # Calibration (lower=better)
+    - ece
+    - brier
+    # Coverage & Utility (lower=better)
+    - aurc
+    - risk_80
+    - risk_90
+    - risk_95
+    # Correlation (higher=better)
+    - spearman
+    - pearson
+    - pointbiserial
   bootstrap_samples: 1000
   confidence_level: 0.95
 
 output:
-  output_dir: "results/exp5_ablation"
+  output_dir: "results/05_mechanism_ablation"
   save_predictions: true
   save_scores: true

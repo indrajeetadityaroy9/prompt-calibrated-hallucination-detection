@@ -99,8 +99,16 @@ class LogProbMethod(UncertaintyMethod):
         # Gather log probs of actual tokens
         token_log_probs = log_probs.gather(2, response_tokens.unsqueeze(-1)).squeeze(-1)
 
-        # Mean probability
-        mean_prob = token_log_probs.exp().mean().item()
+        # Compute probability statistics
+        token_probs = token_log_probs.exp()
+        mean_prob = token_probs.mean().item()
+        min_prob = token_probs.min().item()
+        max_prob = token_probs.max().item()
+
+        # Negative log-prob statistics (for analysis)
+        mean_neg_logp = -token_log_probs.mean().item()
+        max_neg_logp = -token_log_probs.min().item()  # min log = max neg log
+
         uncertainty = 1.0 - mean_prob
 
         latency = (time.perf_counter() - t0) * 1000
@@ -109,4 +117,11 @@ class LogProbMethod(UncertaintyMethod):
             score=uncertainty,
             confidence=mean_prob,
             latency_ms=latency,
+            extra={
+                "min_prob": min_prob,
+                "max_prob": max_prob,
+                "mean_neg_logp": mean_neg_logp,
+                "max_neg_logp": max_neg_logp,
+                "response_tokens": response_tokens.numel(),
+            },
         )

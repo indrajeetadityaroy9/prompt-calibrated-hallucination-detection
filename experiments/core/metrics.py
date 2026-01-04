@@ -29,7 +29,7 @@ from sklearn.metrics import (
     accuracy_score,
 )
 from sklearn.calibration import calibration_curve
-from scipy.stats import spearmanr, bootstrap
+from scipy.stats import spearmanr, pearsonr, pointbiserialr, bootstrap
 
 # Phase 1.3: Tensor safety
 try:
@@ -89,15 +89,27 @@ class MetricsCalculator:
 
         # Define metric functions
         self._metric_fns: Dict[str, Callable] = {
+            # Discrimination (higher=better)
             "auroc": self._auroc,
             "auprc": self._auprc,
-            "ece": self._ece,
-            "brier": self._brier,
-            "aurc": self._aurc,
+            "auprc_factual": self._auprc_factual,
+            # Classification (higher=better)
             "f1": self._f1,
             "precision": self._precision,
             "recall": self._recall,
             "accuracy": self._accuracy,
+            # Calibration (lower=better)
+            "ece": self._ece,
+            "brier": self._brier,
+            # Coverage & Utility (lower=better)
+            "aurc": self._aurc,
+            "risk_80": self._risk_80,
+            "risk_90": self._risk_90,
+            "risk_95": self._risk_95,
+            # Correlation (higher=better)
+            "spearman": self._spearman,
+            "pearson": self._pearson,
+            "pointbiserial": self._pointbiserial,
         }
 
     def _filter_nan(
@@ -321,6 +333,99 @@ class MetricsCalculator:
         y_pred = (y_scores >= threshold).astype(int)
         return float(accuracy_score(y_true, y_pred))
 
+    # ===== Correlation Metrics (ICML/NeurIPS) =====
+
+    def _spearman(self, y_true: np.ndarray, y_scores: np.ndarray) -> Optional[float]:
+        """
+        Spearman's rank correlation coefficient.
+
+        Measures monotonic relationship between scores and labels.
+        """
+        if len(y_true) < 3:
+            return None
+        rho, _ = spearmanr(y_true, y_scores)
+        return float(rho) if not np.isnan(rho) else None
+
+    def _pearson(self, y_true: np.ndarray, y_scores: np.ndarray) -> Optional[float]:
+        """
+        Pearson correlation coefficient.
+
+        Measures linear relationship between scores and labels.
+        """
+        if len(y_true) < 3 or np.std(y_true) == 0 or np.std(y_scores) == 0:
+            return None
+        r, _ = pearsonr(y_true, y_scores)
+        return float(r) if not np.isnan(r) else None
+
+    def _pointbiserial(self, y_true: np.ndarray, y_scores: np.ndarray) -> Optional[float]:
+        """
+        Point-biserial correlation (continuous score vs binary label).
+
+        Specifically designed for correlating continuous variables with binary.
+        """
+        if len(y_true) < 3 or self._check_single_class(y_true, "pointbiserial"):
+            return None
+        r, _ = pointbiserialr(y_true, y_scores)
+        return float(r) if not np.isnan(r) else None
+
+    # ===== AUPRC Factual (Inverted Labels) =====
+
+    def _auprc_factual(self, y_true: np.ndarray, y_scores: np.ndarray) -> Optional[float]:
+        """
+        AUPRC with inverted labels (Positive Class = Factual = 0).
+
+        Measures ability to identify facts, complementing standard AUPRC
+        which measures ability to identify hallucinations.
+        """
+        if self._check_single_class(y_true, "auprc_factual"):
+            return None
+        # Invert: factual (0) becomes positive class (1)
+        y_true_inv = 1 - y_true
+        # Invert scores: low uncertainty -> high "factuality confidence"
+        y_scores_inv = 1 - y_scores
+        return float(average_precision_score(y_true_inv, y_scores_inv))
+
+    # ===== Risk at Coverage Metrics (Consistent with AURC) =====
+
+    def _risk_at_coverage(self, y_true: np.ndarray, y_scores: np.ndarray,
+                          coverage: float) -> float:
+        """
+        Risk at specified coverage level.
+
+        Risk = Rate of hallucinations in the retained set.
+        Lower is better (consistent with AURC polarity).
+
+        At coverage X%, we keep the X% lowest-uncertainty samples.
+        Risk measures what fraction of those retained samples are hallucinations.
+        """
+        n = len(y_true)
+        if n == 0:
+            return 0.0
+
+        # Sort by uncertainty ascending (keep low-uncertainty samples)
+        asc_indices = np.argsort(y_scores)
+        keep_count = int(coverage * n)
+
+        if keep_count == 0:
+            return 0.0
+
+        # Risk = fraction of retained samples that are hallucinations (1)
+        kept_labels = y_true[asc_indices[:keep_count]]
+        risk = np.mean(kept_labels == 1)  # Hallucination rate in kept set
+        return float(risk)
+
+    def _risk_80(self, y_true: np.ndarray, y_scores: np.ndarray) -> float:
+        """Risk at 80% coverage (lower is better)."""
+        return self._risk_at_coverage(y_true, y_scores, 0.80)
+
+    def _risk_90(self, y_true: np.ndarray, y_scores: np.ndarray) -> float:
+        """Risk at 90% coverage (lower is better)."""
+        return self._risk_at_coverage(y_true, y_scores, 0.90)
+
+    def _risk_95(self, y_true: np.ndarray, y_scores: np.ndarray) -> float:
+        """Risk at 95% coverage (lower is better)."""
+        return self._risk_at_coverage(y_true, y_scores, 0.95)
+
     def compute_all(
         self,
         labels: Union[List[int], np.ndarray, "torch.Tensor"],
@@ -459,3 +564,54 @@ def compute_risk_coverage_aurc(
     coverages = cumulative_count / n
 
     return float(auc(coverages, risks))
+
+
+def compute_latency_metrics(
+    latencies_ms: List[float],
+    token_counts: List[int],
+) -> Dict[str, float]:
+    """
+    Compute latency statistics including ms/token.
+
+    Args:
+        latencies_ms: List of sample latencies in milliseconds
+        token_counts: List of response token counts per sample
+
+    Returns:
+        Dict with latency statistics: mean, std, percentiles, ms_per_token, tokens_per_sec
+    """
+    latencies = np.array(latencies_ms)
+    tokens = np.array(token_counts)
+
+    total_tokens = tokens.sum()
+    total_time_ms = latencies.sum()
+
+    return {
+        "latency_mean_ms": float(latencies.mean()) if len(latencies) > 0 else 0.0,
+        "latency_std_ms": float(latencies.std()) if len(latencies) > 0 else 0.0,
+        "latency_p50_ms": float(np.percentile(latencies, 50)) if len(latencies) > 0 else 0.0,
+        "latency_p95_ms": float(np.percentile(latencies, 95)) if len(latencies) > 0 else 0.0,
+        "ms_per_token": float(total_time_ms / total_tokens) if total_tokens > 0 else 0.0,
+        "tokens_per_sec": float(total_tokens / (total_time_ms / 1000)) if total_time_ms > 0 else 0.0,
+    }
+
+
+def compute_overhead_pct(
+    method_latencies: List[float],
+    baseline_latencies: List[float],
+) -> float:
+    """
+    Compute overhead percentage relative to baseline.
+
+    Args:
+        method_latencies: Latencies for the method being evaluated
+        baseline_latencies: Latencies for the baseline method
+
+    Returns:
+        Overhead as percentage (e.g., 50.0 means 50% slower than baseline)
+    """
+    mean_method = np.mean(method_latencies)
+    mean_baseline = np.mean(baseline_latencies)
+    if mean_baseline == 0:
+        return 0.0
+    return float((mean_method / mean_baseline - 1) * 100)

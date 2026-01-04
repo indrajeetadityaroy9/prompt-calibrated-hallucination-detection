@@ -131,12 +131,17 @@ class PredictiveEntropyMethod(UncertaintyMethod):
         max_ent = self.max_entropy.to(self.device)
         normalized_entropy = entropy / max_ent
 
-        # Mean over response tokens
+        # Entropy statistics over response tokens
         mean_entropy = normalized_entropy.mean().item()
+        max_entropy = normalized_entropy.max().item()
+        min_entropy = normalized_entropy.min().item()
 
         # Also compute mean probability for confidence
         token_log_probs = log_probs.gather(2, response_tokens.unsqueeze(-1)).squeeze(-1)
         mean_prob = token_log_probs.exp().mean().item()
+
+        # Token count for latency analysis
+        num_response_tokens = response_tokens.numel()
 
         latency = (time.perf_counter() - t0) * 1000
 
@@ -146,5 +151,9 @@ class PredictiveEntropyMethod(UncertaintyMethod):
             latency_ms=latency,
             extra={
                 "raw_entropy": entropy.mean().item(),
+                "max_entropy": max_entropy,
+                "min_entropy": min_entropy,
+                "entropy_range": max_entropy - min_entropy,
+                "response_tokens": num_response_tokens,
             },
         )

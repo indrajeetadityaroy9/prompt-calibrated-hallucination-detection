@@ -10,7 +10,7 @@ AG-SAR (Attention-Graph Shifting Attention to Relevance) is a zero-latency uncer
 - Optimized for NVIDIA H100 with bfloat16 precision and TF32 acceleration
 - Zero external latency: pure internal model analysis using attention patterns
 - Supports GPT-2, Llama-3/3.1/3.2, Mistral, and Qwen architectures
-- Core metric: v3.1 Authority Flow + v3.2 MLP Divergence
+- SOTA v8.0: Authority Flow + Unified Gating + Semantic Dispersion
 
 ## H100 Installation
 
@@ -53,7 +53,7 @@ pytest tests/unit/ -v
 pytest tests/integration/ -v
 
 # Run specific test file
-pytest tests/unit/test_v31_ops.py -v
+pytest tests/unit/test_core_ops.py -v
 
 # Run single test function
 pytest tests/unit/test_ops.py::test_fisher_kurtosis -v
@@ -71,10 +71,10 @@ mypy src/ag_sar/           # Type checking
 python -m experiments.analysis.benchmark_latency --model gpt2 --seq-len 128
 
 # Run experiment (e.g., HaluEval QA benchmark)
-python -m experiments.main --config experiments/configs/exp1_halueval_qa.yaml
+python -m experiments.main --config experiments/configs/01_main_sota.yaml
 
 # Dry run (print config only)
-python -m experiments.main --config experiments/configs/exp1_halueval_qa.yaml --dry-run
+python -m experiments.main --config experiments/configs/01_main_sota.yaml --dry-run
 
 # Reproduce all paper experiments
 ./reproduce_paper.sh
@@ -87,8 +87,8 @@ python -m experiments.main --config experiments/configs/exp1_halueval_qa.yaml --
 ```
 AGSAR Engine (engine.py)
 ├── Main API: compute_uncertainty(), detect_hallucination()
-├── v3.1 Authority Flow + v3.2 MLP Divergence
-└── Orchestrates: extract → authority_score → mlp_divergence → score
+├── Authority Flow + Unified Gating + Semantic Dispersion
+└── Orchestrates: extract → authority_score → gating → dispersion → score
 
 ModelAdapter (modeling/hooks.py)
 ├── Hook-based Q/K/V extraction without O(N²) matrices
@@ -97,9 +97,11 @@ ModelAdapter (modeling/hooks.py)
 └── AttentionCapture dataclass for multi-layer storage
 
 Measures (measures/)
-├── authority.py: v3.1 Authority Flow + Register Filter + MLP Divergence
-├── graph.py: Matrix-free O(N) eigenvector centrality via power iteration
+├── authority.py: Authority Flow + Register Filter + Gated/Semantic Authority
+├── semantics.py: Semantic Dispersion (consistency over confidence)
 └── entropy.py: Token entropy (baseline utility)
+
+Note: Ablation code (LID, Spectral, Legacy Graph) archived in legacy_research/
 
 Ops (ops/)
 ├── torch_functional.py: PyTorch implementations with torch.compile
@@ -110,15 +112,15 @@ Utils (utils/)
 └── tensor.py: H100 optimizations, TF32, Flash Attention, safe_normalize, attention masking
 ```
 
-### Data Flow (v3.1/v3.2)
+### Data Flow
 
 ```
 prompt + response → tokenize → ModelAdapter.extract()
     → Q, K, value_states, attn_outputs, block_outputs
     → compute_register_mask() [Mechanism 1: Kurtosis-based filter]
     → compute_authority_score() [Mechanism 2: Recursive prompt recharge]
-    → compute_mlp_divergence() [Mechanism 3: Attention-MLP divergence]
-    → uncertainty = 1 - authority / (1 + λ × divergence)
+    → compute_gated_authority() [Mechanism 3: Unified RAG/free-gen gating]
+    → compute_semantic_authority() [Mechanism 4: Semantic dispersion]
     → detect_hallucination(uncertainty > threshold)
 ```
 
@@ -135,14 +137,19 @@ prompt + response → tokenize → ModelAdapter.extract()
 - **GQA**: Auto-expands KV heads via `align_gqa_heads()` (8 KV → 32 Q for Llama-3.1-8B)
 
 ### Critical Parameters (AGSARConfig)
+
 - `residual_weight=0.5`: Prevents early-token collapse in power iteration
 - `power_iteration_steps=3`: Converges in 2-3 iterations
 - `semantic_layers=4`: Final layers contain semantic consolidation
 - `sink_token_count=4`: First N tokens masked as structural sinks
-- `lambda_roughness=10.0`: MLP divergence penalty (v3.2)
+- `lambda_roughness=10.0`: MLP divergence penalty
 - `kurtosis_threshold=2.0`: Register filter threshold
 - `ema_decay=0.995`: Online kurtosis normalization decay
 - `hallucination_threshold=0.7`: Default detection threshold
+- `enable_unified_gating=True`: Context-dependent RAG/free-gen gating
+- `enable_semantic_dispersion=True`: Semantic consistency over raw confidence
+
+For ablation studies (v3.1 baseline comparison), set `enable_unified_gating=False`.
 
 ### Transformers Version
 **Critical**: transformers >= 4.45 has breaking changes for attention hooks that break the monkey-patch mechanism. The dependency is pinned to `>=4.40.0,<4.45.0` in pyproject.toml. If you must use a newer version, expect hook registration failures on Llama/Mistral/Qwen architectures.
@@ -168,9 +175,26 @@ prompt + response → tokenize → ModelAdapter.extract()
 
 4. **MLP Divergence (Mechanism 3)**: Detects when MLP overrides attention: `δ(t) = 1 - CosineSim(h_attn, h_block)`
 
+## Archived Ablation Code
+
+For paper reproducibility (Table 3), ablation code is archived in `legacy_research/`:
+
+| Component | Archived Location | Description |
+|-----------|-------------------|-------------|
+| LID (Manifold) | `legacy_research/ablations/manifold.py` | v5.0 Local Intrinsic Dimension |
+| Spectral | `legacy_research/ablations/spectral.py` | v6.0 Laplacian entropy + DoLa |
+| Legacy Graph | `legacy_research/ablations/legacy_graph.py` | v1/v2 centrality-based approach |
+
+To reproduce ablations, copy files back to `src/ag_sar/measures/ablations/` (see `legacy_research/README.md`).
+
+For v3.1 baseline comparison (pure Authority Flow without gating):
+```python
+config = AGSARConfig(enable_unified_gating=False, enable_semantic_dispersion=False)
+```
+
 ## Test Organization
 
-- `tests/unit/`: Individual component tests (ops, config, centrality, hooks, v31_ops)
+- `tests/unit/`: Individual component tests (ops, config, centrality, hooks, core_ops)
 - `tests/integration/`: Full pipeline tests with real models
 - `tests/conftest.py`: Shared fixtures (device, dtype, tensor dimensions)
 
@@ -198,18 +222,20 @@ experiments/
 │   └── eigenscore.py          # EigenScore baseline
 ├── configs/
 │   ├── schema.py              # Pydantic config validation
-│   ├── exp1_halueval_qa.yaml  # Paper Section 4.1
-│   ├── exp2_halueval_summ.yaml
-│   ├── exp3_ragtruth.yaml     # Paper Section 4.2
-│   ├── exp4_baseline_comparison.yaml  # Paper Section 4.3
-│   └── exp5_ablation.yaml     # Paper Section 5
+│   ├── 00_ci_smoke_test.yaml  # CI validation
+│   ├── 01_main_sota.yaml      # Table 1: SOTA comparison
+│   ├── 02_scaling_law.yaml    # Figure 2: Scaling to 70B
+│   ├── 03_generalization.yaml # Table 2: RAGTruth generalization
+│   └── 04_moe_robustness.yaml # Discussion: MoE architecture
 └── analysis/
     └── benchmark_latency.py   # Zero-latency verification
 ```
 
-**Canonical Experiments:**
-- `exp1`: HaluEval QA (primary benchmark)
-- `exp2`: HaluEval Summarization
-- `exp3`: RAGTruth generalization
-- `exp4`: Full baseline comparison (all SOTA methods)
-- `exp5`: Ablation study (component contributions)
+**Paper Experiments:**
+- `00_ci_smoke_test.yaml`: CI validation (fast sanity check)
+- `01_main_sota.yaml`: Table 1 - SOTA comparison on HaluEval QA
+- `02_scaling_law.yaml`: Figure 2 - Scaling to Llama-3.1-70B
+- `03_generalization.yaml`: Table 2 - RAGTruth natural hallucinations
+- `04_moe_robustness.yaml`: Discussion - MoE architecture (Mixtral)
+
+Note: Ablation experiment config (`05_mechanism_ablation.yaml`) archived in `legacy_research/`.

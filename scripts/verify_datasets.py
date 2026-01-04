@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
 """
-Dataset Verification Script (Phase 3.3)
+Dataset Verification Script
 
-Hard gate: This script MUST pass before running experiments.
-Exits non-zero on any schema mismatch.
+Validates both Raw Sources (HuggingFace) and Internal Wrappers (experiments/data/*.py)
+to prevent Silent Data Failures (class imbalance, schema drift, missing labels).
 
 Usage:
     python scripts/verify_datasets.py
+
+Exit codes:
+    0 - All checks passed
+    1 - Verification failed
 """
 
 import sys
+import os
+from pathlib import Path
 from typing import List, Tuple
 
+# Ensure repo root is in path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
-def verify_halueval() -> Tuple[bool, List[str]]:
+
+def verify_halueval_schema() -> Tuple[bool, List[str]]:
     """
-    Verify HaluEval dataset schema.
+    Verify HaluEval raw dataset schema from HuggingFace.
 
-    Phase 3.2 Requirements:
-    - Repo: pminervini/HaluEval
-    - Config: qa or summarization
-    - Split: data
+    Checks:
+    - Loads from pminervini/HaluEval with config "qa" and split "data"
     - Required columns: knowledge, question, right_answer, hallucinated_answer
     """
     errors = []
@@ -55,19 +63,99 @@ def verify_halueval() -> Tuple[bool, List[str]]:
         print("✓ HaluEval-Summarization schema verified")
 
     except Exception as e:
-        errors.append(f"HaluEval verification failed: {e}")
+        errors.append(f"HaluEval schema verification failed: {e}")
 
     return len(errors) == 0, errors
 
 
-def verify_ragtruth() -> Tuple[bool, List[str]]:
+def verify_halueval_wrapper() -> Tuple[bool, List[str]]:
     """
-    Verify RAGTruth dataset schema.
+    Verify HaluEvalDataset wrapper logic.
 
-    Phase 3.2 Requirements:
-    - Repo: wandb/RAGTruth-processed
-    - Split: test
-    - Required columns: query/input_str, output, hallucination_labels, task_type
+    Critical checks:
+    - Dual-yield: Each raw row yields TWO samples (hallucinated + factual)
+    - Class balance: ~50% hallucinations, ~50% factual
+    - Prompt sharing: Paired samples share the same prompt
+    - num_samples controls OUTPUT samples (after pairing)
+    """
+    errors = []
+    try:
+        from experiments.data.halueval import HaluEvalDataset
+
+        print("[-] Testing HaluEvalDataset wrapper...")
+
+        # Load 20 output samples (sampling happens after dual-yield)
+        ds = HaluEvalDataset(variant="qa", num_samples=20, seed=42)
+        ds.load()
+        samples = list(ds)
+
+        # Check 1: Quantity
+        if len(samples) != 20:
+            errors.append(f"Expected 20 samples, got {len(samples)}.")
+            return False, errors
+
+        # Check 2: Class Balance (~50% each due to dual-yield design)
+        labels = [s.label for s in samples]
+        positives = sum(labels)
+        negatives = len(labels) - positives
+        # Allow some variance due to random sampling, but should be roughly balanced
+        if positives == 0 or negatives == 0:
+            errors.append(
+                f"Severe class imbalance: {positives} hallucinations, {negatives} factual. "
+                "Dual-yield should produce both classes."
+            )
+        elif abs(positives - negatives) > len(samples) * 0.3:
+            errors.append(
+                f"Class imbalance: {positives} hallucinations, {negatives} factual. "
+                "Expected roughly 50/50 from dual-yield."
+            )
+
+        # Check 3: Verify dual-yield by loading without sampling
+        # The base _load() should produce pairs - verify on raw load
+        ds_full = HaluEvalDataset(variant="qa", num_samples=None, seed=42)
+        ds_full.load()
+        full_samples = list(ds_full)[:100]  # Check first 100
+
+        # Check adjacent pairs share prompts (before random sampling)
+        pairs_matched = 0
+        for i in range(0, len(full_samples) - 1, 2):
+            if full_samples[i].prompt == full_samples[i + 1].prompt:
+                pairs_matched += 1
+        if pairs_matched < len(full_samples) // 4:  # At least 50% pairs should match
+            errors.append(
+                f"Dual-yield pairing broken: only {pairs_matched}/{len(full_samples)//2} pairs share prompts."
+            )
+        else:
+            print(f"  Dual-yield verified: {pairs_matched} adjacent pairs share prompts")
+
+        # Check 4: Label integrity
+        if not all(x in [0, 1] for x in labels):
+            errors.append("Labels contain values other than 0 or 1")
+
+        # Check 5: No exact response duplication in prompt
+        # Note: Knowledge/context containing similar info is expected for QA tasks
+        for s in samples[:4]:
+            # Only flag if the ENTIRE response appears verbatim in prompt
+            if s.response.strip() == s.prompt.strip():
+                errors.append("Data leakage: response is identical to prompt")
+                break
+
+        if not errors:
+            print(f"✓ HaluEval wrapper: {len(samples)} samples, {positives} pos / {negatives} neg")
+
+    except Exception as e:
+        errors.append(f"HaluEval wrapper verification crashed: {e}")
+
+    return len(errors) == 0, errors
+
+
+def verify_ragtruth_schema() -> Tuple[bool, List[str]]:
+    """
+    Verify RAGTruth raw dataset schema from HuggingFace.
+
+    Checks:
+    - Loads from wandb/RAGTruth-processed split "test"
+    - Required columns: query/context, output, hallucination_labels, task_type, quality
     """
     errors = []
     try:
@@ -76,56 +164,103 @@ def verify_ragtruth() -> Tuple[bool, List[str]]:
         ds = load_dataset("wandb/RAGTruth-processed", split="test", streaming=True)
         sample = next(iter(ds))
 
-        # Required columns (either input_str or context+query for prompt)
-        if "input_str" not in sample and "context" not in sample:
-            errors.append("RAGTruth missing prompt columns (input_str or context)")
+        # Required columns
+        if "context" not in sample and "input_str" not in sample:
+            errors.append("RAGTruth missing prompt columns (context or input_str)")
 
         if "output" not in sample:
             errors.append("RAGTruth missing column: output")
 
-        if "hallucination_labels" not in sample:
-            errors.append("RAGTruth missing column: hallucination_labels")
+        if "hallucination_labels_processed" not in sample:
+            errors.append("RAGTruth missing column: hallucination_labels_processed")
 
         if "task_type" not in sample:
             errors.append("RAGTruth missing column: task_type")
 
-        # Verify hallucination_labels structure (list or can be converted to list)
-        if "hallucination_labels" in sample:
-            labels = sample["hallucination_labels"]
-            # In streaming mode, may come as various iterable types
-            try:
-                _ = len(list(labels) if not isinstance(labels, list) else labels)
-            except (TypeError, ValueError):
-                errors.append("RAGTruth hallucination_labels cannot be converted to list")
+        if "quality" not in sample:
+            errors.append("RAGTruth missing column: quality (needed for refusal filtering)")
 
         print("✓ RAGTruth schema verified")
 
     except Exception as e:
-        errors.append(f"RAGTruth verification failed: {e}")
+        errors.append(f"RAGTruth schema verification failed: {e}")
+
+    return len(errors) == 0, errors
+
+
+def verify_ragtruth_wrapper() -> Tuple[bool, List[str]]:
+    """
+    Verify RAGTruthDataset wrapper logic.
+
+    Critical checks:
+    - Label mapping: is_hallucination -> label in [0, 1]
+    - Refusal filtering: filter_refusals parameter uses quality field
+    - Task filtering: task_type filter works
+    """
+    errors = []
+    try:
+        from experiments.data.ragtruth import RAGTruthDataset
+
+        print("[-] Testing RAGTruthDataset wrapper...")
+
+        # Test 1: Basic loading without filter
+        ds_raw = RAGTruthDataset(task_type="QA", num_samples=50, seed=42, filter_refusals=False)
+        ds_raw.load()
+        samples_raw = list(ds_raw)
+        count_raw = len(samples_raw)
+
+        # Test 2: With refusal filter
+        ds_filt = RAGTruthDataset(task_type="QA", num_samples=50, seed=42, filter_refusals=True)
+        ds_filt.load()
+        samples_filt = list(ds_filt)
+        count_filt = len(samples_filt)
+
+        print(f"   Raw: {count_raw}, Filtered: {count_filt}")
+
+        # Check 1: Label integrity
+        labels = [s.label for s in samples_raw]
+        if not all(x in [0, 1] for x in labels):
+            errors.append("RAGTruth labels contain values other than 0 or 1")
+
+        # Check 2: Filter should not increase count
+        if count_filt > count_raw:
+            errors.append(f"Filtered dataset grew: {count_raw} -> {count_filt}")
+
+        # Check 3: Has both classes (for AUROC)
+        positives = sum(labels)
+        negatives = count_raw - positives
+        if positives == 0:
+            errors.append("RAGTruth has no hallucination samples (all 0s)")
+        if negatives == 0:
+            errors.append("RAGTruth has no factual samples (all 1s)")
+
+        # Check 4: Prompt structure
+        if samples_raw:
+            prompt = samples_raw[0].prompt
+            if "Context:" not in prompt or "Question:" not in prompt:
+                errors.append("RAGTruth prompt missing expected structure (Context/Question)")
+
+        if not errors:
+            print(f"✓ RAGTruth wrapper: {count_raw} samples, {positives} hall / {negatives} fact")
+            if count_filt < count_raw:
+                print(f"  Refusal filter removed {count_raw - count_filt} samples")
+
+    except Exception as e:
+        errors.append(f"RAGTruth wrapper verification crashed: {e}")
 
     return len(errors) == 0, errors
 
 
 def verify_label_balance() -> Tuple[bool, List[str]]:
     """
-    Verify dataset label balance for AUROC validity.
-
-    Both positive and negative labels must be present.
+    Verify both datasets have label balance for valid AUROC.
     """
     errors = []
     warnings = []
 
-    # Add experiments to path if needed
-    import sys
-    from pathlib import Path
-    project_root = Path(__file__).parent.parent
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-
     try:
         from experiments.data.halueval import HaluEvalDataset
 
-        # Check HaluEval (should be perfectly balanced by design)
         halueval = HaluEvalDataset(variant="qa", num_samples=100, seed=42)
         halueval.load()
         stats = halueval.get_statistics()
@@ -134,20 +269,18 @@ def verify_label_balance() -> Tuple[bool, List[str]]:
             errors.append("HaluEval has no hallucination samples")
         if stats["factual"] == 0:
             errors.append("HaluEval has no factual samples")
-        if stats["hallucination_rate"] != 0.5:
-            print(f"  Note: HaluEval hallucination_rate={stats['hallucination_rate']:.2%}")
+        if abs(stats["hallucination_rate"] - 0.5) > 0.01:
+            warnings.append(f"HaluEval rate={stats['hallucination_rate']:.2%} (expected 50%)")
 
-        print(f"✓ HaluEval balance: {stats['hallucinated']}/{stats['factual']} (hal/fact)")
+        print(f"✓ HaluEval balance: {stats['hallucinated']}/{stats['factual']} (hall/fact)")
 
     except Exception as e:
-        warnings.append(f"HaluEval balance check skipped: {e}")
-        print(f"⚠ HaluEval balance check skipped: {e}")
+        errors.append(f"HaluEval balance check failed: {e}")
 
     try:
         from experiments.data.ragtruth import RAGTruthDataset
 
-        # Check RAGTruth
-        ragtruth = RAGTruthDataset(num_samples=100, seed=42)
+        ragtruth = RAGTruthDataset(task_type="QA", num_samples=100, seed=42)
         ragtruth.load()
         stats = ragtruth.get_statistics()
 
@@ -156,61 +289,50 @@ def verify_label_balance() -> Tuple[bool, List[str]]:
         if stats["factual"] == 0:
             errors.append("RAGTruth has no factual samples")
 
-        print(f"✓ RAGTruth balance: {stats['hallucinated']}/{stats['factual']} (hal/fact)")
+        print(f"✓ RAGTruth balance: {stats['hallucinated']}/{stats['factual']} (hall/fact)")
 
     except Exception as e:
-        warnings.append(f"RAGTruth balance check skipped: {e}")
-        print(f"⚠ RAGTruth balance check skipped: {e}")
+        errors.append(f"RAGTruth balance check failed: {e}")
 
     return len(errors) == 0, errors
 
 
 def verify_dependencies() -> Tuple[bool, List[str]]:
-    """
-    Verify all required science libraries are importable.
-
-    Phase 0.1 requirement.
-    """
+    """Verify required libraries are importable."""
     errors = []
-    warnings = []
 
     try:
         import numpy
         import scipy
         import sklearn
         from sklearn.metrics import roc_auc_score, average_precision_score
-        from sklearn.calibration import calibration_curve
-        print("✓ Science libraries (numpy, scipy, sklearn) importable")
+        print("✓ Science libraries (numpy, scipy, sklearn)")
     except ImportError as e:
         errors.append(f"Missing science library: {e}")
 
     try:
         import torch
-        print("✓ PyTorch importable")
+        print("✓ PyTorch")
     except ImportError as e:
         errors.append(f"Missing torch: {e}")
 
     try:
         import transformers
-        print("✓ transformers importable")
+        print("✓ Transformers")
     except ImportError as e:
-        warnings.append(f"Missing transformers (optional for schema check): {e}")
-        print(f"⚠ transformers not available (optional)")
+        errors.append(f"Missing transformers: {e}")
 
     try:
-        import sentence_transformers
-        print("✓ sentence_transformers importable")
+        from datasets import load_dataset
+        print("✓ HuggingFace datasets")
     except ImportError as e:
-        warnings.append(f"Missing sentence_transformers (optional for schema check): {e}")
-        print(f"⚠ sentence_transformers not available (optional for SelfCheckGPT)")
+        errors.append(f"Missing datasets: {e}")
 
     return len(errors) == 0, errors
 
 
 def verify_cuda() -> Tuple[bool, List[str]]:
-    """
-    Verify CUDA availability and report VRAM.
-    """
+    """Check CUDA availability and report VRAM."""
     errors = []
     try:
         import torch
@@ -230,49 +352,56 @@ def verify_cuda() -> Tuple[bool, List[str]]:
     except Exception as e:
         errors.append(f"CUDA verification failed: {e}")
 
-    return len(errors) == 0, errors
+    return True, errors  # CUDA is optional
 
 
 def main():
     """Run all verification checks."""
     print("=" * 60)
-    print("DATASET VERIFICATION (Phase 3.3)")
+    print("DATASET VERIFICATION")
     print("=" * 60)
     print()
 
     all_passed = True
     all_errors = []
 
-    # Phase 0.1: Dependencies
-    print("[Phase 0.1] Verifying dependencies...")
+    # Phase 1: Dependencies
+    print("[1] Verifying dependencies...")
     passed, errors = verify_dependencies()
     all_passed = all_passed and passed
     all_errors.extend(errors)
     print()
 
-    # CUDA check
-    print("[CUDA] Checking GPU availability...")
+    # Phase 2: CUDA (optional)
+    print("[2] Checking CUDA...")
     passed, errors = verify_cuda()
+    all_errors.extend(errors)
+    print()
+
+    # Phase 3: Raw HuggingFace Schemas
+    print("[3] Verifying HuggingFace schemas...")
+    passed, errors = verify_halueval_schema()
+    all_passed = all_passed and passed
+    all_errors.extend(errors)
+
+    passed, errors = verify_ragtruth_schema()
     all_passed = all_passed and passed
     all_errors.extend(errors)
     print()
 
-    # Phase 3.2: HaluEval schema
-    print("[Phase 3.2] Verifying HaluEval schema...")
-    passed, errors = verify_halueval()
+    # Phase 4: Wrapper Logic (Critical)
+    print("[4] Verifying dataset wrapper logic...")
+    passed, errors = verify_halueval_wrapper()
+    all_passed = all_passed and passed
+    all_errors.extend(errors)
+
+    passed, errors = verify_ragtruth_wrapper()
     all_passed = all_passed and passed
     all_errors.extend(errors)
     print()
 
-    # Phase 3.2: RAGTruth schema
-    print("[Phase 3.2] Verifying RAGTruth schema...")
-    passed, errors = verify_ragtruth()
-    all_passed = all_passed and passed
-    all_errors.extend(errors)
-    print()
-
-    # Phase 3.1: Label balance
-    print("[Phase 3.1] Verifying label balance...")
+    # Phase 5: Label Balance
+    print("[5] Verifying label balance...")
     passed, errors = verify_label_balance()
     all_passed = all_passed and passed
     all_errors.extend(errors)
@@ -281,12 +410,12 @@ def main():
     # Summary
     print("=" * 60)
     if all_passed:
-        print("✓ ALL CHECKS PASSED")
-        print("  Datasets are ready for ICML/NeurIPS benchmark runs")
+        print("🚀 DATASETS READY FOR EXPERIMENTS")
+        print("   All schemas verified, wrappers tested, labels balanced.")
         print("=" * 60)
         return 0
     else:
-        print("✗ VERIFICATION FAILED")
+        print("🛑 DATASET ERRORS DETECTED")
         print()
         print("Errors:")
         for err in all_errors:

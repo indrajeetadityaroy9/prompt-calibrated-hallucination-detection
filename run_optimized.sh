@@ -80,53 +80,37 @@ START_TIME=$(date +%s)
 # ═══════════════════════════════════════════════════════════════
 # PHASE 1: Quick Validation (GPT-2) - ~5 min
 # ═══════════════════════════════════════════════════════════════
-run_config "experiments/configs/burnin_smoke_test.yaml" \
+run_config "experiments/configs/00_ci_smoke_test.yaml" \
     "PHASE 1: Pipeline Smoke Test (GPT-2)" \
     "~2 min"
 
 # ═══════════════════════════════════════════════════════════════
-# PHASE 2: Main Benchmark (Llama-8B) - ~45 min
+# PHASE 2: Main SOTA Benchmark (Llama-8B) - ~45 min
+# Includes all baselines: AG-SAR, LogProb, Entropy, SelfCheck, EigenScore
 # ═══════════════════════════════════════════════════════════════
-run_config "experiments/configs/exp1_halueval_qa.yaml" \
-    "PHASE 2: Main Benchmark - HaluEval QA (Llama-8B, 2500 samples)" \
+run_config "experiments/configs/01_main_sota.yaml" \
+    "PHASE 2: Main SOTA Benchmark - HaluEval QA (Table 1)" \
     "~45 min"
 
 # ═══════════════════════════════════════════════════════════════
-# PHASE 3: SOTA Comparison with SelfCheck - ~20 min (50 samples)
-# Purpose: Get ONE data point for Latency vs Accuracy Pareto chart
+# PHASE 3: Distribution Shift (RAGTruth) - ~20 min
 # ═══════════════════════════════════════════════════════════════
-run_config "experiments/configs/exp4_baseline_comparison.yaml" \
-    "PHASE 3: SOTA Comparison (includes SelfCheck, 50 samples)" \
+run_config "experiments/configs/03_generalization.yaml" \
+    "PHASE 3: RAGTruth Generalization (Table 2)" \
     "~20 min"
 
 # ═══════════════════════════════════════════════════════════════
-# PHASE 4: Distribution Shift (RAGTruth) - ~20 min
-# ═══════════════════════════════════════════════════════════════
-run_config "experiments/configs/stage6_ragtruth.yaml" \
-    "PHASE 4: RAGTruth Generalization (1000 samples)" \
-    "~20 min"
-
-# ═══════════════════════════════════════════════════════════════
-# PHASE 5: Architecture Sweep - ~30 min
+# PHASE 4: Architecture Sweep - ~15 min
 # ═══════════════════════════════════════════════════════════════
 run_config "experiments/configs/stage3_mistral_nemo.yaml" \
-    "PHASE 5a: Mistral-Nemo Architecture (500 samples)" \
+    "PHASE 4: Mistral-Nemo Architecture (optional)" \
     "~15 min"
 
-# Note: Qwen-32B needs ~65GB, should fit
-run_config "experiments/configs/stage3_architecture.yaml" \
-    "PHASE 5b: Qwen-32B Architecture + 4× Scaling (500 samples)" \
-    "~15 min"
-
-run_config "experiments/configs/stage3_qwen_moe.yaml" \
-    "PHASE 5c: Qwen-MoE Sparse Architecture (500 samples)" \
-    "~10 min"
-
 # ═══════════════════════════════════════════════════════════════
-# PHASE 6: Ablation Study - ~15 min
+# PHASE 5: Ablation Study - ~15 min
 # ═══════════════════════════════════════════════════════════════
-run_config "experiments/configs/exp5_ablation.yaml" \
-    "PHASE 6: Ablation Study (1000 samples)" \
+run_config "experiments/configs/05_mechanism_ablation.yaml" \
+    "PHASE 5: Ablation Study (Table 3)" \
     "~15 min"
 
 # ═══════════════════════════════════════════════════════════════
@@ -142,7 +126,7 @@ echo -e "  Total Time: ${HOURS}h ${MINUTES}m"
 echo -e "  Results: results/"
 echo ""
 echo -e "  ${YELLOW}SKIPPED (requires 2× H100):${NC}"
-echo -e "    - stage4_scale.yaml (Llama-70B)"
-echo -e "    - stage3_mixtral_moe.yaml (Mixtral-8x7B, ~95GB VRAM)"
+echo -e "    - 02_scaling_law.yaml (Llama-70B, Figure 2)"
+echo -e "    - 04_moe_robustness.yaml (Mixtral-8x7B, ~95GB VRAM)"
 echo ""
-echo -e "${GREEN}  Run './run_optimized.sh --full' on 2× H100 for complete suite${NC}"
+echo -e "${GREEN}  Run './run_icml_staged.sh' on 2× H100 for complete suite${NC}"

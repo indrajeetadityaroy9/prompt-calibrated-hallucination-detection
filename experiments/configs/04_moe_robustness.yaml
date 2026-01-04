@@ -1,9 +1,9 @@
-# Stage 3c: Mixtral MoE Architecture Test
+# MoE Robustness Test (Discussion)
 # Purpose: Prove "AG-SAR is robust to dynamic compute paths (MoE Routing)"
-# Critical Paper Contribution: MoE architecture support
+# Paper Contribution: MoE architecture support demonstration
 
 experiment:
-  name: "stage3_mixtral_moe"
+  name: "04_moe_robustness"
   description: "Test AG-SAR on Mixtral-8x7B MoE architecture"
 
 dataset:
@@ -28,16 +28,32 @@ methods:
 
 evaluation:
   metrics:
+    # Discrimination (higher=better)
     - auroc
     - auprc
+    - auprc_factual
+    # Classification (higher=better)
+    - f1
+    - precision
+    - recall
+    - accuracy
+    # Calibration (lower=better)
     - ece
     - brier
+    # Coverage & Utility (lower=better)
     - aurc
+    - risk_80
+    - risk_90
+    - risk_95
+    # Correlation (higher=better)
+    - spearman
+    - pearson
+    - pointbiserial
   bootstrap_samples: 500
   confidence_level: 0.95
 
 output:
-  output_dir: "results/stage3_mixtral_moe"
+  output_dir: "results/04_moe_robustness"
   save_predictions: true
   save_scores: true
 

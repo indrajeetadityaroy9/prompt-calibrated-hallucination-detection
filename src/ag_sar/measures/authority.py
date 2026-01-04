@@ -146,7 +146,7 @@ def compute_mlp_divergence(
     return _compute_mlp_divergence_raw(h_attn, h_block, attention_mask)
 
 
-def compute_v7_gated_authority(
+def compute_gated_authority(
     attention_weights: torch.Tensor,
     prompt_length: int,
     h_attn: torch.Tensor,
@@ -158,14 +158,14 @@ def compute_v7_gated_authority(
     parametric_weight: float = 0.5,
 ) -> torch.Tensor:
     """
-    v7.0 Context-Dependent Gated Authority (Unified RAG + Free Gen).
+    Context-Dependent Gated Authority (Unified RAG + Free Gen).
 
     Master Equation:
         A(t) = Gate(t) × Flow(t) + (1 - Gate(t)) × Confidence(t) × parametric_weight
 
     Where:
     - Gate(t) = exp(-sensitivity × divergence(t)) = stability gate
-    - Flow(t) = v3.1 Authority Flow (prompt provenance tracking)
+    - Flow(t) = Authority Flow (prompt provenance tracking)
     - Confidence(t) = max(softmax(logits)) (parametric certainty)
 
     Physical Interpretation:
@@ -193,16 +193,16 @@ def compute_v7_gated_authority(
 
     Example:
         >>> # RAG scenario: model attends to context, MLP validates
-        >>> auth = compute_v7_gated_authority(attn, 50, h_attn, h_block, logits)
+        >>> auth = compute_gated_authority(attn, 50, h_attn, h_block, logits)
         >>> # auth[:, 50:] ≈ authority_flow (context-grounded)
 
         >>> # Free Gen: model ignores context, MLP provides knowledge
-        >>> auth = compute_v7_gated_authority(attn, 0, h_attn, h_block, logits)
+        >>> auth = compute_gated_authority(attn, 0, h_attn, h_block, logits)
         >>> # auth ≈ model_confidence (parametric-grounded)
     """
     from ..ops import compute_stability_gate
 
-    # 1. Compute base Authority Flow (v3.1)
+    # 1. Compute base Authority Flow
     flow = compute_authority_flow_vectorized(
         attention_weights, prompt_length, register_mask, attention_mask
     )
@@ -238,7 +238,7 @@ def compute_v7_gated_authority(
     return authority
 
 
-def compute_v8_semantic_authority(
+def compute_semantic_authority(
     attention_weights: torch.Tensor,
     prompt_length: int,
     h_attn: torch.Tensor,
@@ -253,22 +253,22 @@ def compute_v8_semantic_authority(
     dispersion_sensitivity: float = 5.0,
 ) -> torch.Tensor:
     """
-    v8.0 Semantic Dispersion Authority (Consistency over Confidence).
+    Semantic Dispersion Authority (Consistency over Confidence).
 
-    Upgrade from v7.0: Replaces raw confidence with semantic consistency.
+    Replaces raw confidence with semantic consistency of top-k predictions.
 
     Master Equation:
         A(t) = Gate(t) × Flow(t) + (1 - Gate(t)) × Trust(t) × parametric_weight
 
     Where:
     - Gate(t) = exp(-sensitivity × divergence(t)) = stability gate
-    - Flow(t) = v3.1 Authority Flow (prompt provenance tracking)
+    - Flow(t) = Authority Flow (prompt provenance tracking)
     - Trust(t) = 1 - Dispersion(t) × dispersion_sensitivity (semantic consistency)
 
     Key Insight:
-    - v7.0 Confidence: "I am 99% sure it's 'Paris'" (could be a confident lie)
-    - v8.0 Dispersion: "Top-5 are 'Paris', 'London', 'Rome'" (semantically confused = hallucination)
-    - v8.0 Low Disp: "Top-5 are 'US', 'USA', 'America'" (synonyms = grounded)
+    - Raw Confidence: "I am 99% sure it's 'Paris'" (could be a confident lie)
+    - High Dispersion: "Top-5 are 'Paris', 'London', 'Rome'" (semantically confused = hallucination)
+    - Low Dispersion: "Top-5 are 'US', 'USA', 'America'" (synonyms = grounded)
 
     Args:
         attention_weights: (B, H, S, S) or (B, S, S) attention weights
@@ -290,7 +290,7 @@ def compute_v8_semantic_authority(
     from ..ops import compute_stability_gate
     from .semantics import compute_semantic_trust
 
-    # 1. Compute base Authority Flow (v3.1)
+    # 1. Compute base Authority Flow
     flow = compute_authority_flow_vectorized(
         attention_weights, prompt_length, register_mask, attention_mask
     )
@@ -298,7 +298,7 @@ def compute_v8_semantic_authority(
     # 2. Compute Stability Gate (Conductivity)
     gate = compute_stability_gate(h_attn, h_block, stability_sensitivity)
 
-    # 3. Compute Semantic Trust (v8.0 upgrade from raw confidence)
+    # 3. Compute Semantic Trust (replaces raw confidence)
     # Trust = 1 - (Dispersion × sensitivity)
     # High dispersion (confused between unrelated tokens) = Low trust
     # Low dispersion (alternatives are synonyms) = High trust
@@ -324,3 +324,26 @@ def compute_v8_semantic_authority(
     authority = authority.clamp(0.0, 1.0)
 
     return authority
+
+
+# Backward-compatible aliases (deprecated)
+def compute_v7_gated_authority(*args, **kwargs):
+    """Deprecated: Use compute_gated_authority instead."""
+    import warnings
+    warnings.warn(
+        "compute_v7_gated_authority is deprecated, use compute_gated_authority",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    return compute_gated_authority(*args, **kwargs)
+
+
+def compute_v8_semantic_authority(*args, **kwargs):
+    """Deprecated: Use compute_semantic_authority instead."""
+    import warnings
+    warnings.warn(
+        "compute_v8_semantic_authority is deprecated, use compute_semantic_authority",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    return compute_semantic_authority(*args, **kwargs)

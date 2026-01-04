@@ -11,7 +11,7 @@ This naturally filters attention sinks (high centrality, low value norms).
 from typing import Dict, Optional, Tuple
 import torch
 
-from ..ops import centrality_kernel
+from ...ops import centrality_kernel
 
 
 def compute_centrality(

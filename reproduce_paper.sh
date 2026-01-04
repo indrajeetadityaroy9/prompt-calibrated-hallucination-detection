@@ -1,19 +1,20 @@
 #!/bin/bash
 # Reproduce all AG-SAR paper experiments
-# 
-# This script runs all 5 canonical experiments from the paper:
-#   exp1: HaluEval QA (Section 4.1)
-#   exp2: HaluEval Summarization (Section 4.1)
-#   exp3: RAGTruth Generalization (Section 4.2)
-#   exp4: Full Baseline Comparison (Section 4.3)
-#   exp5: Ablation Study (Section 5)
+#
+# This script runs the canonical experiments from the paper:
+#   00: CI smoke test (fast validation)
+#   01: Table 1 - SOTA comparison on HaluEval QA
+#   02: Figure 2 - Scaling to Llama-3.1-70B
+#   03: Table 2 - RAGTruth generalization
+#   04: Discussion - MoE robustness (Mixtral)
+#   05: Table 3 - Ablation study
 #
 # Prerequisites:
 #   pip install -e ".[all]"
 #
 # Usage:
 #   ./reproduce_paper.sh           # Run all experiments
-#   ./reproduce_paper.sh exp1      # Run specific experiment
+#   ./reproduce_paper.sh 01        # Run specific experiment
 #   ./reproduce_paper.sh --dry-run # Print configs without running
 
 set -e
@@ -134,13 +135,13 @@ main() {
                 dry_run="true"
                 shift
                 ;;
-            exp[1-5]*)
+            0[0-5]*)
                 experiments+=("$1")
                 shift
                 ;;
             *)
                 print_error "Unknown argument: $1"
-                echo "Usage: $0 [--dry-run] [exp1] [exp2] [exp3] [exp4] [exp5]"
+                echo "Usage: $0 [--dry-run] [00] [01] [02] [03] [04] [05]"
                 exit 1
                 ;;
         esac
@@ -149,22 +150,24 @@ main() {
     # Default to all experiments if none specified
     if [[ ${#experiments[@]} -eq 0 ]]; then
         experiments=(
-            "exp1_halueval_qa"
-            "exp2_halueval_summ"
-            "exp3_ragtruth"
-            "exp4_baseline_comparison"
-            "exp5_ablation"
+            "00_ci_smoke_test"
+            "01_main_sota"
+            "02_scaling_law"
+            "03_generalization"
+            "04_moe_robustness"
+            "05_mechanism_ablation"
         )
     else
         # Expand short names
         expanded=()
         for exp in "${experiments[@]}"; do
             case $exp in
-                exp1) expanded+=("exp1_halueval_qa") ;;
-                exp2) expanded+=("exp2_halueval_summ") ;;
-                exp3) expanded+=("exp3_ragtruth") ;;
-                exp4) expanded+=("exp4_baseline_comparison") ;;
-                exp5) expanded+=("exp5_ablation") ;;
+                00) expanded+=("00_ci_smoke_test") ;;
+                01) expanded+=("01_main_sota") ;;
+                02) expanded+=("02_scaling_law") ;;
+                03) expanded+=("03_generalization") ;;
+                04) expanded+=("04_moe_robustness") ;;
+                05) expanded+=("05_mechanism_ablation") ;;
                 *) expanded+=("$exp") ;;
             esac
         done
@@ -206,8 +209,8 @@ main() {
         echo -e "${GREEN}All experiments completed successfully!${NC}"
         echo ""
         echo "Results saved to: results/"
-        echo "  - results/exp*/*.jsonl (per-sample scores)"
-        echo "  - results/exp*/summary.json (metrics + CI)"
+        echo "  - results/0*/*.jsonl (per-sample scores)"
+        echo "  - results/0*/summary.json (metrics + CI)"
     fi
 }
 

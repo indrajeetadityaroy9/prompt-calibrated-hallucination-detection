@@ -3,20 +3,20 @@
 # AG-SAR ICML/NeurIPS Staged Evaluation Suite
 # ============================================================================
 #
-# Runs all 6 stages with validation checkpoints:
-#   Stage 1: Metric validation (GPT-2)
-#   Stage 2: Full metrics (Llama-8B)
-#   Stage 3: Architecture sweep (Qwen, Mistral, Mixtral)
-#   Stage 4: Scale test (70B)
-#   Stage 5: Full baselines
-#   Stage 6: RAGTruth generalization
+# Runs all paper experiments with validation checkpoints:
+#   Stage 0: CI smoke test (GPT-2)
+#   Stage 1: Main SOTA (Llama-8B, Table 1)
+#   Stage 2: Scaling law (70B, Figure 2)
+#   Stage 3: Generalization (RAGTruth, Table 2)
+#   Stage 4: MoE robustness (Mixtral)
+#   Stage 5: Ablation study (Table 3)
 #
 # Prerequisites:
 #   pip install -e ".[all]"
 #
 # Usage:
 #   ./run_icml_staged.sh           # Run all stages
-#   ./run_icml_staged.sh stage1    # Run specific stage
+#   ./run_icml_staged.sh stage0    # Run specific stage
 #   ./run_icml_staged.sh --dry-run # Print configs without running
 #
 # ============================================================================
@@ -178,13 +178,13 @@ main() {
                 dry_run="true"
                 shift
                 ;;
-            stage[1-6]*)
+            stage[0-5]*)
                 stages+=("$1")
                 shift
                 ;;
             *)
                 print_error "Unknown argument: $1"
-                echo "Usage: $0 [--dry-run] [stage1] [stage2] [stage3] [stage4] [stage5] [stage6]"
+                echo "Usage: $0 [--dry-run] [stage0] [stage1] [stage2] [stage3] [stage4] [stage5]"
                 exit 1
                 ;;
         esac
@@ -193,12 +193,12 @@ main() {
     # Default to all stages if none specified
     if [[ ${#stages[@]} -eq 0 ]]; then
         stages=(
+            "stage0"
             "stage1"
             "stage2"
             "stage3"
             "stage4"
             "stage5"
-            "stage6"
         )
     fi
 
@@ -216,34 +216,29 @@ main() {
     local failed=()
     for stage in "${stages[@]}"; do
         case $stage in
+            stage0)
+                run_stage "Stage 0: CI Smoke Test (GPT-2)" \
+                    "experiments/configs/00_ci_smoke_test.yaml" "$dry_run" || failed+=("stage0")
+                ;;
             stage1)
-                run_stage "Stage 1: Metric Validation (GPT-2)" \
-                    "experiments/configs/stage1_metric_validation.yaml" "$dry_run" || failed+=("stage1")
+                run_stage "Stage 1: Main SOTA (Llama-8B, Table 1)" \
+                    "experiments/configs/01_main_sota.yaml" "$dry_run" || failed+=("stage1")
                 ;;
             stage2)
-                run_stage "Stage 2: Full Metrics (Llama-8B)" \
-                    "experiments/configs/stage2_full_metrics.yaml" "$dry_run" || failed+=("stage2")
+                run_stage "Stage 2: Scaling Law (70B, Figure 2)" \
+                    "experiments/configs/02_scaling_law.yaml" "$dry_run" || failed+=("stage2")
                 ;;
             stage3)
-                # Stage 3 runs multiple models
-                run_stage "Stage 3a: Qwen2.5-32B" \
-                    "experiments/configs/stage3_architecture.yaml" "$dry_run" || failed+=("stage3a")
-                run_stage "Stage 3b: Mistral-Nemo" \
-                    "experiments/configs/stage3_mistral_nemo.yaml" "$dry_run" || failed+=("stage3b")
-                run_stage "Stage 3c: Mixtral MoE" \
-                    "experiments/configs/stage3_mixtral_moe.yaml" "$dry_run" || failed+=("stage3c")
+                run_stage "Stage 3: Generalization (RAGTruth, Table 2)" \
+                    "experiments/configs/03_generalization.yaml" "$dry_run" || failed+=("stage3")
                 ;;
             stage4)
-                run_stage "Stage 4: Scale Test (70B)" \
-                    "experiments/configs/stage4_scale.yaml" "$dry_run" || failed+=("stage4")
+                run_stage "Stage 4: MoE Robustness (Mixtral)" \
+                    "experiments/configs/04_moe_robustness.yaml" "$dry_run" || failed+=("stage4")
                 ;;
             stage5)
-                run_stage "Stage 5: Full Baselines" \
-                    "experiments/configs/stage5_baselines.yaml" "$dry_run" || failed+=("stage5")
-                ;;
-            stage6)
-                run_stage "Stage 6: RAGTruth Generalization" \
-                    "experiments/configs/stage6_ragtruth.yaml" "$dry_run" || failed+=("stage6")
+                run_stage "Stage 5: Ablation Study (Table 3)" \
+                    "experiments/configs/05_mechanism_ablation.yaml" "$dry_run" || failed+=("stage5")
                 ;;
         esac
     done

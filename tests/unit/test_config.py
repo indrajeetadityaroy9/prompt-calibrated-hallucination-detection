@@ -18,24 +18,24 @@ class TestAGSARConfig:
         assert config.power_iteration_tol == 1e-4
         assert config.hallucination_threshold == 0.7
         assert config.preferred_dtype == torch.bfloat16
-        # v3.1 defaults
-        assert config.uncertainty_metric == "v31"
+        # Core AG-SAR defaults
         assert config.enable_register_filter is True
         assert config.enable_spectral_roughness is True
         assert config.lambda_roughness == 10.0
+        # Unified Gating and Semantic Dispersion enabled by default
+        assert config.enable_unified_gating is True
+        assert config.enable_semantic_dispersion is True
 
     def test_custom_values(self):
         """Test custom configuration values."""
         config = AGSARConfig(
             semantic_layers=6,
             hallucination_threshold=0.5,
-            uncertainty_metric="authority",
             lambda_roughness=5.0,
         )
 
         assert config.semantic_layers == 6
         assert config.hallucination_threshold == 0.5
-        assert config.uncertainty_metric == "authority"
         assert config.lambda_roughness == 5.0
 
     def test_invalid_residual_weight(self):
@@ -55,11 +55,6 @@ class TestAGSARConfig:
         """Test validation of semantic layers."""
         with pytest.raises(ValueError, match="semantic_layers"):
             AGSARConfig(semantic_layers=0)
-
-    def test_invalid_uncertainty_metric(self):
-        """Test validation of uncertainty metric."""
-        with pytest.raises(ValueError, match="uncertainty_metric"):
-            AGSARConfig(uncertainty_metric="invalid")
 
     def test_invalid_ema_decay(self):
         """Test validation of EMA decay."""
@@ -84,19 +79,18 @@ class TestAGSARConfig:
         assert 'preferred_dtype' in d
         assert 'lambda_roughness' in d
         assert d['semantic_layers'] == 4
-        assert d['uncertainty_metric'] == 'v31'
+        assert d['enable_unified_gating'] is True
+        assert d['enable_semantic_dispersion'] is True
 
     def test_from_dict(self):
         """Test creation from dictionary."""
         d = {
             'semantic_layers': 3,
-            'uncertainty_metric': 'authority',
             'lambda_roughness': 5.0,
         }
         config = AGSARConfig.from_dict(d)
 
         assert config.semantic_layers == 3
-        assert config.uncertainty_metric == 'authority'
         assert config.lambda_roughness == 5.0
 
     def test_fp16_warning(self):
