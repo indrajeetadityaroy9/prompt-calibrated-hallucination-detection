@@ -123,11 +123,18 @@ prompt + response → tokenize → ModelAdapter.extract()
 - `hallucination_threshold=0.7`: Default detection threshold
 
 ### Transformers Version
-**Critical**: transformers >= 4.45 has breaking changes for attention hooks. The code warns if version >= 5.0. Use transformers 4.40.x-4.44.x for best compatibility.
+**Critical**: transformers >= 4.45 has breaking changes for attention hooks that break the monkey-patch mechanism. The dependency is pinned to `>=4.40.0,<4.45.0` in pyproject.toml. If you must use a newer version, expect hook registration failures on Llama/Mistral/Qwen architectures.
 
 ### Platform Notes
 - **Triton kernels**: Linux-only (`triton_kernels.py`). Falls back to `torch_functional.py` on macOS/Windows.
+- **Force PyTorch backend**: Set `AG_SAR_USE_TORCH=1` environment variable to bypass Triton even on Linux.
+- **Flash Attention**: Install with `pip install -e ".[h100]"` for full H100 SDPA acceleration. Requires CUDA 12+ and Linux.
 - **Multi-GPU**: Supports `device_map="balanced"` for large models. Tensors stay on native device until final aggregation.
+
+### Streaming & State Management
+- **EMA state**: Maintains running Welford statistics for kurtosis normalization across tokens.
+- **Reset between pairs**: Call `agsar.reset()` between different prompt-response pairs to clear streaming state.
+- **Cleanup hooks**: Call `agsar.cleanup()` when done to remove model hooks and free resources.
 
 ## Key Abstractions
 

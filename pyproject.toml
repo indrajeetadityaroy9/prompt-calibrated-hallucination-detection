@@ -28,7 +28,7 @@ classifiers = [
 # THE CORE (Zero-Latency, O(N) operations only)
 dependencies = [
     "torch>=2.2.0",            # Required for FlashAttn and torch.compile
-    "transformers>=4.40.0",    # Model loading and hooks
+    "transformers>=4.40.0,<4.45.0",  # CRITICAL: >=4.45 breaks attention hooks
     "numpy>=1.20.0",           # Array utilities
     "accelerate>=0.26.0",      # Efficient model loading (device_map)
     # Triton is strictly Linux-only. On Mac/Windows, the custom kernel
@@ -37,12 +37,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# H100 Acceleration (Linux only, requires CUDA 12+)
+h100 = [
+    "flash-attn>=2.5.0; sys_platform == 'linux'",  # Full H100 SDPA speed
+]
 # THE LAB (Evaluation, Plotting, Baselines)
 eval = [
     "scikit-learn>=1.2",       # AUROC, Precision-Recall, calibration
     "scipy>=1.10",             # Statistical significance tests
     "matplotlib>=3.7",         # Confidence-Discrepancy Plots
     "seaborn>=0.12",           # Heatmaps for Attention
+    "pandas>=2.0",             # Result aggregation tables
     "datasets>=2.0",           # TruthfulQA, HaluEval loader
     "tqdm>=4.65",              # Progress bars
     "rouge-score>=0.1.2",      # Text generation metrics
@@ -62,7 +67,7 @@ dev = [
     "pydantic>=2.0",             # Config validation for experiments/
 ]
 all = [
-    "ag-sar[dev,eval]",
+    "ag-sar[dev,eval,h100]",
 ]
 
 [project.urls]
