@@ -1,0 +1,58 @@
+# Experiment 5: Ablation Study
+# Paper Section 5: Ablation Analysis
+#
+# Tests the contribution of each AG-SAR component:
+# 1. Full AG-SAR (Authority Flow + Register Filter + MLP Divergence)
+# 2. No Register Filter
+# 3. No MLP Divergence (Spectral Roughness)
+# 4. No Authority Flow (just centrality)
+#
+# Run this experiment multiple times with different agsar configs
+# by modifying the methods.agsar section.
+
+experiment:
+  name: "exp5_ablation"
+  description: "Ablation study of AG-SAR components"
+
+dataset:
+  name: "halueval_qa"
+  num_samples: 1000
+  seed: 42
+
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  attn_implementation: "sdpa"
+  dtype: "bfloat16"
+  device_map: "auto"
+  trust_remote_code: true
+
+# Default: Full AG-SAR
+# To run ablations, modify and re-run:
+# - No Register Filter: enable_register_filter: false
+# - No MLP Divergence: enable_spectral_roughness: false
+# - Different lambda: lambda_roughness: 0.0 / 5.0 / 20.0
+methods:
+  agsar:
+    semantic_layers: 4
+    power_iteration_steps: 3
+    residual_weight: 0.5
+    enable_register_filter: true
+    enable_spectral_roughness: true
+    kurtosis_threshold: 2.0
+    lambda_roughness: 10.0
+    ema_decay: 0.995
+    sink_token_count: 4
+
+evaluation:
+  confidence_threshold: 0.7
+  metrics:
+    - auroc
+    - auprc
+    - f1
+  bootstrap_samples: 1000
+  confidence_level: 0.95
+
+output:
+  output_dir: "results/exp5_ablation"
+  save_predictions: true
+  save_scores: true

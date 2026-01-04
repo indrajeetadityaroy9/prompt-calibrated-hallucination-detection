@@ -1,0 +1,57 @@
+# Experiment 4: Full Baseline Comparison
+# Paper Section 4.3: Comparison with SOTA Methods
+#
+# Comprehensive comparison including all baselines.
+# Smaller sample size to allow SelfCheck to complete in reasonable time.
+
+experiment:
+  name: "exp4_baseline_comparison"
+  description: "Full comparison with all SOTA baselines including SelfCheck"
+
+dataset:
+  name: "halueval_qa"
+  num_samples: 500  # Smaller for expensive baselines
+  seed: 42
+
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  attn_implementation: "sdpa"
+  dtype: "bfloat16"
+  device_map: "auto"
+  trust_remote_code: true
+
+methods:
+  agsar:
+    semantic_layers: 4
+    power_iteration_steps: 3
+    residual_weight: 0.5
+    enable_register_filter: true
+    enable_spectral_roughness: true
+    kurtosis_threshold: 2.0
+    lambda_roughness: 10.0
+    ema_decay: 0.995
+    sink_token_count: 4
+  logprob: true
+  entropy: true
+  selfcheck:
+    num_samples: 5
+    max_new_tokens: 100
+    temperature: 1.0
+  eigenscore: true
+  saplma: true
+
+evaluation:
+  confidence_threshold: 0.7
+  metrics:
+    - auroc
+    - auprc
+    - f1
+    - precision
+    - recall
+  bootstrap_samples: 1000
+  confidence_level: 0.95
+
+output:
+  output_dir: "results/exp4_baseline_comparison"
+  save_predictions: true
+  save_scores: true

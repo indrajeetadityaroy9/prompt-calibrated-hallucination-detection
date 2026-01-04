@@ -33,6 +33,9 @@ pytest tests/integration/ -v
 # Run specific test file
 pytest tests/unit/test_v31_ops.py -v
 
+# Run single test function
+pytest tests/unit/test_ops.py::test_fisher_kurtosis -v
+
 # Run tests with coverage
 pytest --cov=ag_sar tests/
 
@@ -42,8 +45,17 @@ ruff check .               # Lint code
 ruff check . --fix         # Lint and auto-fix
 mypy src/ag_sar/           # Type checking
 
-# Run benchmark
-python benchmarks/benchmark_latency.py --model gpt2 --seq-len 128
+# Run latency benchmark
+python -m experiments.analysis.benchmark_latency --model gpt2 --seq-len 128
+
+# Run experiment (e.g., HaluEval QA benchmark)
+python -m experiments.main --config experiments/configs/exp1_halueval_qa.yaml
+
+# Dry run (print config only)
+python -m experiments.main --config experiments/configs/exp1_halueval_qa.yaml --dry-run
+
+# Reproduce all paper experiments
+./reproduce_paper.sh
 ```
 
 ## Architecture
@@ -93,10 +105,10 @@ prompt + response → tokenize → ModelAdapter.extract()
 ### Precision Requirements
 - **BFloat16 required for GPT-2** - float16 causes NaN overflow
 - TF32 enforced at import via `enable_h100_optimizations()` (~3x speedup on H100)
-- `torch.compile` used on hot paths (Ampere+ GPUs only)
+- `torch.compile` used on hot paths (Ampere+ GPUs only, compute capability >= 8)
 
 ### Architecture-Specific Hooks
-- **GPT-2**: Uses c_attn hook (fused QKV projection)
+- **GPT-2**: Uses c_attn hook (fused QKV projection), no RoPE
 - **Llama/Mistral/Qwen**: Monkey-patches attention.forward for post-RoPE Q/K capture
 - **GQA**: Auto-expands KV heads via `align_gqa_heads()` (8 KV → 32 Q for Llama-3.1-8B)
 
@@ -108,9 +120,14 @@ prompt + response → tokenize → ModelAdapter.extract()
 - `lambda_roughness=10.0`: MLP divergence penalty (v3.2)
 - `kurtosis_threshold=2.0`: Register filter threshold
 - `ema_decay=0.995`: Online kurtosis normalization decay
+- `hallucination_threshold=0.7`: Default detection threshold
 
 ### Transformers Version
-**Critical**: transformers >= 4.45 has breaking changes for attention hooks. Pinned to `>=4.40.0,<4.45.0`.
+**Critical**: transformers >= 4.45 has breaking changes for attention hooks. The code warns if version >= 5.0. Use transformers 4.40.x-4.44.x for best compatibility.
+
+### Platform Notes
+- **Triton kernels**: Linux-only (`triton_kernels.py`). Falls back to `torch_functional.py` on macOS/Windows.
+- **Multi-GPU**: Supports `device_map="balanced"` for large models. Tensors stay on native device until final aggregation.
 
 ## Key Abstractions
 
@@ -126,8 +143,44 @@ prompt + response → tokenize → ModelAdapter.extract()
 
 - `tests/unit/`: Individual component tests (ops, config, centrality, hooks, v31_ops)
 - `tests/integration/`: Full pipeline tests with real models
-- `tests/conftest.py`: Shared fixtures (small models, mock tokenizers)
+- `tests/conftest.py`: Shared fixtures (device, dtype, tensor dimensions)
 
-## Benchmarks
+## Experiments (Laboratory)
 
-- `benchmarks/benchmark_latency.py`: Zero-latency verification (<10% overhead target)
+The `experiments/` directory contains scientific evaluation code, separated from the core library:
+
+```
+experiments/
+├── main.py                    # Single CLI entry point
+├── core/
+│   ├── engine.py              # BenchmarkEngine orchestrator
+│   ├── metrics.py             # AUROC, AUPRC, bootstrap CI
+│   └── logging.py             # JSONL streaming logger
+├── data/
+│   ├── base.py                # EvaluationDataset ABC
+│   ├── halueval.py            # HaluEval loader
+│   └── ragtruth.py            # RAGTruth loader
+├── methods/
+│   ├── base.py                # UncertaintyMethod ABC
+│   ├── agsar_wrapper.py       # AG-SAR method
+│   ├── logprob.py             # Log-probability baseline
+│   ├── entropy.py             # Entropy baseline
+│   ├── selfcheck.py           # SelfCheck baseline
+│   └── eigenscore.py          # EigenScore baseline
+├── configs/
+│   ├── schema.py              # Pydantic config validation
+│   ├── exp1_halueval_qa.yaml  # Paper Section 4.1
+│   ├── exp2_halueval_summ.yaml
+│   ├── exp3_ragtruth.yaml     # Paper Section 4.2
+│   ├── exp4_baseline_comparison.yaml  # Paper Section 4.3
+│   └── exp5_ablation.yaml     # Paper Section 5
+└── analysis/
+    └── benchmark_latency.py   # Zero-latency verification
+```
+
+**Canonical Experiments:**
+- `exp1`: HaluEval QA (primary benchmark)
+- `exp2`: HaluEval Summarization
+- `exp3`: RAGTruth generalization
+- `exp4`: Full baseline comparison (all SOTA methods)
+- `exp5`: Ablation study (component contributions)

@@ -1,0 +1,56 @@
+# Experiment 3: RAGTruth Generalization
+# Paper Section 4.2: Generalization to Natural Hallucinations
+#
+# Tests if AG-SAR generalizes from synthetic (HaluEval) to natural
+# hallucinations from real RAG systems. This is critical for showing
+# that the method works in production scenarios.
+
+experiment:
+  name: "exp3_ragtruth"
+  description: "Generalization test on RAGTruth natural hallucinations"
+
+dataset:
+  name: "ragtruth"
+  num_samples: 1000
+  seed: 42
+  task_type: "QA"  # Focus on QA for comparison with exp1
+
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  attn_implementation: "sdpa"
+  dtype: "bfloat16"
+  device_map: "auto"
+  trust_remote_code: true
+
+methods:
+  # Use SAME config as exp1 (no tuning on RAGTruth)
+  agsar:
+    semantic_layers: 4
+    power_iteration_steps: 3
+    residual_weight: 0.5
+    enable_register_filter: true
+    enable_spectral_roughness: true
+    kurtosis_threshold: 2.0
+    lambda_roughness: 10.0
+    ema_decay: 0.995
+    sink_token_count: 4
+  logprob: true
+  entropy: true
+  selfcheck:
+    num_samples: 5
+    max_new_tokens: 100
+    temperature: 1.0
+
+evaluation:
+  confidence_threshold: 0.7
+  metrics:
+    - auroc
+    - auprc
+    - f1
+  bootstrap_samples: 1000
+  confidence_level: 0.95
+
+output:
+  output_dir: "results/exp3_ragtruth"
+  save_predictions: true
+  save_scores: true
