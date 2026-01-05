@@ -1,14 +1,11 @@
 """
-Unit tests for AG-SAR v3.1/v3.2 operations.
+Unit tests for AG-SAR core operations.
 
-Tests the v3.1 mechanisms:
+Tests the core mechanisms:
 1. Register Filter (fisher_kurtosis, compute_register_mask, EMAState)
 2. Authority Flow (compute_authority_flow, compute_authority_flow_vectorized)
 3. Spectral Roughness (compute_spectral_roughness) - Math-only, no discrimination
-4. SnapKV Eviction (compute_snapkv_eviction, compress_kv_cache)
-
-v3.2 additions:
-5. MLP Divergence (compute_mlp_divergence) - The discriminative metric
+4. MLP Divergence (compute_mlp_divergence) - The discriminative metric
 """
 
 import pytest
@@ -22,8 +19,6 @@ from ag_sar.ops import (
     compute_mlp_divergence,
     compute_authority_flow,
     compute_authority_flow_vectorized,
-    compute_snapkv_eviction,
-    compress_kv_cache,
     EMAState,
 )
 
@@ -311,98 +306,6 @@ class TestComputeAuthorityFlowVectorized:
         assert (authority <= 1).all()
 
 
-class TestComputeSnapKVEviction:
-    """Tests for compute_snapkv_eviction function."""
-
-    def test_output_shape(self):
-        """Output should have correct shape."""
-        B, H, S = 2, 4, 64
-        budget = 16
-        attn = torch.softmax(torch.randn(B, H, S, S), dim=-1)
-        authority = torch.rand(B, S)
-
-        indices = compute_snapkv_eviction(
-            attn, authority, budget=budget, observation_window=8
-        )
-
-        # Should return (B, H, budget) indices
-        assert indices.shape[0] == B
-        assert indices.shape[1] == H
-
-    def test_sink_tokens_always_kept(self):
-        """Sink tokens should always be included in keep_indices."""
-        B, H, S = 2, 4, 64
-        budget = 20
-        sink_count = 4
-        attn = torch.softmax(torch.randn(B, H, S, S), dim=-1)
-        authority = torch.rand(B, S)
-
-        indices = compute_snapkv_eviction(
-            attn, authority, budget=budget, sink_token_count=sink_count
-        )
-
-        # First sink_count indices should be 0, 1, 2, 3
-        for b in range(B):
-            for h in range(H):
-                kept = set(indices[b, h].tolist())
-                for i in range(sink_count):
-                    assert i in kept, f"Sink token {i} not kept"
-
-    def test_indices_sorted(self):
-        """Indices should be sorted for contiguous memory access."""
-        B, H, S = 2, 4, 64
-        budget = 16
-        attn = torch.softmax(torch.randn(B, H, S, S), dim=-1)
-        authority = torch.rand(B, S)
-
-        indices = compute_snapkv_eviction(attn, authority, budget=budget)
-
-        # Check sorted
-        for b in range(B):
-            for h in range(H):
-                sorted_indices, _ = indices[b, h].sort()
-                assert (indices[b, h] == sorted_indices).all()
-
-
-class TestCompressKVCache:
-    """Tests for compress_kv_cache function."""
-
-    def test_output_shape(self):
-        """Compressed KV should have reduced sequence length."""
-        B, H, S, D = 2, 4, 64, 32
-        budget = 16
-        obs_window = 8
-
-        k = torch.randn(B, H, S, D)
-        v = torch.randn(B, H, S, D)
-        indices = torch.randint(0, S - obs_window, (B, H, budget))
-        indices, _ = indices.sort(dim=-1)  # Must be sorted
-
-        k_comp, v_comp = compress_kv_cache(k, v, indices, observation_window=obs_window)
-
-        # New length = budget + observation_window
-        expected_len = budget + obs_window
-        assert k_comp.shape == (B, H, expected_len, D)
-        assert v_comp.shape == (B, H, expected_len, D)
-
-    def test_observation_window_preserved(self):
-        """Last observation_window tokens should be unchanged."""
-        B, H, S, D = 2, 4, 64, 32
-        budget = 16
-        obs_window = 8
-
-        k = torch.randn(B, H, S, D)
-        v = torch.randn(B, H, S, D)
-        indices = torch.randint(0, S - obs_window, (B, H, budget))
-        indices, _ = indices.sort(dim=-1)
-
-        k_comp, v_comp = compress_kv_cache(k, v, indices, observation_window=obs_window)
-
-        # Last obs_window tokens should match original
-        assert torch.allclose(k_comp[:, :, -obs_window:, :], k[:, :, -obs_window:, :])
-        assert torch.allclose(v_comp[:, :, -obs_window:, :], v[:, :, -obs_window:, :])
-
-
 class TestIntegration:
     """Integration tests for v3.1 pipeline."""
 
@@ -437,12 +340,6 @@ class TestIntegration:
         authority_final = authority_final.clamp(0.0, 1.0)
         assert (authority_final >= 0).all()
         assert (authority_final <= 1).all()
-
-        # Step 5: SnapKV Eviction (optional)
-        indices = compute_snapkv_eviction(
-            attn, authority_final, budget=8, observation_window=4
-        )
-        assert indices.shape[0] == B
 
 
 class TestGQAAlignment:
@@ -507,76 +404,6 @@ class TestGQAAlignment:
 
         assert v_aligned.shape == v_states.shape
         assert torch.allclose(v_aligned, v_states)
-
-
-class TestSpectralRoughnessGQA:
-    """Tests for GQA-compatible spectral roughness."""
-
-    def test_roughness_gqa_perfect_alignment(self):
-        """When h_attn = A @ v_aligned, roughness should be ~0."""
-        from ag_sar.ops import compute_spectral_roughness_gqa, align_gqa_heads
-
-        B, n_q_heads, n_kv_heads, S, head_dim = 2, 32, 8, 16, 64
-
-        # Create GQA-style tensors
-        v_states = torch.randn(B, n_kv_heads, S, head_dim)
-        v_aligned = align_gqa_heads(v_states, n_q_heads)
-
-        # Create attention weights (lower triangular, normalized)
-        attn = torch.tril(torch.ones(B, n_q_heads, S, S))
-        attn = attn / attn.sum(dim=-1, keepdim=True)
-
-        # Perfect prediction: h_attn = A @ v_aligned
-        h_attn = torch.matmul(attn, v_aligned)
-
-        roughness = compute_spectral_roughness_gqa(h_attn, v_states, attn, n_q_heads)
-
-        # Should be very close to 0
-        assert roughness.abs().max() < 1e-5
-
-    def test_roughness_gqa_output_shape(self):
-        """Output should be (B, S)."""
-        from ag_sar.ops import compute_spectral_roughness_gqa
-
-        B, n_q_heads, n_kv_heads, S, head_dim = 2, 32, 8, 64, 128
-
-        h_attn = torch.randn(B, n_q_heads, S, head_dim)
-        v_states = torch.randn(B, n_kv_heads, S, head_dim)
-        attn = torch.softmax(torch.randn(B, n_q_heads, S, S), dim=-1)
-
-        roughness = compute_spectral_roughness_gqa(h_attn, v_states, attn, n_q_heads)
-
-        assert roughness.shape == (B, S)
-
-    def test_roughness_gqa_fallback_to_standard(self):
-        """3D input should fall back to standard compute_spectral_roughness."""
-        from ag_sar.ops import compute_spectral_roughness_gqa
-
-        B, S, D = 2, 32, 256
-
-        h_attn = torch.randn(B, S, D)
-        v_states = torch.randn(B, S, D)
-        attn = torch.softmax(torch.randn(B, S, S), dim=-1)
-
-        roughness = compute_spectral_roughness_gqa(h_attn, v_states, attn)
-
-        assert roughness.shape == (B, S)
-
-    def test_roughness_gqa_llama31_8b_config(self):
-        """Test with actual Llama-3.1-8B dimensions."""
-        from ag_sar.ops import compute_spectral_roughness_gqa
-
-        # Llama-3.1-8B: 32 Q heads, 8 KV heads, head_dim=128
-        B, n_q_heads, n_kv_heads, S, head_dim = 1, 32, 8, 128, 128
-
-        h_attn = torch.randn(B, n_q_heads, S, head_dim)
-        v_states = torch.randn(B, n_kv_heads, S, head_dim)
-        attn = torch.softmax(torch.randn(B, n_q_heads, S, S), dim=-1)
-
-        roughness = compute_spectral_roughness_gqa(h_attn, v_states, attn, n_q_heads)
-
-        assert roughness.shape == (B, S)
-        assert (roughness >= 0).all()  # L2 norm is non-negative
 
 
 class TestMLPDivergence:

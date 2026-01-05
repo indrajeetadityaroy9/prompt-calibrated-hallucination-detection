@@ -102,27 +102,6 @@ def get_optimal_dtype() -> torch.dtype:
     return torch.float32
 
 
-def get_gpu_memory_info() -> Tuple[float, float, float]:
-    """
-    Get GPU memory information in GB.
-
-    Returns:
-        Tuple of (total_gb, used_gb, free_gb)
-    """
-    if not torch.cuda.is_available():
-        return (0.0, 0.0, 0.0)
-
-    total = torch.cuda.get_device_properties(0).total_memory
-    reserved = torch.cuda.memory_reserved(0)
-    allocated = torch.cuda.memory_allocated(0)
-
-    total_gb = total / (1024 ** 3)
-    used_gb = allocated / (1024 ** 3)
-    free_gb = (total - reserved) / (1024 ** 3)
-
-    return (total_gb, used_gb, free_gb)
-
-
 def optimize_for_inference() -> None:
     """
     Set PyTorch to inference-optimized mode.
@@ -160,39 +139,6 @@ def safe_normalize(
     """
     total = tensor.sum(dim=dim, keepdim=True).clamp(min=eps)
     return tensor / total
-
-
-def safe_log(tensor: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
-    """
-    Numerically stable log (avoids log(0)).
-
-    Args:
-        tensor: Input tensor
-        eps: Minimum value to avoid log(0)
-
-    Returns:
-        Log of tensor with stability
-    """
-    return torch.log(tensor.clamp(min=eps))
-
-
-def safe_divide(
-    numerator: torch.Tensor,
-    denominator: torch.Tensor,
-    eps: float = 1e-10
-) -> torch.Tensor:
-    """
-    Numerically stable division.
-
-    Args:
-        numerator: Dividend tensor
-        denominator: Divisor tensor
-        eps: Minimum divisor value
-
-    Returns:
-        numerator / denominator with stability
-    """
-    return numerator / denominator.clamp(min=eps)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -239,26 +185,6 @@ def apply_attention_mask(
     return masked
 
 
-def create_causal_mask(
-    seq_len: int,
-    device: torch.device,
-    dtype: torch.dtype = torch.float32
-) -> torch.Tensor:
-    """
-    Create causal attention mask.
-
-    Args:
-        seq_len: Sequence length
-        device: Target device
-        dtype: Target dtype
-
-    Returns:
-        (1, 1, S, S) causal mask (1 = attend, 0 = mask)
-    """
-    mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=dtype))
-    return mask.unsqueeze(0).unsqueeze(0)
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #                           MODEL UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -271,24 +197,3 @@ def get_model_dtype(model: nn.Module) -> torch.dtype:
 def get_model_device(model: nn.Module) -> torch.device:
     """Extract model device."""
     return next(model.parameters()).device
-
-
-def count_model_parameters(model: nn.Module) -> int:
-    """Count total model parameters."""
-    return sum(p.numel() for p in model.parameters())
-
-
-def estimate_model_memory_gb(model: nn.Module) -> float:
-    """
-    Estimate model memory footprint in GB.
-
-    Args:
-        model: PyTorch model
-
-    Returns:
-        Estimated memory in GB (parameters only, not activations)
-    """
-    param_bytes = sum(
-        p.numel() * p.element_size() for p in model.parameters()
-    )
-    return param_bytes / (1024 ** 3)

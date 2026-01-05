@@ -37,8 +37,7 @@ class AGSARConfig:
     kurtosis_threshold: float = 2.0
 
     # ===== Authority Flow (Mechanism 2) =====
-    enable_authority_flow: bool = True
-    recharge_weight: float = 1.0
+    recharge_weight: float = 1.0  # Initial prompt authority (keep for ablation studies)
 
     # ===== MLP Divergence / Spectral Roughness (Mechanism 3) =====
     enable_spectral_roughness: bool = True
@@ -139,7 +138,6 @@ class AGSARConfig:
             'ema_decay': self.ema_decay,
             'kurtosis_threshold': self.kurtosis_threshold,
             # Authority Flow (Mechanism 2)
-            'enable_authority_flow': self.enable_authority_flow,
             'recharge_weight': self.recharge_weight,
             # MLP Divergence (Mechanism 3)
             'enable_spectral_roughness': self.enable_spectral_roughness,
@@ -175,16 +173,6 @@ class AGSARConfig:
     @classmethod
     def from_dict(cls, config_dict: dict) -> 'AGSARConfig':
         """Create config from dictionary."""
-        # Handle deprecated field names (backward compatibility)
-        if 'enable_v7_gating' in config_dict and 'enable_unified_gating' not in config_dict:
-            import warnings
-            warnings.warn(
-                "enable_v7_gating is deprecated, use enable_unified_gating",
-                DeprecationWarning,
-                stacklevel=2
-            )
-            config_dict['enable_unified_gating'] = config_dict.pop('enable_v7_gating')
-
         if 'preferred_dtype' in config_dict:
             dtype_str = config_dict['preferred_dtype']
             if isinstance(dtype_str, str):

@@ -324,26 +324,3 @@ def compute_semantic_authority(
     authority = authority.clamp(0.0, 1.0)
 
     return authority
-
-
-# Backward-compatible aliases (deprecated)
-def compute_v7_gated_authority(*args, **kwargs):
-    """Deprecated: Use compute_gated_authority instead."""
-    import warnings
-    warnings.warn(
-        "compute_v7_gated_authority is deprecated, use compute_gated_authority",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    return compute_gated_authority(*args, **kwargs)
-
-
-def compute_v8_semantic_authority(*args, **kwargs):
-    """Deprecated: Use compute_semantic_authority instead."""
-    import warnings
-    warnings.warn(
-        "compute_v8_semantic_authority is deprecated, use compute_semantic_authority",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    return compute_semantic_authority(*args, **kwargs)

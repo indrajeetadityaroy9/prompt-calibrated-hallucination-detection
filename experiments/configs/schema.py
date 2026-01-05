@@ -24,7 +24,6 @@ class DatasetConfig(BaseModel):
         "halueval_summarization",
         "halueval_dialogue",
         "ragtruth",
-        "truthfulqa",
     ] = Field(..., description="Dataset identifier")
     num_samples: Optional[int] = Field(
         None, description="Max samples to load (None = all)", ge=1

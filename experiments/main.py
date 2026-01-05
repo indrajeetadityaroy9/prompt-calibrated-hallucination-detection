@@ -119,9 +119,6 @@ def build_datasets(config: ExperimentConfig) -> Dict:
             seed=ds_config.seed,
         )
 
-    elif ds_config.name == "truthfulqa":
-        raise NotImplementedError("TruthfulQA loader not yet implemented")
-
     else:
         raise ValueError(f"Unknown dataset: {ds_config.name}")
 

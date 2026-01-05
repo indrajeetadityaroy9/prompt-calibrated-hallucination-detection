@@ -12,6 +12,23 @@ AG-SAR (Attention-Graph Shifting Attention to Relevance) is a zero-latency uncer
 - Supports GPT-2, Llama-3/3.1/3.2, Mistral, and Qwen architectures
 - SOTA v8.0: Authority Flow + Unified Gating + Semantic Dispersion
 
+## Quick Usage
+
+```python
+from ag_sar import AGSAR, AGSARConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model = AutoModelForCausalLM.from_pretrained("gpt2")
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+
+agsar = AGSAR(model, tokenizer)  # Default v8.0 config
+score = agsar.compute_uncertainty("What is the capital of France?", "Paris")
+is_hall, conf, details = agsar.detect_hallucination("Who wrote Hamlet?", "Shakespeare")
+
+# Always cleanup when done
+agsar.cleanup()
+```
+
 ## H100 Installation
 
 Follow this specific order to avoid CUDA version mismatches on H100 systems:
@@ -154,6 +171,8 @@ For ablation studies (v3.1 baseline comparison), set `enable_unified_gating=Fals
 ### Transformers Version
 **Critical**: transformers >= 4.45 has breaking changes for attention hooks that break the monkey-patch mechanism. The dependency is pinned to `>=4.40.0,<4.45.0` in pyproject.toml. If you must use a newer version, expect hook registration failures on Llama/Mistral/Qwen architectures.
 
+**Symptoms of version mismatch:** `RuntimeError: Attention weights not captured` on Llama/Mistral/Qwen models. GPT-2 will still work (uses different hook mechanism).
+
 ### Platform Notes
 - **Triton kernels**: Linux-only (`triton_kernels.py`). Falls back to `torch_functional.py` on macOS/Windows.
 - **Force PyTorch backend**: Set `AG_SAR_USE_TORCH=1` environment variable to bypass Triton even on Linux.
@@ -175,6 +194,16 @@ For ablation studies (v3.1 baseline comparison), set `enable_unified_gating=Fals
 
 4. **MLP Divergence (Mechanism 3)**: Detects when MLP overrides attention: `δ(t) = 1 - CosineSim(h_attn, h_block)`
 
+## Version History (Algorithm Evolution)
+
+| Version | Config Flags | Description |
+|---------|-------------|-------------|
+| **v3.1** | `enable_unified_gating=False, enable_semantic_dispersion=False` | Pure Authority Flow (paper baseline) |
+| **v7.0** | `enable_unified_gating=True, enable_semantic_dispersion=False` | Adds context-dependent gating |
+| **v8.0** | `enable_unified_gating=True, enable_semantic_dispersion=True` | **Default.** Adds semantic dispersion (consistency over confidence) |
+
+v4/v5/v6 ablations (LID, Spectral) archived in `legacy_research/` for paper reproducibility.
+
 ## Archived Ablation Code
 
 For paper reproducibility (Table 3), ablation code is archived in `legacy_research/`:
@@ -185,7 +214,7 @@ For paper reproducibility (Table 3), ablation code is archived in `legacy_resear
 | Spectral | `legacy_research/ablations/spectral.py` | v6.0 Laplacian entropy + DoLa |
 | Legacy Graph | `legacy_research/ablations/legacy_graph.py` | v1/v2 centrality-based approach |
 
-To reproduce ablations, copy files back to `src/ag_sar/measures/ablations/` (see `legacy_research/README.md`).
+To reproduce ablations, copy files back to `src/ag_sar/measures/ablations/`.
 
 For v3.1 baseline comparison (pure Authority Flow without gating):
 ```python
@@ -231,11 +260,14 @@ experiments/
     └── benchmark_latency.py   # Zero-latency verification
 ```
 
-**Paper Experiments:**
-- `00_ci_smoke_test.yaml`: CI validation (fast sanity check)
-- `01_main_sota.yaml`: Table 1 - SOTA comparison on HaluEval QA
-- `02_scaling_law.yaml`: Figure 2 - Scaling to Llama-3.1-70B
-- `03_generalization.yaml`: Table 2 - RAGTruth natural hallucinations
-- `04_moe_robustness.yaml`: Discussion - MoE architecture (Mixtral)
+**Paper Experiments** (run via `./reproduce_paper.sh` or individually with `python -m experiments.main --config <config>`):
 
-Note: Ablation experiment config (`05_mechanism_ablation.yaml`) archived in `legacy_research/`.
+| Config | Paper Section | Description |
+|--------|---------------|-------------|
+| `00_ci_smoke_test.yaml` | - | CI validation (fast sanity check) |
+| `01_main_sota.yaml` | Table 1 | SOTA comparison on HaluEval QA |
+| `02_scaling_law.yaml` | Figure 2 | Scaling to Llama-3.1-70B |
+| `03_generalization.yaml` | Table 2 | RAGTruth generalization |
+| `04_moe_robustness.yaml` | Discussion | MoE architecture (Mixtral) |
+
+Ablation config (`05_mechanism_ablation.yaml`) archived in `legacy_research/`.

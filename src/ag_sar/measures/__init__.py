@@ -14,12 +14,8 @@ from .authority import (
     compute_authority_score,
     compute_register_mask,
     compute_mlp_divergence,
-    # Canonical function names
     compute_gated_authority,
     compute_semantic_authority,
-    # Deprecated aliases (backward compatibility)
-    compute_v7_gated_authority,
-    compute_v8_semantic_authority,
 )
 
 from .entropy import (
@@ -27,26 +23,20 @@ from .entropy import (
 )
 
 from .semantics import (
-    # Semantic Dispersion
     compute_semantic_dispersion,
     compute_semantic_trust,
-    compute_entropy_weighted_dispersion,
 )
 
 __all__ = [
-    # Authority (core)
+    # Authority
     "compute_authority_score",
     "compute_register_mask",
     "compute_mlp_divergence",
     "compute_gated_authority",
     "compute_semantic_authority",
-    # Authority (deprecated aliases)
-    "compute_v7_gated_authority",
-    "compute_v8_semantic_authority",
     # Entropy
     "compute_token_entropy",
     # Semantic Dispersion
     "compute_semantic_dispersion",
     "compute_semantic_trust",
-    "compute_entropy_weighted_dispersion",
 ]

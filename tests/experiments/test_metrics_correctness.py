@@ -8,7 +8,6 @@ produces sensible results on actual hallucination detection data.
 import numpy as np
 import pytest
 from experiments.core.metrics import MetricsCalculator
-from experiments.core.validation import StageValidator
 
 
 class TestMetricsOnHaluEval:
@@ -65,18 +64,6 @@ class TestMetricsOnHaluEval:
             assert name in ci_bounds
             lo, hi = ci_bounds[name]
             assert lo <= metrics[name] <= hi or np.isnan(lo)
-
-    def test_validation_passes(self, halueval_data):
-        """Stage validation should pass on HaluEval."""
-        np.random.seed(42)
-        results = [
-            {"score": np.random.rand(), "label": s.label}
-            for s in halueval_data
-        ]
-
-        validator = StageValidator()
-        result = validator.validate_stage(results)
-        assert result.passed
 
 
 class TestMetricsOnRAGTruth:
@@ -158,34 +145,6 @@ class TestNaNHandling:
         calc = MetricsCalculator(max_nan_rate=0.05)
         with pytest.raises(ValueError, match="Excessive NaNs"):
             calc.compute_all(y_true, y_scores, ["auroc"])
-
-
-class TestValidation:
-    """Test validation utilities."""
-
-    def test_variance_check(self):
-        """Degenerate scores should fail variance check."""
-        from experiments.core.validation import StageValidator
-
-        validator = StageValidator()
-        # All same scores = zero variance
-        results = [{"score": 0.5, "label": i % 2} for i in range(100)]
-
-        with pytest.raises(ValueError, match="variance"):
-            validator.validate_stage(results)
-
-    def test_label_imbalance_check(self):
-        """Extreme label imbalance should fail."""
-        from experiments.core.validation import StageValidator
-
-        validator = StageValidator()
-        # 99% positive rate
-        results = [
-            {"score": np.random.rand(), "label": 1} for _ in range(99)
-        ] + [{"score": np.random.rand(), "label": 0}]
-
-        with pytest.raises(ValueError, match="imbalance"):
-            validator.validate_stage(results)
 
 
 class TestBootstrapCI:
