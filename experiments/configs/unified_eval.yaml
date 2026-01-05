@@ -1,16 +1,17 @@
-# Main SOTA Benchmark (Table 1) - Fast Methods Only
-# Paper Section 4.1: Synthetic Hallucination Detection
+# Unified Multi-Dataset Evaluation
+# Runs ALL 4 datasets with ALL 10 metrics
 #
-# High statistical power run with fast methods (no SelfCheck).
-# SelfCheck comparison is in 01b_sota_selfcheck.yaml
+# Datasets: HaluEval QA, RAGTruth QA, HaluEval Summ, FAVA
+# Metrics: AUROC, AUPRC, F1, TPR @ 5% FPR, ECE, Brier, AURC, Risk@90, Spearman
+# (Latency tracked separately per method)
 
 experiment:
-  name: "01_main_sota"
-  description: "Main SOTA benchmark - fast methods with high stat power"
+  name: "unified_eval"
+  description: "Comprehensive evaluation on HaluEval QA, RAGTruth QA, HaluEval Summ, FAVA"
 
 dataset:
-  name: "ALL"  # Load all 4 datasets: HaluEval QA, RAGTruth QA, HaluEval Summ, FAVA
-  num_samples: 1000  # Per dataset (4000 total)
+  name: "ALL"  # Special marker to load all 4 datasets
+  num_samples: 1000  # Per dataset (4000 total samples)
   seed: 42
 
 model:
@@ -39,26 +40,30 @@ methods:
   # LLM-Check methods (NeurIPS 2024) - zero-shot, single-pass
   llmcheck_attn: true
   llmcheck_hidden: true
-  # NOTE: SelfCheck & EigenScore moved to 01b_sota_selfcheck.yaml (sampling methods, too slow for N=1000)
 
 evaluation:
   confidence_threshold: 0.7
   metrics:
-    # Full 10-metric suite (no exceptions)
+    # Discrimination (higher=better)
     - auroc
     - auprc
+    # Classification (higher=better)
     - f1
+    # Operating point (higher=better)
     - tpr_at_5fpr
+    # Calibration (lower=better)
     - ece
     - brier
+    # Coverage & Utility (lower=better)
     - aurc
     - risk_90
+    # Correlation (higher=better)
     - spearman
-    # Latency tracked separately by engine
+    # Note: Latency is tracked separately by the engine
   bootstrap_samples: 1000
   confidence_level: 0.95
 
 output:
-  output_dir: "results/01_main_sota"
+  output_dir: "results/unified_eval"
   save_predictions: true
   save_scores: true

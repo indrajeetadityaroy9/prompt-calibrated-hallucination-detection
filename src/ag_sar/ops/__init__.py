@@ -29,18 +29,11 @@ from .torch_functional import (
     # GQA Support
     align_gqa_heads,
     get_gqa_config,
-    # Register Filter (Mechanism 1)
-    EMAState,
-    fisher_kurtosis,
-    welford_update,
-    compute_register_mask,
-    # Authority Flow (Mechanism 2)
+    # Authority Flow
     compute_authority_flow,
     compute_authority_flow_vectorized,
-    # Spectral Roughness (Mechanism 3)
-    compute_spectral_roughness,
+    # MLP Divergence & Stability Gate
     compute_mlp_divergence,
-    # v7.0 Context-Dependent Gating
     compute_stability_gate,
 )
 
@@ -51,17 +44,10 @@ __all__ = [
     # GQA
     "align_gqa_heads",
     "get_gqa_config",
-    # Register Filter
-    "EMAState",
-    "fisher_kurtosis",
-    "welford_update",
-    "compute_register_mask",
     # Authority Flow
     "compute_authority_flow",
     "compute_authority_flow_vectorized",
-    # Spectral Roughness
-    "compute_spectral_roughness",
+    # MLP Divergence & Stability Gate
     "compute_mlp_divergence",
-    # v7.0 Gating
     "compute_stability_gate",
 ]

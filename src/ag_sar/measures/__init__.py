@@ -1,18 +1,15 @@
 """
-AG-SAR Core Measures (Algorithms).
+AG-SAR Core Measures (Algorithms) - v8.0 Gold Master.
 
 SOTA v8.0 components:
 - authority: Authority Flow, MLP Divergence, Gated Authority, Semantic Authority
 - semantics: Semantic Dispersion (consistency over confidence)
 - entropy: Token entropy (baseline metric)
-
-Ablation code (v4/v5/v6) is archived in legacy_research/ for paper reproducibility.
 """
 
 # Core components
 from .authority import (
     compute_authority_score,
-    compute_register_mask,
     compute_mlp_divergence,
     compute_gated_authority,
     compute_semantic_authority,
@@ -30,7 +27,6 @@ from .semantics import (
 __all__ = [
     # Authority
     "compute_authority_score",
-    "compute_register_mask",
     "compute_mlp_divergence",
     "compute_gated_authority",
     "compute_semantic_authority",

@@ -13,7 +13,7 @@ dataset:
 
 model:
   name: "meta-llama/Llama-3.1-8B-Instruct"
-  attn_implementation: "sdpa"  # Scaled Dot Product Attention (required for weight capture)
+  attn_implementation: "eager"  # Scaled Dot Product Attention (required for weight capture)
   dtype: "bfloat16"
   device_map: "cuda:0"
   trust_remote_code: true

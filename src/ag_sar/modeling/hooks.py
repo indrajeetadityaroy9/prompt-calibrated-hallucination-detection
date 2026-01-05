@@ -485,7 +485,6 @@ class ModelAdapter:
 
             adapter.capture.attention_weights[layer_idx] = attn_weights.detach().to(device=tensor_device, dtype=adapter.dtype)
 
-            attn_weights = F.dropout(attn_weights, p=attn.attention_dropout, training=attn.training)
             attn_output = torch.matmul(attn_weights, value_states)
 
             attn_output = attn_output.transpose(1, 2).contiguous()
@@ -562,7 +561,6 @@ class ModelAdapter:
 
             adapter.capture.attention_weights[layer_idx] = attn_weights.detach().to(device=tensor_device, dtype=adapter.dtype)
 
-            attn_weights = F.dropout(attn_weights, p=attn.attention_dropout, training=attn.training)
             attn_output = torch.matmul(attn_weights, value_states)
 
             attn_output = attn_output.transpose(1, 2).contiguous()

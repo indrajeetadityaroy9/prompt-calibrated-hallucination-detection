@@ -1,224 +1,22 @@
 """
-Unit tests for AG-SAR core operations.
+Unit tests for AG-SAR core operations (v8.0 Gold Master).
 
 Tests the core mechanisms:
-1. Register Filter (fisher_kurtosis, compute_register_mask, EMAState)
-2. Authority Flow (compute_authority_flow, compute_authority_flow_vectorized)
-3. Spectral Roughness (compute_spectral_roughness) - Math-only, no discrimination
-4. MLP Divergence (compute_mlp_divergence) - The discriminative metric
+1. Authority Flow (compute_authority_flow, compute_authority_flow_vectorized)
+2. MLP Divergence (compute_mlp_divergence) - The discriminative metric
+3. GQA Alignment (align_gqa_heads)
 """
 
 import pytest
 import torch
 
 from ag_sar.ops import (
-    fisher_kurtosis,
-    welford_update,
-    compute_register_mask,
-    compute_spectral_roughness,
     compute_mlp_divergence,
     compute_authority_flow,
     compute_authority_flow_vectorized,
-    EMAState,
+    compute_stability_gate,
+    align_gqa_heads,
 )
-
-
-class TestFisherKurtosis:
-    """Tests for fisher_kurtosis function."""
-
-    def test_normal_distribution_kurtosis(self):
-        """Normal distribution should have kurtosis ≈ 0."""
-        torch.manual_seed(42)
-        # Large sample for stability
-        x = torch.randn(1000, 256)
-        kurt = fisher_kurtosis(x, dim=-1)
-        # Fisher kurtosis of normal ≈ 0 (excess kurtosis)
-        assert kurt.abs().mean() < 0.5, f"Expected ~0, got {kurt.mean():.4f}"
-
-    def test_uniform_distribution_kurtosis(self):
-        """Uniform distribution should have negative kurtosis (platykurtic)."""
-        torch.manual_seed(42)
-        x = torch.rand(100, 256) * 2 - 1  # Uniform [-1, 1]
-        kurt = fisher_kurtosis(x, dim=-1)
-        # Uniform has kurtosis = -1.2
-        assert kurt.mean() < 0, f"Expected negative kurtosis, got {kurt.mean():.4f}"
-
-    def test_spiky_distribution_kurtosis(self):
-        """Spiky distribution should have positive kurtosis (leptokurtic)."""
-        torch.manual_seed(42)
-        # Create spiky distribution (mostly zeros with occasional large values)
-        x = torch.zeros(100, 256)
-        x[:, ::10] = torch.randn(100, 26) * 10  # Sparse large values
-        kurt = fisher_kurtosis(x, dim=-1)
-        # Spiky distributions have high positive kurtosis
-        assert kurt.mean() > 0, f"Expected positive kurtosis, got {kurt.mean():.4f}"
-
-    def test_output_shape(self):
-        """Output should reduce the specified dimension."""
-        x = torch.randn(4, 8, 128)
-        kurt = fisher_kurtosis(x, dim=-1)
-        assert kurt.shape == (4, 8)
-
-        kurt = fisher_kurtosis(x, dim=1)
-        assert kurt.shape == (4, 128)
-
-
-class TestWelfordUpdate:
-    """Tests for welford_update function."""
-
-    def test_mean_converges(self):
-        """EMA mean should converge to sample mean."""
-        torch.manual_seed(42)
-        samples = torch.randn(100) + 5.0  # Mean ≈ 5.0
-
-        running_mean = torch.tensor(0.0)
-        running_var = torch.tensor(1.0)
-
-        for s in samples:
-            running_mean, running_var = welford_update(
-                s, running_mean, running_var, decay=0.9
-            )
-
-        # Should be close to true mean
-        assert abs(running_mean.item() - 5.0) < 1.0
-
-    def test_variance_positive(self):
-        """Variance should always be positive."""
-        running_mean = torch.tensor(0.0)
-        running_var = torch.tensor(1.0)
-
-        for _ in range(50):
-            val = torch.randn(1).squeeze()
-            running_mean, running_var = welford_update(
-                val, running_mean, running_var, decay=0.99
-            )
-            assert running_var >= 0
-
-
-class TestEMAState:
-    """Tests for EMAState dataclass."""
-
-    def test_initialization(self):
-        """Test EMAState.initialize factory method."""
-        state = EMAState.initialize(
-            num_layers=4,
-            device=torch.device("cpu"),
-            dtype=torch.float32,
-            init_mean=1.0,
-            init_var=2.0,
-        )
-        assert state.mean.shape == (4,)
-        assert state.var.shape == (4,)
-        assert state.count == 0
-        assert (state.mean == 1.0).all()
-        assert (state.var == 2.0).all()
-
-
-class TestComputeRegisterMask:
-    """Tests for compute_register_mask function."""
-
-    def test_sink_tokens_masked(self):
-        """First sink_token_count tokens should have mask = 0."""
-        torch.manual_seed(42)
-        v = torch.randn(2, 16, 64)
-        mask, _ = compute_register_mask(v, sink_token_count=4)
-
-        assert mask.shape == (2, 16)
-        # First 4 tokens should be 0
-        assert (mask[:, :4] == 0).all()
-
-    def test_mask_in_valid_range(self):
-        """Mask values should be in [0, 1]."""
-        torch.manual_seed(42)
-        v = torch.randn(2, 32, 128)
-        mask, _ = compute_register_mask(v)
-
-        assert (mask >= 0).all()
-        assert (mask <= 1).all()
-
-    def test_ema_state_updated(self):
-        """EMA state should be updated when update_ema=True."""
-        torch.manual_seed(42)
-        v = torch.randn(2, 16, 64)
-
-        _, state1 = compute_register_mask(v, ema_state=None)
-        assert state1.count == 1
-
-        v2 = torch.randn(2, 16, 64)
-        _, state2 = compute_register_mask(v2, ema_state=state1, update_ema=True)
-        assert state2.count == 2
-
-    def test_ema_state_not_updated(self):
-        """EMA state should not change when update_ema=False."""
-        torch.manual_seed(42)
-        v = torch.randn(2, 16, 64)
-        _, state1 = compute_register_mask(v, ema_state=None)
-
-        v2 = torch.randn(2, 16, 64)
-        mask, state2 = compute_register_mask(v2, ema_state=state1, update_ema=False)
-        # State should be same object (not updated)
-        assert state1 is state2
-
-
-class TestComputeSpectralRoughness:
-    """
-    Tests for compute_spectral_roughness function (Dirichlet Energy).
-
-    Note: v3.2 finding - Dirichlet Energy does NOT discriminate truth/hallucination.
-    "Confident Lies are smooth on the attention graph." These tests verify
-    mathematical correctness only.
-    """
-
-    def test_identical_values_zero_roughness(self):
-        """When all value vectors are identical, Dirichlet Energy = 0."""
-        torch.manual_seed(42)
-        B, S, D = 2, 8, 32
-
-        # All tokens have identical value vectors -> pairwise distances = 0
-        v_single = torch.randn(1, 1, D)
-        v = v_single.expand(B, S, D).clone()
-
-        attn = torch.softmax(torch.randn(B, S, S), dim=-1)
-        h_attn = torch.randn(B, S, D)  # Unused in Dirichlet formula
-
-        roughness = compute_spectral_roughness(h_attn, v, attn)
-
-        # Should be very close to 0
-        assert roughness.abs().max() < 1e-5, \
-            f"Identical values should give zero roughness, got {roughness.abs().max():.6f}"
-
-    def test_dirichlet_energy_non_negative(self):
-        """Dirichlet Energy must always be >= 0 (it's a sum of squared distances)."""
-        torch.manual_seed(42)
-        B, S, D = 4, 16, 64
-
-        v = torch.randn(B, S, D)
-        attn = torch.softmax(torch.randn(B, S, S), dim=-1)
-        h_attn = torch.randn(B, S, D)
-
-        roughness = compute_spectral_roughness(h_attn, v, attn)
-
-        assert torch.all(roughness >= 0.0), "Dirichlet Energy cannot be negative"
-
-    def test_output_shape(self):
-        """Output should be (B, S)."""
-        B, S, D, H = 2, 16, 64, 4
-        h_attn = torch.randn(B, S, D)
-        v = torch.randn(B, S, D)
-        attn = torch.softmax(torch.randn(B, H, S, S), dim=-1)
-
-        roughness = compute_spectral_roughness(h_attn, v, attn)
-        assert roughness.shape == (B, S)
-
-    def test_handles_head_dimension(self):
-        """Should work with (B, H, S, S) attention."""
-        B, H, S, D = 2, 4, 8, 32
-        h_attn = torch.randn(B, S, D)
-        v = torch.randn(B, S, D)
-        attn = torch.softmax(torch.randn(B, H, S, S), dim=-1)
-
-        roughness = compute_spectral_roughness(h_attn, v, attn)
-        assert roughness.shape == (B, S)
 
 
 class TestComputeAuthorityFlow:
@@ -246,23 +44,6 @@ class TestComputeAuthorityFlow:
 
         assert (authority >= 0).all()
         assert (authority <= 1).all()
-
-    def test_register_mask_reduces_authority(self):
-        """Register mask should reduce authority for masked tokens."""
-        B, S = 2, 16
-        prompt_length = 8
-        attn = torch.softmax(torch.randn(B, S, S), dim=-1)
-
-        # No mask
-        auth_no_mask = compute_authority_flow(attn, prompt_length, register_mask=None)
-
-        # Mask that zeros out some tokens
-        mask = torch.ones(B, S)
-        mask[:, 10:] = 0.0
-        auth_with_mask = compute_authority_flow(attn, prompt_length, register_mask=mask)
-
-        # Masked tokens should have lower or equal authority
-        assert (auth_with_mask[:, 10:] <= auth_no_mask[:, 10:]).all()
 
     def test_previous_authority_used(self):
         """Should use previous_authority when provided."""
@@ -307,39 +88,35 @@ class TestComputeAuthorityFlowVectorized:
 
 
 class TestIntegration:
-    """Integration tests for v3.1 pipeline."""
+    """Integration tests for v8.0 pipeline."""
 
-    def test_full_v31_pipeline(self):
-        """Test complete v3.1 pipeline flow."""
+    def test_full_v80_pipeline(self):
+        """Test complete v8.0 pipeline flow (Authority Flow + Stability Gate)."""
         torch.manual_seed(42)
         B, H, S, D = 2, 4, 32, 64
         prompt_length = 16
 
         # Simulate model outputs
-        v = torch.randn(B, S, D)  # Value vectors
         h_attn = torch.randn(B, S, D)  # Attention output
+        h_block = torch.randn(B, S, D)  # Block output
         attn = torch.softmax(torch.randn(B, H, S, S), dim=-1)  # Attention weights
 
-        # Step 1: Register Filter
-        mask, ema_state = compute_register_mask(v, sink_token_count=4)
-        assert mask.shape == (B, S)
-        assert ema_state is not None
-
-        # Step 2: Authority Flow
-        authority = compute_authority_flow(attn, prompt_length, register_mask=mask)
+        # Step 1: Authority Flow
+        authority = compute_authority_flow(attn, prompt_length)
         assert authority.shape == (B, S)
         assert (authority[:, :prompt_length] == 1.0).all()
 
-        # Step 3: Spectral Roughness
-        roughness = compute_spectral_roughness(h_attn, v, attn)
-        assert roughness.shape == (B, S)
+        # Step 2: Stability Gate
+        gate = compute_stability_gate(h_attn, h_block, sensitivity=1.0)
+        assert gate.shape == (B, S)
+        assert (gate >= 0).all()
+        assert (gate <= 1).all()
 
-        # Step 4: Final Authority
-        lambda_roughness = 10.0
-        authority_final = authority / (1.0 + lambda_roughness * roughness)
-        authority_final = authority_final.clamp(0.0, 1.0)
-        assert (authority_final >= 0).all()
-        assert (authority_final <= 1).all()
+        # Step 3: Final Authority (gated)
+        final_authority = gate * authority
+        assert final_authority.shape == (B, S)
+        assert (final_authority >= 0).all()
+        assert (final_authority <= 1).all()
 
 
 class TestGQAAlignment:
@@ -347,8 +124,6 @@ class TestGQAAlignment:
 
     def test_align_gqa_heads_basic(self):
         """Test basic GQA head expansion for Llama-3.1-8B config."""
-        from ag_sar.ops import align_gqa_heads
-
         B, n_kv_heads, S, head_dim = 2, 8, 64, 128
         n_q_heads = 32  # Llama-3.1-8B: 32 Q heads, 8 KV heads
 
@@ -360,8 +135,6 @@ class TestGQAAlignment:
 
     def test_align_gqa_heads_repetition_pattern(self):
         """Verify each KV head is repeated correctly."""
-        from ag_sar.ops import align_gqa_heads
-
         B, n_kv_heads, S, head_dim = 1, 8, 16, 64
         n_q_heads = 32
 
@@ -383,8 +156,6 @@ class TestGQAAlignment:
 
     def test_align_gqa_heads_mha_passthrough(self):
         """MHA (n_kv_heads == n_q_heads) should return unchanged."""
-        from ag_sar.ops import align_gqa_heads
-
         B, H, S, head_dim = 2, 32, 64, 128
         v_states = torch.randn(B, H, S, head_dim)
 
@@ -395,8 +166,6 @@ class TestGQAAlignment:
 
     def test_align_gqa_heads_3d_passthrough(self):
         """3D input (B, S, D) should be returned as-is."""
-        from ag_sar.ops import align_gqa_heads
-
         B, S, D = 2, 64, 4096
         v_states = torch.randn(B, S, D)
 
@@ -522,3 +291,70 @@ class TestMLPDivergence:
         # Padded positions should be zero
         assert torch.allclose(divergence[:, 8:], torch.zeros(B, S - 8)), \
             "Padded positions should have zero divergence"
+
+
+class TestStabilityGate:
+    """Tests for compute_stability_gate function."""
+
+    def test_identical_vectors_high_gate(self):
+        """When h_attn == h_block, gate should be ~1.0 (stable)."""
+        torch.manual_seed(42)
+        B, S, D = 2, 16, 64
+
+        h_attn = torch.randn(B, S, D)
+        h_block = h_attn.clone()
+
+        gate = compute_stability_gate(h_attn, h_block, sensitivity=1.0)
+
+        assert torch.allclose(gate, torch.ones(B, S), atol=1e-4), \
+            f"Identical vectors should have gate ~1.0, got mean={gate.mean():.4f}"
+
+    def test_orthogonal_vectors_low_gate(self):
+        """When h_attn and h_block are orthogonal, gate should be ~exp(-1)."""
+        torch.manual_seed(42)
+        B, S, D = 2, 16, 64
+
+        h_attn = torch.randn(B, S, D)
+        noise = torch.randn(B, S, D)
+
+        # Gram-Schmidt: make noise orthogonal to h_attn
+        h_attn_norm = h_attn / h_attn.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        proj = (noise * h_attn_norm).sum(dim=-1, keepdim=True) * h_attn_norm
+        h_block = noise - proj
+
+        gate = compute_stability_gate(h_attn, h_block, sensitivity=1.0)
+
+        # Gate = exp(-sensitivity * divergence) = exp(-1 * 1) = 0.368
+        expected = torch.exp(torch.tensor(-1.0))
+        assert (gate.mean() - expected).abs() < 0.1, \
+            f"Orthogonal vectors should have gate ~{expected:.3f}, got {gate.mean():.4f}"
+
+    def test_gate_in_valid_range(self):
+        """Gate should always be in [0, 1]."""
+        torch.manual_seed(42)
+        B, S, D = 4, 32, 128
+
+        h_attn = torch.randn(B, S, D)
+        h_block = torch.randn(B, S, D)
+
+        gate = compute_stability_gate(h_attn, h_block, sensitivity=1.0)
+
+        assert torch.all(gate >= 0.0), "Gate cannot be negative"
+        assert torch.all(gate <= 1.0), "Gate cannot exceed 1"
+
+    def test_sensitivity_affects_gate(self):
+        """Higher sensitivity should make gate more sensitive to divergence."""
+        torch.manual_seed(42)
+        B, S, D = 2, 16, 64
+
+        h_attn = torch.randn(B, S, D)
+        h_block = torch.randn(B, S, D)  # Random (divergent)
+
+        gate_low = compute_stability_gate(h_attn, h_block, sensitivity=0.1)
+        gate_high = compute_stability_gate(h_attn, h_block, sensitivity=10.0)
+
+        # Higher sensitivity should result in lower gate values (more sensitive)
+        assert gate_high.mean() < gate_low.mean(), \
+            f"Higher sensitivity should give lower gate: {gate_high.mean():.4f} vs {gate_low.mean():.4f}"
+
+

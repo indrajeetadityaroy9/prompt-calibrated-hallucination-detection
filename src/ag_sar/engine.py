@@ -4,9 +4,13 @@ AGSAR Engine - Main Orchestrator.
 This is the primary user-facing interface for AG-SAR uncertainty quantification.
 It coordinates the modeling, measures, and ops layers to provide a clean API.
 
+Scope: AG-SAR detects EXTRINSIC hallucinations (unfaithful to source context),
+not INTRINSIC hallucinations (unfaithful to reality). For RAG faithfulness
+monitoring, the ground truth is provided in the context.
+
 Example:
     >>> from ag_sar import AGSAR, AGSARConfig
-    >>> config = AGSARConfig()  # Uses v8.0 defaults (semantic dispersion)
+    >>> config = AGSARConfig()  # Uses v8.0 defaults
     >>> agsar = AGSAR(model, tokenizer, config)
     >>> score = agsar.compute_uncertainty(prompt, response)
     >>> is_hallucination, confidence, details = agsar.detect_hallucination(prompt, response)
@@ -20,27 +24,27 @@ from .config import AGSARConfig
 from .modeling import ModelAdapter
 from .measures import (
     compute_authority_score,
-    compute_register_mask,
-    compute_mlp_divergence,
     # Gated Authority (v7.0+)
     compute_gated_authority,
     compute_semantic_authority,
 )
-from .ops import EMAState
 from .utils import get_model_dtype, get_model_device
 
 
 class AGSAR:
     """
-    AG-SAR Uncertainty Quantification Engine.
+    AG-SAR Uncertainty Quantification Engine (v8.0 Gold Master).
 
-    Provides zero-latency hallucination detection by analyzing internal
-    attention graph structure without external semantic models.
+    Provides zero-latency detection of EXTRINSIC hallucinations by analyzing
+    internal attention graph structure without external semantic models.
 
     Core architecture:
         1. Authority Flow: Tracks signal provenance from prompt to response
         2. Unified Gating: Balances context vs parametric trust dynamically
         3. Semantic Dispersion: Measures consistency over raw confidence
+
+    Scope: Detects violations of SOURCE CONTEXT, not violations of reality.
+    Optimized for RAG faithfulness monitoring.
 
     Example:
         >>> agsar = AGSAR(model, tokenizer)
@@ -83,6 +87,9 @@ class AGSAR:
         else:
             num_layers = 12  # Default
 
+        self._num_layers = num_layers
+
+        # Use last N layers for semantic analysis (v8.0: late-layer focus is optimal)
         start_layer = max(0, num_layers - self.config.semantic_layers)
         self._semantic_layer_indices = list(range(start_layer, num_layers))
 
@@ -94,7 +101,7 @@ class AGSAR:
         )
         self._adapter.register()
 
-        # Semantic Dispersion: Capture output embedding matrix
+        # Capture output embedding matrix (needed for semantic dispersion)
         # This is the "unembedding" matrix that maps hidden states to vocab
         self._embed_matrix = None
         if self.config.enable_semantic_dispersion:
@@ -106,9 +113,6 @@ class AGSAR:
                 # Fallback: some models don't have get_output_embeddings
                 if hasattr(model, 'lm_head') and hasattr(model.lm_head, 'weight'):
                     self._embed_matrix = model.lm_head.weight.detach()
-
-        # Streaming state for EMA-based register filter
-        self._ema_state: Optional[EMAState] = None
 
     def _get_compute_device(self, model: nn.Module) -> torch.device:
         """
@@ -203,34 +207,13 @@ class AGSAR:
             input_ids, attention_mask
         )
 
-        # Get value states and attention outputs for roughness
-        value_states = self._adapter.capture.value_states
+        # Get captured tensors for authority flow computation
         attn_outputs = self._adapter.capture.attn_outputs
         block_outputs = self._adapter.capture.block_outputs
         attention_weights = self._adapter.capture.attention_weights
 
-        # Compute register mask
+        # Get attention weights from last semantic layer
         last_layer = self._semantic_layer_indices[-1]
-        v_states = value_states.get(last_layer)
-
-        # Move captured tensors to compute device for multi-GPU compatibility
-        if v_states is not None:
-            v_states = v_states.to(compute_device)
-
-        register_mask = None
-        if self.config.enable_register_filter and v_states is not None:
-            register_mask, self._ema_state = compute_register_mask(
-                v_states,
-                self._ema_state,
-                self.config.kurtosis_threshold,
-                self.config.sink_token_count,
-                self.config.ema_decay,
-            )
-            # Move register_mask to compute device for multi-GPU compatibility
-            if register_mask is not None:
-                register_mask = register_mask.to(compute_device)
-
-        # Compute authority flow
         attn = attention_weights.get(last_layer)
         if attn is None:
             raise RuntimeError(
@@ -262,7 +245,6 @@ class AGSAR:
                         h_block=h_block,
                         logits=logits,
                         embed_matrix=embed_matrix,
-                        register_mask=register_mask,
                         attention_mask=attention_mask,
                         stability_sensitivity=self.config.stability_sensitivity,
                         parametric_weight=self.config.parametric_weight,
@@ -277,7 +259,6 @@ class AGSAR:
                         h_attn=h_attn,
                         h_block=h_block,
                         logits=logits,
-                        register_mask=register_mask,
                         attention_mask=attention_mask,
                         stability_sensitivity=self.config.stability_sensitivity,
                         parametric_weight=self.config.parametric_weight,
@@ -285,42 +266,35 @@ class AGSAR:
             else:
                 # Fallback to regular authority if hidden states not captured
                 authority = compute_authority_score(
-                    attn, response_start, register_mask,
-                    roughness=None,
-                    lambda_roughness=0,
+                    attn, response_start,
                     attention_mask=attention_mask,
                     use_vectorized=True,
                 )
         else:
             # v3.1 Legacy Path (for paper comparison: pure authority flow)
             authority = compute_authority_score(
-                attn, response_start, register_mask,
-                roughness=None,  # Applied separately
-                lambda_roughness=0,
+                attn, response_start,
                 attention_mask=attention_mask,
                 use_vectorized=True,
             )
 
-        # Compute MLP divergence penalty - only if unified gating not enabled
-        # Unified gating incorporates divergence into the gating mechanism
-        roughness = None
-        if self.config.enable_spectral_roughness and not self.config.enable_unified_gating:
-            h_attn = attn_outputs.get(last_layer)
-            h_block = block_outputs.get(last_layer)
+        # Aggregate authority over response tokens using configured method
+        # Conservative methods (min, percentile) improve TPR @ low FPR
+        response_tokens = authority[:, response_start:]
 
-            if h_attn is not None and h_block is not None:
-                # Move to compute device for multi-GPU compatibility
-                h_attn = h_attn.to(compute_device)
-                h_block = h_block.to(compute_device)
-                roughness = compute_mlp_divergence(h_attn, h_block, attention_mask)
+        if self.config.aggregation_method == "mean":
+            response_authority = response_tokens.mean().item()
+        elif self.config.aggregation_method == "min":
+            response_authority = response_tokens.min().item()
+        elif self.config.aggregation_method == "percentile_10":
+            response_authority = torch.quantile(response_tokens.flatten(), 0.10).item()
+        elif self.config.aggregation_method == "percentile_25":
+            response_authority = torch.quantile(response_tokens.flatten(), 0.25).item()
+        else:
+            # Fallback to mean
+            response_authority = response_tokens.mean().item()
 
-        # Apply roughness penalty
-        if roughness is not None and self.config.lambda_roughness > 0:
-            authority = authority / (1.0 + self.config.lambda_roughness * roughness)
-            authority = authority.clamp(0.0, 1.0)
-
-        # Hallucination score = 1 - authority (over response tokens)
-        response_authority = authority[:, response_start:].mean().item()
+        # Uncertainty = 1 - aggregated authority
         uncertainty = 1.0 - response_authority
 
         if return_details:
@@ -336,12 +310,104 @@ class AGSAR:
                 'score': uncertainty,
                 'authority': response_authority,
                 'model_confidence': model_confidence,
-                'metric': 'authority_flow',
+                'metric': 'authority_flow_v8',
                 'response_start': response_start,
                 'sequence_length': input_ids.size(1),
             }
 
         return uncertainty
+
+    def compute_uncertainty_raw(
+        self,
+        prompt: str,
+        response: str,
+    ) -> Dict[str, Any]:
+        """
+        Compute uncertainty with ALL internal signals exposed.
+
+        This method is used by the self-calibrating wrapper (SC-AGSAR v10.0)
+        to access raw signals for adaptive parameter computation.
+
+        Returns:
+            Dict containing:
+                - score: Final uncertainty score
+                - authority_per_token: (B, S) raw authority scores
+                - attention_weights: (B, H, S, S) attention from last layer
+                - h_attn: (B, S, D) pre-MLP hidden states
+                - h_block: (B, S, D) post-MLP hidden states
+                - logits: (B, S, V) output logits
+                - confidence_per_token: (B, S) softmax confidence
+                - response_start: int
+                - embed_matrix: (V, D) output embeddings (if available)
+        """
+        input_ids, attention_mask, response_start = self._tokenize(prompt, response)
+        compute_device = self._compute_device
+
+        input_ids = input_ids.to(compute_device)
+        attention_mask = attention_mask.to(compute_device)
+
+        # Extract attention data
+        Q_stack, K_stack, value_norms_dict, model_output = self._adapter.extract(
+            input_ids, attention_mask
+        )
+
+        # Get captured tensors
+        attn_outputs = self._adapter.capture.attn_outputs
+        block_outputs = self._adapter.capture.block_outputs
+        attention_weights = self._adapter.capture.attention_weights
+
+        last_layer = self._semantic_layer_indices[-1]
+        attn = attention_weights.get(last_layer)
+        if attn is None:
+            raise RuntimeError("Attention weights not captured.")
+        attn = attn.to(compute_device)
+
+        h_attn = attn_outputs.get(last_layer)
+        h_block = block_outputs.get(last_layer)
+
+        if h_attn is not None:
+            h_attn = h_attn.to(compute_device)
+        if h_block is not None:
+            h_block = h_block.to(compute_device)
+
+        logits = model_output.logits.to(compute_device)
+
+        # Compute raw authority (per-token, not aggregated)
+        from .ops import compute_authority_flow_vectorized
+
+        authority_per_token = compute_authority_flow_vectorized(
+            attn, response_start, None, attention_mask
+        )
+
+        # Compute confidence per token
+        probs = torch.softmax(logits, dim=-1)
+        confidence_per_token = probs.max(dim=-1).values
+
+        # Compute model confidence (mean prob of response tokens)
+        # This avoids a redundant forward pass by computing inline
+        log_probs = torch.log_softmax(logits[:, response_start-1:-1, :], dim=-1)
+        response_tokens = input_ids[:, response_start:]
+        token_log_probs = log_probs.gather(2, response_tokens.unsqueeze(-1)).squeeze(-1)
+        model_confidence = token_log_probs.exp().mean().item()
+
+        # Compute aggregated authority for baseline comparison (without another forward pass)
+        response_authority = authority_per_token[:, response_start:].mean().item()
+
+        return {
+            "score": 1.0 - response_authority,  # Baseline uncertainty
+            "authority": response_authority,
+            "authority_per_token": authority_per_token,
+            "attention_weights": attn,
+            "h_attn": h_attn,
+            "h_block": h_block,
+            "logits": logits,
+            "confidence_per_token": confidence_per_token,
+            "response_start": response_start,
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "embed_matrix": self._embed_matrix.to(compute_device) if self._embed_matrix is not None else None,
+            "model_confidence": model_confidence,
+        }
 
     def detect_hallucination(
         self,
@@ -377,13 +443,12 @@ class AGSAR:
         return is_hallucination, confidence, details
 
     def reset(self):
-        """Reset streaming state (call before new prompt-response pair)."""
-        self._ema_state = None
+        """Reset state between prompt-response pairs (no-op in v8.0)."""
+        pass
 
     def cleanup(self):
         """Release resources."""
         self._adapter.cleanup()
-        self.reset()
 
     def __del__(self):
         try:

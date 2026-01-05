@@ -1,187 +1,17 @@
 """
-QA Tests: Mathematical Kernel Verification for AG-SAR v3.1
+QA Tests: Mathematical Kernel Verification for AG-SAR v8.0 Gold Master.
 
-Purpose: Verify the v3.1 kernels against known statistical ground truths.
+Purpose: Verify Authority Flow and supporting kernels against known ground truths.
 
 Checklist items verified:
-- [ ] Kurtosis Logic: fisher_kurtosis returns ~0.0 for Normal, ~-1.2 for Uniform
-- [ ] EMA Adaptation: welford_update converges to true mean/var
-- [ ] Spectral Roughness: Zero when h_attn = sum(A*v), positive when orthogonal
+- [ ] Authority Flow: Prompt tokens have full authority, authority bounded [0,1]
 """
 
 import torch
 import pytest
 from ag_sar.ops import (
-    fisher_kurtosis,
-    welford_update,
-    compute_spectral_roughness,
     compute_authority_flow,
-    compute_register_mask,
-    EMAState,
 )
-
-
-class TestKurtosisDistributions:
-    """Verify Kurtosis matches statistical theory."""
-
-    def test_normal_distribution_kurtosis_near_zero(self):
-        """Normal Distribution should have Kurtosis ≈ 0."""
-        torch.manual_seed(42)
-        N = 10000
-
-        normal_dist = torch.randn(N)
-        k_normal = fisher_kurtosis(normal_dist, dim=0)
-
-        assert torch.abs(k_normal) < 0.2, f"Normal kurtosis should be ~0, got {k_normal.item():.4f}"
-
-    def test_uniform_distribution_kurtosis_negative(self):
-        """Uniform Distribution should have Kurtosis ≈ -1.2."""
-        torch.manual_seed(42)
-        N = 10000
-
-        uniform_dist = torch.rand(N)
-        k_uniform = fisher_kurtosis(uniform_dist, dim=0)
-
-        assert torch.abs(k_uniform + 1.2) < 0.2, f"Uniform kurtosis should be ~-1.2, got {k_uniform.item():.4f}"
-
-    def test_leptokurtic_spiky_distribution_high_positive(self):
-        """Spiky distribution (outliers) should have high positive kurtosis."""
-        torch.manual_seed(42)
-        N = 10000
-
-        # Create a vector with one massive outlier
-        spiky = torch.zeros(N)
-        spiky[0] = 100.0
-        k_spiky = fisher_kurtosis(spiky, dim=0)
-
-        assert k_spiky > 10.0, f"Spiky distribution should have high positive kurtosis, got {k_spiky.item():.4f}"
-
-    def test_kurtosis_batched(self):
-        """Verify kurtosis works with batched inputs."""
-        torch.manual_seed(42)
-        B, D = 4, 1000
-
-        # Create batch with different distributions
-        batch = torch.randn(B, D)
-        k_batch = fisher_kurtosis(batch, dim=-1)
-
-        assert k_batch.shape == (B,)
-        # All should be close to 0 for normal
-        assert (torch.abs(k_batch) < 0.5).all()
-
-
-class TestWelfordConvergence:
-    """Verify EMA statistics converge to true mean/variance."""
-
-    def test_mean_converges_to_constant(self):
-        """EMA mean should converge to constant input value."""
-        mean = torch.zeros(1)
-        var = torch.ones(1)
-
-        # Feed constant value 5.0
-        for _ in range(1000):
-            mean, var = welford_update(torch.tensor([5.0]), mean, var, decay=0.99)
-
-        assert torch.allclose(mean, torch.tensor([5.0]), atol=0.1), f"Mean should be ~5.0, got {mean.item():.4f}"
-
-    def test_variance_drops_for_constant_input(self):
-        """Variance should approach 0 for constant input."""
-        mean = torch.zeros(1)
-        var = torch.ones(1)
-
-        for _ in range(1000):
-            mean, var = welford_update(torch.tensor([5.0]), mean, var, decay=0.99)
-
-        assert var.item() < 0.1, f"Variance should drop to ~0 for constant input, got {var.item():.4f}"
-
-    def test_mean_tracks_distribution(self):
-        """EMA mean should track changing distribution."""
-        torch.manual_seed(42)
-        mean = torch.zeros(1)
-        var = torch.ones(1)
-
-        # First phase: samples around 0
-        for _ in range(500):
-            sample = torch.randn(1)
-            mean, var = welford_update(sample, mean, var, decay=0.99)
-
-        mean_phase1 = mean.clone()
-
-        # Second phase: samples around 10
-        for _ in range(500):
-            sample = torch.randn(1) + 10.0
-            mean, var = welford_update(sample, mean, var, decay=0.99)
-
-        # Mean should have shifted toward 10
-        assert mean.item() > mean_phase1.item() + 5.0, "Mean should track distribution shift"
-
-
-class TestSpectralRoughnessLogic:
-    """
-    Verify Dirichlet Energy (Spectral Roughness) mathematical properties.
-
-    Note: v3.2 finding - Dirichlet Energy does NOT discriminate truth/hallucination
-    because "Confident Lies are smooth on the attention graph". These tests verify
-    mathematical correctness only, not behavioral discrimination.
-    """
-
-    def test_dirichlet_energy_non_negative(self):
-        """Dirichlet Energy (pairwise distance) must always be >= 0."""
-        torch.manual_seed(42)
-        B, S, D = 2, 16, 64
-
-        v_states = torch.randn(B, S, D)
-        attn_weights = torch.softmax(torch.randn(B, S, S), dim=-1)
-        h_attn = torch.randn(B, S, D)  # Unused in Dirichlet formula
-
-        roughness = compute_spectral_roughness(h_attn, v_states, attn_weights)
-
-        assert torch.all(roughness >= 0.0), "Dirichlet Energy cannot be negative"
-
-    def test_identical_values_zero_roughness(self):
-        """When all value vectors are identical, roughness should be 0."""
-        torch.manual_seed(42)
-        B, S, D = 1, 8, 64
-
-        # All tokens have identical value vectors
-        v_single = torch.randn(1, 1, D)
-        v_states = v_single.expand(B, S, D).clone()
-
-        attn_weights = torch.softmax(torch.randn(B, S, S), dim=-1)
-        h_attn = torch.randn(B, S, D)  # Unused in Dirichlet formula
-
-        roughness = compute_spectral_roughness(h_attn, v_states, attn_weights)
-
-        assert torch.allclose(roughness, torch.zeros(B, S), atol=1e-5), \
-            f"Identical values should give zero roughness, got max={roughness.max().item():.6f}"
-
-    def test_diverse_values_positive_roughness(self):
-        """When value vectors differ, roughness should be positive."""
-        torch.manual_seed(42)
-        B, S, D = 1, 8, 64
-
-        # Diverse value vectors
-        v_states = torch.randn(B, S, D) * 10.0
-
-        attn_weights = torch.softmax(torch.randn(B, S, S), dim=-1)
-        h_attn = torch.randn(B, S, D)
-
-        roughness = compute_spectral_roughness(h_attn, v_states, attn_weights)
-
-        # Skip first token (only attends to itself)
-        assert roughness[:, 1:].mean().item() > 0.1, \
-            f"Diverse values should give positive roughness, got {roughness[:, 1:].mean().item():.4f}"
-
-    def test_roughness_handles_head_dimension(self):
-        """Roughness should work with (B, H, S, S) attention."""
-        B, H, S, D = 2, 4, 8, 32
-        h_attn = torch.randn(B, S, D)
-        v = torch.randn(B, S, D)
-        attn = torch.softmax(torch.randn(B, H, S, S), dim=-1)
-
-        roughness = compute_spectral_roughness(h_attn, v, attn)
-
-        assert roughness.shape == (B, S), f"Expected shape {(B, S)}, got {roughness.shape}"
 
 
 class TestAuthorityRecharge:
@@ -273,47 +103,6 @@ class TestAuthorityRecharge:
         assert (authority <= 1).all(), "Authority should be <= 1"
 
 
-class TestRegisterMaskIntegration:
-    """Verify Register Mask integrates with Authority Flow."""
-
-    def test_sink_tokens_masked_to_zero(self):
-        """First sink_token_count tokens should have mask = 0."""
-        torch.manual_seed(42)
-        B, S, D = 2, 32, 64
-        sink_count = 4
-
-        v = torch.randn(B, S, D)
-        mask, _ = compute_register_mask(v, sink_token_count=sink_count)
-
-        assert (mask[:, :sink_count] == 0).all(), \
-            f"Sink tokens should be masked to 0"
-
-    def test_mask_reduces_authority_for_low_kurtosis(self):
-        """Low kurtosis tokens (register-like) should have lower mask values."""
-        torch.manual_seed(42)
-        B, S, D = 1, 32, 64
-
-        # Create value vectors
-        v = torch.randn(B, S, D)
-
-        # Make some tokens have very uniform (low kurtosis) features
-        v[:, 10:15, :] = torch.rand(B, 5, D) * 0.1  # Uniform-ish
-
-        mask, ema = compute_register_mask(v, ema_state=None, sink_token_count=4)
-
-        # After EMA adaptation, uniform tokens should have lower mask
-        # (This depends on the EMA state, so we need a second pass)
-        mask2, _ = compute_register_mask(v, ema_state=ema, sink_token_count=4)
-
-        # The uniform tokens should generally have lower mask values
-        # (This is statistical, may not always hold for random seeds)
-        uniform_mask = mask2[:, 10:15].mean()
-        normal_mask = mask2[:, 20:25].mean()
-
-        # Just verify mask is in valid range
-        assert (mask2 >= 0).all() and (mask2 <= 1).all()
-
-
 class TestDeviceConsistency:
     """Verify operations work on different devices."""
 
@@ -322,19 +111,11 @@ class TestDeviceConsistency:
         torch.manual_seed(42)
         device = torch.device("cpu")
 
-        v = torch.randn(2, 16, 64, device=device)
         attn = torch.softmax(torch.randn(2, 16, 16, device=device), dim=-1)
-        h_attn = torch.randn(2, 16, 64, device=device)
 
-        # All should work without error
-        kurt = fisher_kurtosis(v, dim=-1)
-        mask, ema = compute_register_mask(v)
-        roughness = compute_spectral_roughness(h_attn, v, attn)
+        # Authority flow should work without error
         authority = compute_authority_flow(attn, prompt_length=8)
 
-        assert kurt.device == device
-        assert mask.device == device
-        assert roughness.device == device
         assert authority.device == device
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -343,19 +124,11 @@ class TestDeviceConsistency:
         torch.manual_seed(42)
         device = torch.device("cuda")
 
-        v = torch.randn(2, 16, 64, device=device)
         attn = torch.softmax(torch.randn(2, 16, 16, device=device), dim=-1)
-        h_attn = torch.randn(2, 16, 64, device=device)
 
-        # All should work without error
-        kurt = fisher_kurtosis(v, dim=-1)
-        mask, ema = compute_register_mask(v)
-        roughness = compute_spectral_roughness(h_attn, v, attn)
+        # Authority flow should work without error
         authority = compute_authority_flow(attn, prompt_length=8)
 
-        assert kurt.device.type == "cuda"
-        assert mask.device.type == "cuda"
-        assert roughness.device.type == "cuda"
         assert authority.device.type == "cuda"
 
 
@@ -367,30 +140,22 @@ class TestBatchAndMultiHead:
         torch.manual_seed(42)
 
         for B in [1, 2, 4, 8]:
-            S, D = 16, 64
-            v = torch.randn(B, S, D)
+            S = 16
             attn = torch.softmax(torch.randn(B, S, S), dim=-1)
-            h_attn = torch.randn(B, S, D)
 
-            mask, _ = compute_register_mask(v)
-            roughness = compute_spectral_roughness(h_attn, v, attn)
             authority = compute_authority_flow(attn, prompt_length=8)
 
-            assert mask.shape == (B, S), f"Batch {B}: mask shape mismatch"
-            assert roughness.shape == (B, S), f"Batch {B}: roughness shape mismatch"
             assert authority.shape == (B, S), f"Batch {B}: authority shape mismatch"
 
     def test_multi_head_attention(self):
         """Operations should handle multi-head attention (B, H, S, S)."""
         torch.manual_seed(42)
-        B, H, S, D = 2, 8, 16, 64
+        B, H, S = 2, 8, 16
 
-        v = torch.randn(B, S, D)
         attn = torch.softmax(torch.randn(B, H, S, S), dim=-1)
-        h_attn = torch.randn(B, S, D)
 
-        roughness = compute_spectral_roughness(h_attn, v, attn)
         authority = compute_authority_flow(attn, prompt_length=8)
 
-        assert roughness.shape == (B, S), f"Multi-head roughness shape: {roughness.shape}"
         assert authority.shape == (B, S), f"Multi-head authority shape: {authority.shape}"
+
+

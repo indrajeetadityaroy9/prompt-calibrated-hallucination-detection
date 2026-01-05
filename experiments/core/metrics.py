@@ -20,6 +20,7 @@ import warnings
 import numpy as np
 from sklearn.metrics import (
     roc_auc_score,
+    roc_curve,
     average_precision_score,
     brier_score_loss,
     auc,
@@ -110,6 +111,8 @@ class MetricsCalculator:
             "spearman": self._spearman,
             "pearson": self._pearson,
             "pointbiserial": self._pointbiserial,
+            # Operating point (higher=better)
+            "tpr_at_5fpr": self._tpr_at_5fpr,
         }
 
     def _filter_nan(
@@ -367,6 +370,30 @@ class MetricsCalculator:
             return None
         r, _ = pointbiserialr(y_true, y_scores)
         return float(r) if not np.isnan(r) else None
+
+    # ===== Operating Point Metrics =====
+
+    def _tpr_at_5fpr(self, y_true: np.ndarray, y_scores: np.ndarray) -> Optional[float]:
+        """
+        TPR @ 5% FPR - True Positive Rate at 5% False Positive Rate.
+
+        Operating point metric: What fraction of hallucinations can we detect
+        while only misclassifying 5% of factual samples?
+
+        Higher is better. Standard threshold for high-precision applications.
+        """
+        if self._check_single_class(y_true, "tpr_at_5fpr"):
+            return None
+
+        fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+
+        # Find TPR at FPR <= 5%
+        valid_mask = fpr <= 0.05
+        if not np.any(valid_mask):
+            return 0.0  # No threshold achieves <= 5% FPR
+
+        # Return highest TPR where FPR <= 0.05
+        return float(tpr[valid_mask][-1])
 
     # ===== AUPRC Factual (Inverted Labels) =====
 

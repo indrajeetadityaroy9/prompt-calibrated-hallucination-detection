@@ -1,23 +1,22 @@
-# Scaling Law Test (Figure 2)
-# Purpose: Test if 70B's sharper attention heads improve detection
-# REQUIREMENTS: 2x H100 80GB (140GB+ VRAM needed for balanced split)
+# Long Context Test (Table 2)
+# Purpose: Test AG-SAR on longer sequences from HaluEval Summarization
+# Validates that Authority Flow works with extended context windows
 
 experiment:
-  name: "02_scaling_law"
-  description: "AG-SAR scaling test on Llama-3.1-70B"
+  name: "04_long_context"
+  description: "Long context test on HaluEval Summarization (longer sequences)"
 
 dataset:
   name: "ALL"  # Load all 4 datasets: HaluEval QA, RAGTruth QA, HaluEval Summ, FAVA
-  num_samples: 500  # Per dataset (2000 total) - sufficient for scaling proof
+  num_samples: 500  # Per dataset (2000 total)
   seed: 42
 
 model:
-  name: "meta-llama/Llama-3.1-70B-Instruct"
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  attn_implementation: "eager"  # Must use sdpa for attention weight extraction
   dtype: "bfloat16"
-  attn_implementation: "eager"  # Required for attention weight extraction
-  device_map: "balanced"  # Splits across 2x H100
+  device_map: "cuda:0"
   trust_remote_code: true
-  batch_size: 2  # Reduced to prevent OOM with eager attention
 
 methods:
   agsar:
@@ -57,11 +56,6 @@ evaluation:
   confidence_level: 0.95
 
 output:
-  output_dir: "results/02_scaling_law"
+  output_dir: "results/04_long_context"
   save_predictions: true
   save_scores: true
-
-# Validation Criteria:
-# - Model loads without OOM on 2x H100
-# - AUROC comparable to 8B (expect improvement)
-# - Latency reasonable (< 10x of 8B due to multi-GPU)

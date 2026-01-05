@@ -194,11 +194,10 @@ def benchmark_model(
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-    # Create AG-SAR engine
+    # Create AG-SAR engine with v8.0 defaults
     ag_config = AGSARConfig(
         semantic_layers=min(4, model.config.n_layer if hasattr(model.config, 'n_layer') else model.config.num_hidden_layers),
         enable_register_filter=True,
-        enable_authority_flow=True,
         enable_spectral_roughness=True,
         lambda_roughness=10.0,
     )
@@ -241,20 +240,21 @@ def benchmark_model(
     # =========================================================================
     print("\n[2/3] Measuring AG-SAR latency...")
 
-    # Use compute_uncertainty with tokenized input directly via internal API
-    # This measures the full pipeline: hooks + centrality + entropy
+    # Use the full AG-SAR pipeline: hooks + authority flow + optional gating
+    # This measures realistic overhead including all v8.0 components
+    from ag_sar.measures import compute_authority_score
 
     # Warmup
+    prompt_length = seq_len // 2  # Assume half is prompt
     for _ in range(num_warmup):
         with torch.no_grad():
             Q_stack, K_stack, value_norms, output = engine._adapter.extract(input_ids)
-            from ag_sar.measures import compute_sink_aware_centrality, aggregate_value_norms
-            agg_norms = aggregate_value_norms(value_norms)
-            relevance, centrality, _ = compute_sink_aware_centrality(
-                value_norms=agg_norms,
-                Q_stack=Q_stack,
-                K_stack=K_stack,
-            )
+            attn = engine._adapter.capture.attention_weights.get(engine._semantic_layer_indices[-1])
+            if attn is not None:
+                authority = compute_authority_score(
+                    attn, prompt_length, register_mask=None,
+                    attention_mask=None, use_vectorized=True
+                )
 
     if device == "cuda":
         torch.cuda.synchronize()
@@ -268,13 +268,12 @@ def benchmark_model(
     for i in range(num_iterations):
         with torch.no_grad():
             Q_stack, K_stack, value_norms, output = engine._adapter.extract(input_ids)
-            from ag_sar.measures import compute_sink_aware_centrality, aggregate_value_norms
-            agg_norms = aggregate_value_norms(value_norms)
-            relevance, centrality, _ = compute_sink_aware_centrality(
-                value_norms=agg_norms,
-                Q_stack=Q_stack,
-                K_stack=K_stack,
-            )
+            attn = engine._adapter.capture.attention_weights.get(engine._semantic_layer_indices[-1])
+            if attn is not None:
+                authority = compute_authority_score(
+                    attn, prompt_length, register_mask=None,
+                    attention_mask=None, use_vectorized=True
+                )
 
     if device == "cuda":
         torch.cuda.synchronize()

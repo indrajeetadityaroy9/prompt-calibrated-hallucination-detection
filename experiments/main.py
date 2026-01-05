@@ -37,11 +37,19 @@ from experiments.configs.schema import ExperimentConfig
 from experiments.core.engine import BenchmarkEngine
 from experiments.data.halueval import HaluEvalDataset
 from experiments.data.ragtruth import RAGTruthDataset
+from experiments.data.truthfulqa import TruthfulQADataset
+from experiments.data.wikitext import WikiTextDataset
+from experiments.data.fava import FAVADataset
 from experiments.methods.agsar_wrapper import AGSARMethod
 from experiments.methods.logprob import LogProbMethod
 from experiments.methods.entropy import PredictiveEntropyMethod
-from experiments.methods.selfcheck import SelfCheckNgramMethod
+from experiments.methods.selfcheck import SelfCheckNLIMethod
 from experiments.methods.eigenscore import EigenScoreMethod, SAPLMAMethod
+from experiments.methods.llm_check import (
+    LLMCheckAttentionMethod,
+    LLMCheckHiddenMethod,
+    LLMCheckLogitMethod,
+)
 
 
 def load_model_and_tokenizer(config: ExperimentConfig):
@@ -104,6 +112,26 @@ def build_datasets(config: ExperimentConfig) -> Dict:
     datasets = {}
     ds_config = config.dataset
 
+    # Special case: Load ALL 4 required datasets
+    if ds_config.name == "ALL":
+        num_samples = ds_config.num_samples
+        seed = ds_config.seed
+
+        datasets["halueval_qa"] = HaluEvalDataset(
+            variant="qa", num_samples=num_samples, seed=seed
+        )
+        datasets["ragtruth"] = RAGTruthDataset(
+            task_type="QA", num_samples=num_samples, seed=seed
+        )
+        datasets["halueval_summarization"] = HaluEvalDataset(
+            variant="summarization", num_samples=num_samples, seed=seed
+        )
+        datasets["fava"] = FAVADataset(
+            num_samples=num_samples, seed=seed
+        )
+        return datasets
+
+    # Single dataset loading (original logic)
     if ds_config.name.startswith("halueval_"):
         variant = ds_config.name.replace("halueval_", "")
         datasets[ds_config.name] = HaluEvalDataset(
@@ -115,6 +143,24 @@ def build_datasets(config: ExperimentConfig) -> Dict:
     elif ds_config.name == "ragtruth":
         datasets["ragtruth"] = RAGTruthDataset(
             task_type=ds_config.task_type,
+            num_samples=ds_config.num_samples,
+            seed=ds_config.seed,
+        )
+
+    elif ds_config.name == "truthfulqa":
+        datasets["truthfulqa"] = TruthfulQADataset(
+            num_samples=ds_config.num_samples,
+            seed=ds_config.seed,
+        )
+
+    elif ds_config.name == "wikitext":
+        datasets["wikitext"] = WikiTextDataset(
+            num_samples=ds_config.num_samples,
+            seed=ds_config.seed,
+        )
+
+    elif ds_config.name == "fava":
+        datasets["fava"] = FAVADataset(
             num_samples=ds_config.num_samples,
             seed=ds_config.seed,
         )
@@ -153,16 +199,35 @@ def build_methods(config: ExperimentConfig, model, tokenizer) -> Dict:
         print("  [+] Entropy enabled")
 
     if mc.selfcheck:
-        methods["SelfCheck"] = SelfCheckNgramMethod(model, tokenizer, config=mc.selfcheck)
-        print(f"  [+] SelfCheck enabled (samples={mc.selfcheck.num_samples})")
+        methods["SelfCheck"] = SelfCheckNLIMethod(model, tokenizer, config=mc.selfcheck)
+        print(f"  [+] SelfCheck-NLI enabled (samples={mc.selfcheck.num_samples})")
 
     if mc.eigenscore:
-        methods["EigenScore"] = EigenScoreMethod(model, tokenizer)
-        print("  [+] EigenScore enabled")
+        methods["EigenScore"] = EigenScoreMethod(
+            model,
+            tokenizer,
+            num_samples=mc.eigenscore.num_samples,
+            max_new_tokens=mc.eigenscore.max_new_tokens,
+            temperature=mc.eigenscore.temperature,
+        )
+        print(f"  [+] EigenScore enabled (samples={mc.eigenscore.num_samples})")
 
     if mc.saplma:
         methods["SAPLMA"] = SAPLMAMethod(model, tokenizer)
         print("  [+] SAPLMA enabled")
+
+    # LLM-Check methods (NeurIPS 2024)
+    if mc.llmcheck_attn:
+        methods["LLMCheck-Attn"] = LLMCheckAttentionMethod(model, tokenizer)
+        print("  [+] LLMCheck-Attn enabled")
+
+    if mc.llmcheck_hidden:
+        methods["LLMCheck-Hidden"] = LLMCheckHiddenMethod(model, tokenizer)
+        print("  [+] LLMCheck-Hidden enabled")
+
+    if mc.llmcheck_logit:
+        methods["LLMCheck-Logit"] = LLMCheckLogitMethod(model, tokenizer)
+        print("  [+] LLMCheck-Logit enabled")
 
     if not methods:
         raise ValueError("No methods enabled in config. Enable at least one method.")
@@ -264,12 +329,57 @@ Examples:
         print(f"Error initializing methods: {e}")
         return 1
 
+    # Task-adaptive mode (v9.0): Create method factory for per-dataset method creation
+    method_factory = None
+    if config.methods.agsar and config.methods.agsar.enable_task_adaptive:
+        print("  [!] Task-adaptive mode enabled (v9.0)")
+
+        def create_task_adaptive_methods(dataset_name: str):
+            """Factory function that creates fresh methods per-dataset."""
+            task_methods = {}
+            mc = config.methods
+
+            # Create fresh AG-SAR with dataset_name for task detection
+            if mc.agsar:
+                task_methods["AG-SAR"] = AGSARMethod(
+                    model, tokenizer,
+                    config=mc.agsar,
+                    dataset_name=dataset_name,
+                )
+
+            # Other methods don't need task adaptation (yet)
+            if mc.logprob:
+                task_methods["LogProb"] = LogProbMethod(model, tokenizer)
+            if mc.entropy:
+                task_methods["Entropy"] = PredictiveEntropyMethod(model, tokenizer)
+            if mc.selfcheck:
+                task_methods["SelfCheck"] = SelfCheckNLIMethod(model, tokenizer, config=mc.selfcheck)
+            if mc.eigenscore:
+                task_methods["EigenScore"] = EigenScoreMethod(
+                    model, tokenizer,
+                    num_samples=mc.eigenscore.num_samples,
+                    max_new_tokens=mc.eigenscore.max_new_tokens,
+                    temperature=mc.eigenscore.temperature,
+                )
+            if mc.saplma:
+                task_methods["SAPLMA"] = SAPLMAMethod(model, tokenizer)
+            if mc.llmcheck_attn:
+                task_methods["LLMCheck-Attn"] = LLMCheckAttentionMethod(model, tokenizer)
+            if mc.llmcheck_hidden:
+                task_methods["LLMCheck-Hidden"] = LLMCheckHiddenMethod(model, tokenizer)
+            if mc.llmcheck_logit:
+                task_methods["LLMCheck-Logit"] = LLMCheckLogitMethod(model, tokenizer)
+
+            return task_methods
+
+        method_factory = create_task_adaptive_methods
+
     # Run benchmark
     print("\n[4/4] Running benchmark...")
     print("-" * 60)
 
     try:
-        engine = BenchmarkEngine(config, methods, datasets)
+        engine = BenchmarkEngine(config, methods, datasets, method_factory=method_factory)
         results = engine.run()
 
         # Print summary table

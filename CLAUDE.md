@@ -103,9 +103,14 @@ python -m experiments.main --config experiments/configs/01_main_sota.yaml --dry-
 
 ```
 AGSAR Engine (engine.py)
-├── Main API: compute_uncertainty(), detect_hallucination()
+├── Main API: compute_uncertainty(), compute_uncertainty_raw(), detect_hallucination()
 ├── Authority Flow + Unified Gating + Semantic Dispersion
 └── Orchestrates: extract → authority_score → gating → dispersion → score
+
+Calibration (calibration.py) [NEW - Experimental]
+├── SelfCalibrator: Derives parameters from internal signals
+├── OnlineStats: Welford's algorithm for streaming statistics
+└── Entropy-adaptive k, variance-adaptive aggregation, temperature scaling
 
 ModelAdapter (modeling/hooks.py)
 ├── Hook-based Q/K/V extraction without O(N²) matrices
@@ -114,16 +119,14 @@ ModelAdapter (modeling/hooks.py)
 └── AttentionCapture dataclass for multi-layer storage
 
 Measures (measures/)
-├── authority.py: Authority Flow + Register Filter + Gated/Semantic Authority
+├── authority.py: Authority Flow + Gated/Semantic Authority
 ├── semantics.py: Semantic Dispersion (consistency over confidence)
 └── entropy.py: Token entropy (baseline utility)
-
-Note: Ablation code (LID, Spectral, Legacy Graph) archived in legacy_research/
 
 Ops (ops/)
 ├── torch_functional.py: PyTorch implementations with torch.compile
 ├── triton_kernels.py: Linux-only Triton kernels for H100
-└── Exports: EMAState, fisher_kurtosis, compute_authority_flow, etc.
+└── Exports: compute_authority_flow, compute_mlp_divergence, compute_stability_gate, etc.
 
 Utils (utils/)
 └── tensor.py: H100 optimizations, TF32, Flash Attention, safe_normalize, attention masking
@@ -134,10 +137,9 @@ Utils (utils/)
 ```
 prompt + response → tokenize → ModelAdapter.extract()
     → Q, K, value_states, attn_outputs, block_outputs
-    → compute_register_mask() [Mechanism 1: Kurtosis-based filter]
-    → compute_authority_score() [Mechanism 2: Recursive prompt recharge]
-    → compute_gated_authority() [Mechanism 3: Unified RAG/free-gen gating]
-    → compute_semantic_authority() [Mechanism 4: Semantic dispersion]
+    → compute_authority_score() [Mechanism 1: Recursive prompt recharge]
+    → compute_gated_authority() [Mechanism 2: Unified RAG/free-gen gating]
+    → compute_semantic_authority() [Mechanism 3: Semantic dispersion]
     → detect_hallucination(uncertainty > threshold)
 ```
 
@@ -155,16 +157,14 @@ prompt + response → tokenize → ModelAdapter.extract()
 
 ### Critical Parameters (AGSARConfig)
 
-- `residual_weight=0.5`: Prevents early-token collapse in power iteration
-- `power_iteration_steps=3`: Converges in 2-3 iterations
 - `semantic_layers=4`: Final layers contain semantic consolidation
-- `sink_token_count=4`: First N tokens masked as structural sinks
-- `lambda_roughness=10.0`: MLP divergence penalty
-- `kurtosis_threshold=2.0`: Register filter threshold
-- `ema_decay=0.995`: Online kurtosis normalization decay
 - `hallucination_threshold=0.7`: Default detection threshold
 - `enable_unified_gating=True`: Context-dependent RAG/free-gen gating
+- `stability_sensitivity=1.0`: Gate sharpness for MLP stability
+- `parametric_weight=0.5`: Weight for confidence when ignoring context
 - `enable_semantic_dispersion=True`: Semantic consistency over raw confidence
+- `dispersion_k=5`: Top-k tokens for dispersion calculation
+- `dispersion_sensitivity=1.0`: Scale factor for dispersion penalty
 
 For ablation studies (v3.1 baseline comparison), set `enable_unified_gating=False`.
 
@@ -179,20 +179,16 @@ For ablation studies (v3.1 baseline comparison), set `enable_unified_gating=Fals
 - **Flash Attention**: Install with `pip install -e ".[h100]"` for full H100 SDPA acceleration. Requires CUDA 12+ and Linux.
 - **Multi-GPU**: Supports `device_map="balanced"` for large models. Tensors stay on native device until final aggregation.
 
-### Streaming & State Management
-- **EMA state**: Maintains running Welford statistics for kurtosis normalization across tokens.
-- **Reset between pairs**: Call `agsar.reset()` between different prompt-response pairs to clear streaming state.
+### Resource Management
 - **Cleanup hooks**: Call `agsar.cleanup()` when done to remove model hooks and free resources.
 
 ## Key Abstractions
 
-1. **Matrix-Free Centrality**: Power iteration computes eigenvector centrality in O(N) memory: `v_{t+1} = (1-α)·Attn(Q,K,v_t) + α·v_t`
+1. **Authority Flow**: Recursive prompt recharge tracks signal provenance: `A(t) = Σ_prompt A_{t,j} + Σ_gen A_{t,j} × A(j)`
 
-2. **Register Filter (Mechanism 1)**: Kurtosis-based detection with EMA adaptation: `M(t) = (t > 4) × Sigmoid(-Z(t) + τ)` filters attention sinks
+2. **Stability Gate**: Detects when MLP overrides attention: `Gate(t) = exp(-sensitivity × (1 - CosineSim(h_attn, h_block)))`
 
-3. **Authority Flow (Mechanism 2)**: Recursive prompt recharge prevents vanishing authority: `A(t) = Σ_prompt A_{t,j} + Σ_gen A_{t,j} × A(j) × M(t)`
-
-4. **MLP Divergence (Mechanism 3)**: Detects when MLP overrides attention: `δ(t) = 1 - CosineSim(h_attn, h_block)`
+3. **Semantic Dispersion**: Measures consistency of top-k predictions: low dispersion (synonyms) = grounded, high dispersion (unrelated) = hallucination
 
 ## Version History (Algorithm Evolution)
 
@@ -200,26 +196,28 @@ For ablation studies (v3.1 baseline comparison), set `enable_unified_gating=Fals
 |---------|-------------|-------------|
 | **v3.1** | `enable_unified_gating=False, enable_semantic_dispersion=False` | Pure Authority Flow (paper baseline) |
 | **v7.0** | `enable_unified_gating=True, enable_semantic_dispersion=False` | Adds context-dependent gating |
-| **v8.0** | `enable_unified_gating=True, enable_semantic_dispersion=True` | **Default.** Adds semantic dispersion (consistency over confidence) |
+| **v8.0** | `enable_unified_gating=True, enable_semantic_dispersion=True` | **Default.** Adds semantic dispersion |
+| **v9.0** | `enable_task_adaptive=True` | Task-specific parameter presets (QA, RAG, Summarization, Attribution) |
+| **v10.0** | `enable_self_calibration=True` | **EXPERIMENTAL.** Self-calibrating parameters from internal signals |
 
-v4/v5/v6 ablations (LID, Spectral) archived in `legacy_research/` for paper reproducibility.
+### v9.0 Task-Adaptive Mode
+Automatically selects calibration parameters based on dataset/task type:
+- **QA**: Conservative aggregation (percentile_10), T=1.2
+- **RAG**: Trust context more (parametric_weight=0.3), T=1.5
+- **Summarization**: Higher dispersion_k=10 for long-form, T=2.5
+- **Attribution**: Moderate conservative (percentile_25), T=2.0
 
-## Archived Ablation Code
+Config: `experiments/configs/agsar_task_adaptive.yaml`
 
-For paper reproducibility (Table 3), ablation code is archived in `legacy_research/`:
+### v10.0 Self-Calibrating Mode (Experimental)
+Derives all calibration parameters from internal model signals:
+- **Entropy-Adaptive k**: `k_effective = k_min + (k_max - k_min) × H_normalized`
+- **Variance-Adaptive Aggregation**: Interpolates mean↔percentile_10 based on authority variance
+- **Confidence-Modulated Temperature**: Adjusts T based on confidence-entropy gap
 
-| Component | Archived Location | Description |
-|-----------|-------------------|-------------|
-| LID (Manifold) | `legacy_research/ablations/manifold.py` | v5.0 Local Intrinsic Dimension |
-| Spectral | `legacy_research/ablations/spectral.py` | v6.0 Laplacian entropy + DoLa |
-| Legacy Graph | `legacy_research/ablations/legacy_graph.py` | v1/v2 centrality-based approach |
+**Status**: EXPERIMENTAL - Currently degrades AUROC compared to v8.0. The adaptive components harm ranking ability while improving calibration (ECE). Needs further tuning.
 
-To reproduce ablations, copy files back to `src/ag_sar/measures/ablations/`.
-
-For v3.1 baseline comparison (pure Authority Flow without gating):
-```python
-config = AGSARConfig(enable_unified_gating=False, enable_semantic_dispersion=False)
-```
+Config: `experiments/configs/agsar_self_calibrating.yaml`
 
 ## Test Organization
 
@@ -241,21 +239,22 @@ experiments/
 ├── data/
 │   ├── base.py                # EvaluationDataset ABC
 │   ├── halueval.py            # HaluEval loader
-│   └── ragtruth.py            # RAGTruth loader
+│   ├── ragtruth.py            # RAGTruth loader
+│   └── fava.py                # FAVA attribution loader
 ├── methods/
 │   ├── base.py                # UncertaintyMethod ABC
-│   ├── agsar_wrapper.py       # AG-SAR method
+│   ├── agsar_wrapper.py       # AG-SAR method (v8.0/v9.0/v10.0)
 │   ├── logprob.py             # Log-probability baseline
 │   ├── entropy.py             # Entropy baseline
 │   ├── selfcheck.py           # SelfCheck baseline
-│   └── eigenscore.py          # EigenScore baseline
+│   ├── eigenscore.py          # EigenScore baseline
+│   └── llm_check.py           # LLM-Check baselines (NeurIPS 2024)
 ├── configs/
 │   ├── schema.py              # Pydantic config validation
-│   ├── 00_ci_smoke_test.yaml  # CI validation
-│   ├── 01_main_sota.yaml      # Table 1: SOTA comparison
-│   ├── 02_scaling_law.yaml    # Figure 2: Scaling to 70B
-│   ├── 03_generalization.yaml # Table 2: RAGTruth generalization
-│   └── 04_moe_robustness.yaml # Discussion: MoE architecture
+│   ├── agsar_only.yaml        # AG-SAR v8.0 only
+│   ├── agsar_task_adaptive.yaml    # AG-SAR v9.0
+│   ├── agsar_self_calibrating.yaml # AG-SAR v10.0 (experimental)
+│   └── unified_eval.yaml      # Full benchmark suite
 └── analysis/
     └── benchmark_latency.py   # Zero-latency verification
 ```
@@ -268,6 +267,12 @@ experiments/
 | `01_main_sota.yaml` | Table 1 | SOTA comparison on HaluEval QA |
 | `02_scaling_law.yaml` | Figure 2 | Scaling to Llama-3.1-70B |
 | `03_generalization.yaml` | Table 2 | RAGTruth generalization |
-| `04_moe_robustness.yaml` | Discussion | MoE architecture (Mixtral) |
+| `unified_eval.yaml` | Full Suite | All datasets with all methods |
 
-Ablation config (`05_mechanism_ablation.yaml`) archived in `legacy_research/`.
+## Known Issues
+
+1. **SC-AGSAR (v10.0) AUROC degradation**: The self-calibrating mode currently produces worse discrimination (AUROC 0.63 vs 0.90 baseline on HaluEval QA) while improving calibration (ECE 0.08 vs 0.26). The adaptive k and aggregation components need further tuning.
+
+2. **Transformers version sensitivity**: Pin to `<4.45.0` for attention hook compatibility.
+
+3. **Single-token responses**: `var()` warning for single-token responses in variance computation.

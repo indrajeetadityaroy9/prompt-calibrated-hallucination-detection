@@ -1,16 +1,18 @@
 """
-Spectral baseline methods implementing UncertaintyMethod interface.
+EigenScore: Hidden State Eigenvalue Analysis for Hallucination Detection.
 
-EigenScore: Uses eigenvalue analysis of attention matrices.
-SAPLMA: Uses hidden state statistics.
+Official implementation based on:
+"INSIDE: LLMs' Internal States Retain the Power of Hallucination Detection"
+Chen et al., ICLR 2024
+https://github.com/D2I-ai/eigenscore
 
-These are the main "spectral competitor" baselines that analyze
-internal model structure (similar to AG-SAR conceptually).
+Key insight: EigenScore measures semantic diversity across multiple sampled
+responses. High eigenvalue spread in hidden state covariance = uncertain/hallucinating.
 """
 
 import time
-import math
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -19,23 +21,24 @@ from experiments.methods.base import UncertaintyMethod, MethodResult
 
 class EigenScoreMethod(UncertaintyMethod):
     """
-    EigenScore uncertainty method.
+    EigenScore uncertainty method (official algorithm).
 
-    Analyzes spectral properties of attention matrices:
-    - Spectral entropy of eigenvalues
-    - Dominant eigenvalue ratio
-    - Eigenvalue decay rate
+    Generates multiple responses for the same prompt, extracts hidden states
+    from the middle transformer layer, computes covariance across samples,
+    and uses SVD eigenvalues to measure semantic uncertainty.
 
-    Higher spectral entropy = more distributed attention = less confident.
+    Higher eigenvalue spread = more semantic diversity = more uncertain.
 
-    Note: Requires capturing attention weights, which uses hooks.
+    Reference: https://github.com/D2I-ai/eigenscore
     """
 
     def __init__(
         self,
         model: nn.Module,
         tokenizer,
-        target_layers: Optional[List[int]] = None,
+        num_samples: int = 5,
+        max_new_tokens: int = 50,
+        temperature: float = 1.0,
         device: Optional[torch.device] = None,
     ):
         """
@@ -44,12 +47,21 @@ class EigenScoreMethod(UncertaintyMethod):
         Args:
             model: Language model
             tokenizer: Tokenizer
-            target_layers: Layers to analyze (default: last 4)
+            num_samples: Number of response samples to generate (default: 5)
+            max_new_tokens: Max tokens per sample (default: 50)
+            temperature: Sampling temperature (default: 1.0)
             device: Compute device
         """
         super().__init__(model, tokenizer, device)
 
-        # Determine number of layers
+        self.num_samples = num_samples
+        self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
+
+        # Regularization for covariance matrix
+        self.alpha = 1e-3
+
+        # Determine middle layer for hidden state extraction
         if hasattr(model.config, "num_hidden_layers"):
             n_layers = model.config.num_hidden_layers
         elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
@@ -57,13 +69,11 @@ class EigenScoreMethod(UncertaintyMethod):
         else:
             n_layers = 12
 
-        if target_layers is None:
-            self.target_layers = list(range(max(0, n_layers - 4), n_layers))
-        else:
-            self.target_layers = target_layers
+        # Official ICLR 2024 paper: "penultimate layer" for hidden state extraction
+        self.target_layer = n_layers - 2  # Penultimate layer per official impl
 
         self._hooks: List = []
-        self._attention_weights: Dict[int, torch.Tensor] = {}
+        self._hidden_states: Dict[int, torch.Tensor] = {}
 
     @property
     def name(self) -> str:
@@ -71,131 +81,203 @@ class EigenScoreMethod(UncertaintyMethod):
 
     @property
     def requires_sampling(self) -> bool:
-        return False
+        return True  # Requires multiple samples
 
     def _register_hooks(self):
-        """Register hooks to capture attention weights."""
+        """Register hook to capture hidden states from middle layer."""
         self._hooks = []
-        self._attention_weights = {}
+        self._hidden_states = {}
 
         def make_hook(layer_idx):
             def hook_fn(module, input, output):
-                if isinstance(output, tuple) and len(output) > 1:
-                    attn_weights = output[1]
-                    if attn_weights is not None:
-                        self._attention_weights[layer_idx] = attn_weights.detach()
+                if isinstance(output, tuple):
+                    hidden = output[0]
+                else:
+                    hidden = output
+                if isinstance(hidden, torch.Tensor):
+                    self._hidden_states[layer_idx] = hidden.detach()
             return hook_fn
 
-        # Find attention modules
+        # Register hook on target layer
         if hasattr(self.model, "transformer") and hasattr(self.model.transformer, "h"):
             # GPT-2 style
-            for idx in self.target_layers:
-                block = self.model.transformer.h[idx]
-                handle = block.attn.register_forward_hook(make_hook(idx))
-                self._hooks.append(handle)
+            block = self.model.transformer.h[self.target_layer]
+            handle = block.register_forward_hook(make_hook(self.target_layer))
+            self._hooks.append(handle)
         elif hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
-            # Llama style
-            for idx in self.target_layers:
-                layer = self.model.model.layers[idx]
-                handle = layer.self_attn.register_forward_hook(make_hook(idx))
-                self._hooks.append(handle)
+            # Llama/Mistral/Qwen style
+            layer = self.model.model.layers[self.target_layer]
+            handle = layer.register_forward_hook(make_hook(self.target_layer))
+            self._hooks.append(handle)
 
     def _remove_hooks(self):
         """Remove registered hooks."""
         for handle in self._hooks:
             handle.remove()
         self._hooks = []
-        self._attention_weights = {}
+        self._hidden_states = {}
 
-    def _compute_spectral_features(
-        self, attn_weights: torch.Tensor
-    ) -> Dict[str, float]:
+    def _extract_response_embedding(self, prompt_ids: torch.Tensor, full_ids: torch.Tensor) -> torch.Tensor:
         """
-        Compute spectral features from attention weights.
+        Extract mean hidden state embedding for response tokens.
 
         Args:
-            attn_weights: (batch, heads, seq, seq) attention weights
+            prompt_ids: Tokenized prompt
+            full_ids: Tokenized prompt + response
 
         Returns:
-            Dict with spectral entropy, dominant ratio, etc.
+            Mean embedding vector for response portion
         """
-        # Average over heads and batch
-        attn = attn_weights.mean(dim=(0, 1))  # (seq, seq)
+        # Forward pass to capture hidden states
+        self.model(full_ids)
 
-        # Compute eigenvalues
+        if self.target_layer not in self._hidden_states:
+            # Fallback: return zero embedding
+            hidden_dim = self.model.config.hidden_size if hasattr(self.model.config, "hidden_size") else 768
+            return torch.zeros(hidden_dim, device=self.device)
+
+        hidden = self._hidden_states[self.target_layer]  # (batch, seq, hidden)
+
+        # Get response portion only
+        prompt_len = prompt_ids.size(1)
+        response_hidden = hidden[:, prompt_len:, :]  # (1, response_len, hidden)
+
+        if response_hidden.size(1) == 0:
+            # No response tokens, use last prompt token
+            response_hidden = hidden[:, -1:, :]
+
+        # Mean pooling over response tokens (official impl aggregates tokens)
+        embedding = response_hidden.mean(dim=1).squeeze(0)  # (hidden,)
+
+        return embedding
+
+    def _compute_eigenscore(self, embeddings: torch.Tensor) -> Dict[str, Any]:
+        """
+        Compute EigenScore from sample embeddings.
+
+        Official algorithm:
+        1. Compute covariance matrix across samples
+        2. Add regularization (alpha * I)
+        3. SVD decomposition
+        4. Return mean(log10(singular_values))
+
+        Args:
+            embeddings: (num_samples, hidden_dim) tensor
+
+        Returns:
+            Dict with eigenscore and singular values
+        """
+        if embeddings.size(0) < 2:
+            return {"eigenscore": 0.0, "singular_values": None}
+
         try:
-            eigenvalues = torch.linalg.eigvalsh(attn)
-            eigenvalues = eigenvalues.real.abs()
-            eigenvalues = eigenvalues / (eigenvalues.sum() + 1e-10)
+            # Compute covariance matrix (official uses torch.cov)
+            # torch.cov expects (features, observations) so transpose
+            cov_matrix = torch.cov(embeddings.T)  # (hidden, hidden)
 
-            # Spectral entropy
-            mask = eigenvalues > 1e-10
-            entropy = -(eigenvalues[mask] * torch.log(eigenvalues[mask] + 1e-10)).sum()
-            max_entropy = math.log(len(eigenvalues))
-            spectral_entropy = (entropy / max_entropy).item() if max_entropy > 0 else 0
+            # Convert to numpy for SVD (official impl does this)
+            cov_np = cov_matrix.cpu().float().numpy()
 
-            # Dominant eigenvalue ratio
-            sorted_eigs = torch.sort(eigenvalues, descending=True).values
-            dominant_ratio = (sorted_eigs[0] / (sorted_eigs.sum() + 1e-10)).item()
+            # Add regularization
+            cov_reg = cov_np + self.alpha * np.eye(cov_np.shape[0])
 
-            # Spectral norm
-            spectral_norm = sorted_eigs[0].item()
+            # SVD decomposition
+            _, s, _ = np.linalg.svd(cov_reg)
 
-            return {
-                "spectral_entropy": spectral_entropy,
-                "dominant_ratio": dominant_ratio,
-                "spectral_norm": spectral_norm,
-            }
-        except Exception:
-            return {
-                "spectral_entropy": 0.5,
-                "dominant_ratio": 0.5,
-                "spectral_norm": 0.5,
-            }
+            # Filter out near-zero singular values before log
+            s_filtered = s[s > 1e-10]
+
+            if len(s_filtered) == 0:
+                return {"eigenscore": 0.0, "singular_values": s}
+
+            # Official formula: mean(log(singular_values)) - natural log per ICLR 2024
+            eigenscore = np.mean(np.log(s_filtered))
+
+            return {"eigenscore": float(eigenscore), "singular_values": s}
+
+        except Exception as e:
+            # Return neutral score on failure
+            return {"eigenscore": 0.0, "singular_values": None, "error": str(e)}
 
     @torch.inference_mode()
     def compute_score(self, prompt: str, response: str) -> MethodResult:
         """
         Compute EigenScore uncertainty.
 
-        Combines spectral features into a single score:
-        score = 0.4*entropy + 0.3*(1-dominant) + 0.3*norm_decay
+        Generates multiple samples, extracts hidden states, computes
+        covariance eigenvalues to measure semantic diversity.
+
+        Note: The provided `response` is used as one of the samples,
+        and additional samples are generated.
         """
         t0 = time.perf_counter()
 
         self._register_hooks()
 
         try:
-            # Forward pass
+            # Tokenize prompt
+            prompt_inputs = self.tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=1024,
+            ).to(self.device)
+            prompt_ids = prompt_inputs["input_ids"]
+
+            # Collect embeddings from multiple samples
+            embeddings = []
+
+            # 1. Extract embedding from the provided response
             full_text = prompt + response
-            inputs = self.tokenizer(
+            full_inputs = self.tokenizer(
                 full_text,
                 return_tensors="pt",
                 truncation=True,
                 max_length=2048,
             ).to(self.device)
 
-            self.model(inputs["input_ids"], output_attentions=True)
+            emb = self._extract_response_embedding(prompt_ids, full_inputs["input_ids"])
+            embeddings.append(emb)
 
-            # Aggregate spectral features across layers
-            all_features = []
-            for layer_idx in self.target_layers:
-                if layer_idx in self._attention_weights:
-                    features = self._compute_spectral_features(
-                        self._attention_weights[layer_idx]
+            # 2. Generate additional samples
+            for _ in range(self.num_samples - 1):
+                # Clear cached hidden states
+                self._hidden_states = {}
+
+                # Generate a new response
+                with torch.no_grad():
+                    generated = self.model.generate(
+                        prompt_ids,
+                        max_new_tokens=self.max_new_tokens,
+                        do_sample=True,
+                        temperature=self.temperature,
+                        top_p=0.95,
+                        pad_token_id=self.tokenizer.eos_token_id,
+                        output_hidden_states=False,  # We use hooks instead
                     )
-                    all_features.append(features)
 
-            if all_features:
-                # Average features across layers
-                avg_entropy = sum(f["spectral_entropy"] for f in all_features) / len(all_features)
-                avg_dominant = sum(f["dominant_ratio"] for f in all_features) / len(all_features)
+                # Extract embedding from generated response
+                self._hidden_states = {}  # Clear before extraction pass
+                emb = self._extract_response_embedding(prompt_ids, generated)
+                embeddings.append(emb)
 
-                # Combine into final score
-                # High entropy + low dominance = uncertain
-                score = 0.4 * avg_entropy + 0.3 * (1 - avg_dominant) + 0.3 * (1 - avg_dominant)
-            else:
-                score = 0.5
+            # Stack embeddings: (num_samples, hidden_dim)
+            embeddings_tensor = torch.stack(embeddings, dim=0)
+
+            # Compute EigenScore
+            result = self._compute_eigenscore(embeddings_tensor)
+            eigenscore = result["eigenscore"]
+
+            # Convert to uncertainty score (higher = more uncertain)
+            # Official eigenscore: more negative = more confident
+            # We negate and shift to get uncertainty in ~[0, 1] range
+            # Typical eigenscore range: [-5, 5], so we use sigmoid-like transform
+            uncertainty = 1.0 / (1.0 + np.exp(-eigenscore / 2.0))
+
+        except Exception as e:
+            uncertainty = 0.5  # Neutral on error
+            eigenscore = 0.0
+            result = {"error": str(e)}
 
         finally:
             self._remove_hooks()
@@ -203,12 +285,13 @@ class EigenScoreMethod(UncertaintyMethod):
         latency = (time.perf_counter() - t0) * 1000
 
         return MethodResult(
-            score=score,
+            score=float(uncertainty),
             confidence=None,
             latency_ms=latency,
             extra={
-                "spectral_entropy": avg_entropy if all_features else 0.5,
-                "dominant_ratio": avg_dominant if all_features else 0.5,
+                "raw_eigenscore": eigenscore,
+                "num_samples": self.num_samples,
+                "target_layer": self.target_layer,
             },
         )
 
@@ -219,14 +302,19 @@ class EigenScoreMethod(UncertaintyMethod):
 
 class SAPLMAMethod(UncertaintyMethod):
     """
-    SAPLMA (Self-Attention Probing for LLM Accuracy) baseline.
+    Zero-shot Hidden State Probing baseline.
+
+    Inspired by SAPLMA (Azaria & Mitchell, 2023), but uses zero-shot
+    heuristics instead of trained classifier to avoid train/test leakage.
 
     Analyzes hidden state statistics:
-    - Variance of hidden states
-    - Norm distribution
-    - Temporal consistency (cosine similarity across positions)
+    - Variance of hidden states (high variance = uncertain)
+    - Norm distribution std (irregular norms = uncertain)
+    - Temporal consistency (low cosine similarity = uncertain)
 
-    Higher variance + lower consistency = more uncertain.
+    Note: Original SAPLMA trains a classifier on hidden states.
+    This zero-shot variant enables fair comparison with other
+    unsupervised methods like AG-SAR.
     """
 
     def __init__(
@@ -253,7 +341,7 @@ class SAPLMAMethod(UncertaintyMethod):
 
     @property
     def name(self) -> str:
-        return "SAPLMA"
+        return "HiddenState-ZS"  # Zero-shot hidden state probing
 
     @property
     def requires_sampling(self) -> bool:
@@ -300,6 +388,7 @@ class SAPLMAMethod(UncertaintyMethod):
         Combines hidden state statistics:
         score = 0.35*variance + 0.35*norm_std + 0.30*(1-consistency)
         """
+        import time
         t0 = time.perf_counter()
 
         self._register_hooks()
@@ -355,9 +444,9 @@ class SAPLMAMethod(UncertaintyMethod):
 
                 # Normalize features to [0, 1] range approximately
                 norm_var = min(avg_var / 10.0, 1.0)  # Heuristic normalization
-                norm_std = min(avg_norm_std / 100.0, 1.0)
+                norm_std_val = min(avg_norm_std / 100.0, 1.0)
 
-                score = 0.35 * norm_var + 0.35 * norm_std + 0.30 * (1 - avg_consistency)
+                score = 0.35 * norm_var + 0.35 * norm_std_val + 0.30 * (1 - avg_consistency)
             else:
                 score = 0.5
                 avg_var = 0

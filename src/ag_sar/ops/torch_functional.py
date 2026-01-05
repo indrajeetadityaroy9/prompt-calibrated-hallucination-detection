@@ -1,21 +1,18 @@
 """
-AG-SAR v3.1 Pure PyTorch Functional Operations.
+AG-SAR v8.0 Pure PyTorch Functional Operations.
 
-Implements the mathematical kernels from the literature synthesis:
-- Paper 1 (ViT Registers): Kurtosis-based register detection
-- Paper 2 (StreamingLLM): Sink token handling
-- Paper 6 (Lookback Lens): Authority-weighted context ratio
-- Paper 9 (GSP): Spectral roughness via causal residual
+Core operations for Authority Flow hallucination detection:
+- Authority Flow: Prompt provenance tracking
+- Stability Gate: MLP divergence-based gating
+- GQA Support: Grouped Query Attention for Llama-3.1
 
 All operations are O(N) and designed for streaming inference.
 
 H100 Optimizations:
 - torch.compile decorators on hot paths for Inductor backend
 - mode="reduce-overhead" for iterative computations
-- fullgraph=True for maximum optimization
 """
 
-from dataclasses import dataclass
 from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
@@ -46,40 +43,6 @@ def _compile_if_available(mode: str = "default"):
             return torch.compile(func, mode="default", dynamic=True)
         return func
     return decorator
-
-
-@dataclass
-class EMAState:
-    """
-    State container for Welford's Online EMA Statistics.
-
-    Used for streaming Z-score normalization in the Register Filter.
-    Initialize with pre-computed constants, then adapt online.
-
-    Attributes:
-        mean: Running mean per layer (L,) or scalar
-        var: Running variance per layer (L,) or scalar
-        count: Number of updates (for warmup handling)
-    """
-    mean: torch.Tensor
-    var: torch.Tensor
-    count: int = 0
-
-    @classmethod
-    def initialize(
-        cls,
-        num_layers: int,
-        device: torch.device,
-        dtype: torch.dtype,
-        init_mean: float = 0.0,
-        init_var: float = 1.0,
-    ) -> "EMAState":
-        """Initialize EMA state with default statistics."""
-        return cls(
-            mean=torch.full((num_layers,), init_mean, device=device, dtype=dtype),
-            var=torch.full((num_layers,), init_var, device=device, dtype=dtype),
-            count=0,
-        )
 
 
 # =============================================================================
@@ -151,244 +114,6 @@ def get_gqa_config(model_config) -> Tuple[int, int, int]:
     n_kv_heads = getattr(model_config, 'num_key_value_heads', n_q_heads)
     n_rep = n_q_heads // n_kv_heads
     return n_q_heads, n_kv_heads, n_rep
-
-
-# =============================================================================
-# Register Filter (Mechanism 1)
-# =============================================================================
-
-def fisher_kurtosis(
-    x: torch.Tensor,
-    dim: int = -1,
-    epsilon: float = 1e-6,
-) -> torch.Tensor:
-    """
-    Compute Fisher Kurtosis (excess kurtosis) in O(N).
-
-    Fisher Kurtosis = E[(x-μ)^4] / σ^4 - 3
-
-    For a normal distribution, Fisher kurtosis = 0.
-    - Positive kurtosis (leptokurtic): Heavy tails, sharp peak
-    - Negative kurtosis (platykurtic): Light tails, flat peak
-
-    Used for Register Filter (Mechanism 1):
-    - Semantic tokens: High kurtosis (spiky, concentrated features)
-    - Register/Sink tokens: Low kurtosis (uniform, diffuse features)
-
-    Args:
-        x: Input tensor of any shape
-        dim: Dimension along which to compute kurtosis
-        epsilon: Numerical stability for std clamping
-
-    Returns:
-        Kurtosis values with `dim` reduced
-
-    Example:
-        >>> v = torch.randn(32, 128)  # (batch, hidden)
-        >>> kurt = fisher_kurtosis(v, dim=-1)  # (batch,)
-    """
-    mean = x.mean(dim=dim, keepdim=True)
-    std = x.std(dim=dim, keepdim=True).clamp(min=epsilon)
-
-    # Z-score normalization
-    z = (x - mean) / std
-
-    # Fourth moment minus 3 (Fisher's excess kurtosis)
-    kurt = (z ** 4).mean(dim=dim) - 3.0
-
-    return kurt
-
-
-def welford_update(
-    curr_val: torch.Tensor,
-    running_mean: torch.Tensor,
-    running_var: torch.Tensor,
-    decay: float = 0.99,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Welford's Algorithm for Online EMA Statistics.
-
-    Implements exponentially-weighted moving average/variance
-    for streaming Z-score normalization.
-
-    Update equations:
-        μ_t = (1-α)μ_{t-1} + α × x_t
-        σ²_t = (1-α)σ²_{t-1} + α × (x_t - μ_t)(x_t - μ_{t-1})
-
-    where α = 1 - decay.
-
-    Args:
-        curr_val: Current observation (any shape, must broadcast with running_*)
-        running_mean: Previous running mean
-        running_var: Previous running variance
-        decay: EMA decay factor (0.99 = 1% update from new sample)
-
-    Returns:
-        Tuple of (new_mean, new_var)
-
-    Example:
-        >>> ema = EMAState.initialize(4, device, dtype)
-        >>> new_mean, new_var = welford_update(kurt, ema.mean, ema.var, 0.99)
-    """
-    alpha = 1.0 - decay
-
-    # Update mean: μ_t = μ_{t-1} + α(x_t - μ_{t-1})
-    delta = curr_val - running_mean
-    new_mean = running_mean + alpha * delta
-
-    # Update variance: σ²_t = (1-α)σ²_{t-1} + α(x_t - μ_new)(x_t - μ_old)
-    # This is the incremental variance update (Welford's method)
-    new_var = running_var * decay + alpha * delta * (curr_val - new_mean)
-
-    return new_mean, new_var
-
-
-def compute_register_mask(
-    value_vectors: torch.Tensor,
-    ema_state: Optional[EMAState] = None,
-    kurtosis_threshold: float = 2.0,
-    sink_token_count: int = 4,
-    ema_decay: float = 0.995,
-    update_ema: bool = True,
-) -> Tuple[torch.Tensor, Optional[EMAState]]:
-    """
-    Compute Register Mask M(t) for filtering sinks and registers.
-
-    Implements the v3.1 Filter (Papers 1 & 2):
-        M(t) = (t > 4) × Sigmoid(-Z(t) + τ)
-
-    where Z(t) = (Kurt(v_t) - μ_EMA) / σ_EMA
-
-    Low-kurtosis tokens (registers/sinks) → low mask value
-    High-kurtosis tokens (semantic) → high mask value
-
-    Args:
-        value_vectors: (B, S, D) value vectors per token
-        ema_state: Previous EMA state (for online adaptation)
-        kurtosis_threshold: τ threshold for sigmoid gate
-        sink_token_count: First N tokens to mask as sinks (StreamingLLM)
-        ema_decay: Decay factor for EMA update
-        update_ema: Whether to update EMA state
-
-    Returns:
-        Tuple of:
-        - mask: (B, S) register mask in [0, 1]
-        - updated_ema_state: Updated EMA state (or None if not updating)
-
-    Example:
-        >>> mask, ema = compute_register_mask(v, ema_state, tau=2.0)
-        >>> authority = authority * mask  # Filter sinks
-    """
-    B, S, D = value_vectors.shape
-    device = value_vectors.device
-    dtype = value_vectors.dtype
-
-    # Compute kurtosis per token
-    kurt = fisher_kurtosis(value_vectors, dim=-1)  # (B, S)
-
-    # Initialize or update EMA state
-    if ema_state is None:
-        # First call: initialize with reasonable defaults from calibration
-        # Use init_var=4.0 based on empirical kurtosis variance across models
-        # This allows meaningful z-scores on first batch instead of disabling the filter
-        ema_state = EMAState(
-            mean=torch.tensor([0.0], device=device, dtype=dtype),
-            var=torch.tensor([4.0], device=device, dtype=dtype),
-            count=1,
-        )
-        # Compute z-score with initial defaults (not zeros)
-        sigma = (ema_state.var + 1e-6).sqrt()
-        z_score = (kurt - ema_state.mean) / sigma
-    else:
-        # Compute Z-score with current EMA statistics
-        sigma = (ema_state.var + 1e-6).sqrt()
-        z_score = (kurt - ema_state.mean) / sigma
-
-        # Update EMA if requested
-        if update_ema:
-            batch_mean = kurt.mean()
-            batch_var = kurt.var().clamp(min=1e-6)
-            new_mean, new_var = welford_update(
-                batch_mean, ema_state.mean, ema_state.var, ema_decay
-            )
-            ema_state = EMAState(
-                mean=new_mean,
-                var=new_var.clamp(min=1e-6),
-                count=ema_state.count + 1,
-            )
-
-    # Apply sigmoid gate: high kurtosis → high mask
-    # Using -Z so that low Z (low kurtosis) → low mask
-    mask = torch.sigmoid(-z_score + kurtosis_threshold)
-
-    # Hard-code sink tokens (positions 0..sink_token_count-1)
-    if sink_token_count > 0:
-        mask[:, :sink_token_count] = 0.0
-
-    return mask, ema_state
-
-
-@_compile_if_available(mode="reduce-overhead")
-def compute_spectral_roughness(
-    h_attn: torch.Tensor,
-    value_vectors: torch.Tensor,
-    attention_weights: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """
-    Compute Spectral Roughness using Dirichlet Energy approximation.
-
-    Implements Dirichlet Energy from Paper 9 (GSP Framework):
-        δ(t) = Σ_{j<t} A_{t,j} × ||v_t - v_j||^2
-
-    This measures how much the current token's representation differs
-    from its attended tokens - a "rough" signal on the attention graph
-    indicates inconsistency that may signal hallucination.
-
-    Unlike the naive ||h_attn - Σ A×v|| which is always ~0 for correct
-    attention, this Dirichlet formulation captures actual signal roughness.
-
-    Args:
-        h_attn: (B, S, D) attention output (unused in this formulation,
-                kept for API compatibility)
-        value_vectors: (B, S, D) value vectors per token
-        attention_weights: (B, H, S, S) or (B, S, S) attention weights
-        attention_mask: (B, S) optional padding mask
-
-    Returns:
-        roughness: (B, S) spectral roughness per token (normalized)
-
-    Example:
-        >>> delta = compute_spectral_roughness(h_attn, v, attn_weights)
-        >>> authority_penalized = authority / (1 + lambda * delta)
-    """
-    B, S, D = value_vectors.shape
-
-    # Mean-pool attention over heads if needed
-    if attention_weights.dim() == 4:
-        attn = attention_weights.mean(dim=1)  # (B, S, S)
-    else:
-        attn = attention_weights
-
-    # Compute pairwise squared distances: ||v_i - v_j||^2
-    # Efficient: ||v_i - v_j||^2 = ||v_i||^2 + ||v_j||^2 - 2 * v_i · v_j
-    v_norm_sq = (value_vectors ** 2).sum(dim=-1, keepdim=True)  # (B, S, 1)
-    v_dot = torch.bmm(value_vectors, value_vectors.transpose(-1, -2))  # (B, S, S)
-    pairwise_dist_sq = v_norm_sq + v_norm_sq.transpose(-1, -2) - 2 * v_dot  # (B, S, S)
-    pairwise_dist_sq = pairwise_dist_sq.clamp(min=0)  # Numerical stability
-
-    # Dirichlet Energy: δ(t) = Σ_j A_{t,j} × ||v_t - v_j||^2
-    # (B, S, S) * (B, S, S) -> sum over j -> (B, S)
-    roughness = (attn * pairwise_dist_sq).sum(dim=-1)  # (B, S)
-
-    # Normalize by hidden dimension for scale invariance
-    roughness = roughness / D
-
-    # Apply mask if provided
-    if attention_mask is not None:
-        roughness = roughness * attention_mask.float()
-
-    return roughness
 
 
 @_compile_if_available(mode="reduce-overhead")
@@ -599,7 +324,7 @@ def compute_authority_flow_vectorized(
     This captures the intuition that prompt attention provides grounding
     and generated-token attention decays with distance.
 
-    v4.0 Subject Anchor Enhancement (for context-free generation):
+    Subject Anchor Enhancement (for context-free generation):
         When prompt_length is small, the first N tokens serve as the "subject anchor".
         Authority is boosted for attention to these subject tokens:
         𝒜(t) ≈ Σ_{j ∈ Subject} A_{t,j} × subject_boost + Σ_{j ∈ Other} A_{t,j}
@@ -607,7 +332,7 @@ def compute_authority_flow_vectorized(
     Args:
         attention_weights: (B, H, S, S) or (B, S, S) attention weights
         prompt_length: Index where prompt ends
-        register_mask: (B, S) register mask M(t)
+        register_mask: (B, S) register mask M(t) - deprecated, ignored
         attention_mask: (B, S) padding mask
         subject_boost: Multiplier for attention to subject tokens (0.0 = disabled)
         subject_token_count: Number of tokens to treat as subject
@@ -615,7 +340,7 @@ def compute_authority_flow_vectorized(
     Returns:
         authority: (B, S) authority scores in [0, 1]
     """
-    # Mean-pool over heads if needed
+    # Mean pool over heads if needed
     if attention_weights.dim() == 4:
         B, H, S, _ = attention_weights.shape
         attn = attention_weights.mean(dim=1)  # (B, S, S)

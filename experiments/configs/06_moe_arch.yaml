@@ -1,21 +1,21 @@
-# Scaling Law Test (Figure 2)
-# Purpose: Test if 70B's sharper attention heads improve detection
-# REQUIREMENTS: 2x H100 80GB (140GB+ VRAM needed for balanced split)
+# MoE Architecture Test (Discussion)
+# Purpose: Prove AG-SAR is robust to dynamic compute paths (MoE Routing)
+# Paper Contribution: MoE architecture support demonstration
 
 experiment:
-  name: "02_scaling_law"
-  description: "AG-SAR scaling test on Llama-3.1-70B"
+  name: "06_moe_arch"
+  description: "Architecture test on Mixtral-8x7B MoE"
 
 dataset:
   name: "ALL"  # Load all 4 datasets: HaluEval QA, RAGTruth QA, HaluEval Summ, FAVA
-  num_samples: 500  # Per dataset (2000 total) - sufficient for scaling proof
+  num_samples: 500  # Per dataset (2000 total)
   seed: 42
 
 model:
-  name: "meta-llama/Llama-3.1-70B-Instruct"
+  name: "mistralai/Mixtral-8x7B-Instruct-v0.1"
   dtype: "bfloat16"
   attn_implementation: "eager"  # Required for attention weight extraction
-  device_map: "balanced"  # Splits across 2x H100
+  device_map: "balanced"  # Splits across 2x H100 (~95GB)
   trust_remote_code: true
   batch_size: 2  # Reduced to prevent OOM with eager attention
 
@@ -57,11 +57,10 @@ evaluation:
   confidence_level: 0.95
 
 output:
-  output_dir: "results/02_scaling_law"
+  output_dir: "results/06_moe_arch"
   save_predictions: true
   save_scores: true
 
 # Validation Criteria:
-# - Model loads without OOM on 2x H100
-# - AUROC comparable to 8B (expect improvement)
-# - Latency reasonable (< 10x of 8B due to multi-GPU)
+# - AUROC > 0.80 proves MoE support
+# - ECE < 0.15 proves calibration with dynamic routing

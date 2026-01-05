@@ -68,6 +68,7 @@ class BenchmarkEngine:
     - Bootstrap confidence intervals
     - Automatic method cleanup between evaluations
     - Progress tracking with tqdm
+    - Task-adaptive method factory (v9.0) for per-dataset method configuration
 
     Example:
         >>> engine = BenchmarkEngine(config, methods, datasets)
@@ -81,6 +82,7 @@ class BenchmarkEngine:
         methods: Dict[str, UncertaintyMethod],
         datasets: Dict[str, EvaluationDataset],
         resume_from: Optional[str] = None,
+        method_factory: Optional[callable] = None,
     ):
         """
         Initialize benchmark engine.
@@ -90,11 +92,14 @@ class BenchmarkEngine:
             methods: Dict of {method_name: UncertaintyMethod instance}
             datasets: Dict of {dataset_name: EvaluationDataset instance}
             resume_from: Optional path to JSONL file to resume from (Phase 5.3)
+            method_factory: Optional callable(dataset_name) -> Dict[str, UncertaintyMethod]
+                            If provided, creates fresh methods per-dataset for task-adaptive mode.
         """
         self.config = config
         self.methods = methods
         self.datasets = datasets
         self.resume_from = resume_from
+        self.method_factory = method_factory
 
         self.metrics_calc = MetricsCalculator(
             bootstrap_samples=config.evaluation.bootstrap_samples,
@@ -152,7 +157,13 @@ class BenchmarkEngine:
         for dataset_name, dataset in self.datasets.items():
             self._print_dataset_header(dataset_name, dataset)
 
-            for method_name, method in self.methods.items():
+            # Task-adaptive mode (v9.0): Create fresh methods per-dataset
+            if self.method_factory is not None:
+                current_methods = self.method_factory(dataset_name)
+            else:
+                current_methods = self.methods
+
+            for method_name, method in current_methods.items():
                 print(f"\n  [{method_name}] Running...")
 
                 try:
@@ -288,13 +299,12 @@ class BenchmarkEngine:
 
     def _print_result(self, result: BenchmarkResult) -> None:
         """Print formatted result for one method."""
-        auroc = result.metrics.get("auroc", 0)
-        auroc_ci = result.ci_bounds.get("auroc", (0, 0))
-        auprc = result.metrics.get("auprc", 0)
-        auprc_ci = result.ci_bounds.get("auprc", (0, 0))
-
-        print(f"    AUROC: {auroc:.4f} [{auroc_ci[0]:.4f}, {auroc_ci[1]:.4f}]")
-        print(f"    AUPRC: {auprc:.4f} [{auprc_ci[0]:.4f}, {auprc_ci[1]:.4f}]")
+        # Only print metrics that were actually computed (in config)
+        for metric_name in self.config.evaluation.metrics:
+            if metric_name in result.metrics:
+                val = result.metrics[metric_name]
+                ci = result.ci_bounds.get(metric_name, (0, 0))
+                print(f"    {metric_name.upper()}: {val:.4f} [{ci[0]:.4f}, {ci[1]:.4f}]")
         print(f"    Mean Latency: {result.mean_latency_ms:.1f} ms")
 
     def _create_final_summary(self) -> Dict:
@@ -318,21 +328,27 @@ class BenchmarkEngine:
         if not self.results:
             return "No results yet."
 
+        # Build header dynamically based on configured metrics
+        configured_metrics = self.config.evaluation.metrics
+        header_parts = [f"{'Method':<20}", f"{'Dataset':<20}"]
+        for metric in configured_metrics:
+            header_parts.append(f"{metric.upper():<24}")
+        header_parts.append(f"{'Latency (ms)':<12}")
+
         lines = []
-        lines.append(f"{'Method':<20} {'Dataset':<25} {'AUROC':<20} {'AUPRC':<20} {'Latency (ms)':<12}")
-        lines.append("-" * 100)
+        lines.append(" ".join(header_parts))
+        lines.append("-" * (45 + 24 * len(configured_metrics)))
 
         for r in self.results:
-            auroc = r.metrics.get("auroc", 0)
-            auroc_ci = r.ci_bounds.get("auroc", (0, 0))
-            auprc = r.metrics.get("auprc", 0)
-            auprc_ci = r.ci_bounds.get("auprc", (0, 0))
+            row_parts = [f"{r.method_name:<20}", f"{r.dataset_name:<20}"]
 
-            auroc_str = f"{auroc:.4f} [{auroc_ci[0]:.3f}, {auroc_ci[1]:.3f}]"
-            auprc_str = f"{auprc:.4f} [{auprc_ci[0]:.3f}, {auprc_ci[1]:.3f}]"
+            for metric in configured_metrics:
+                val = r.metrics.get(metric, 0)
+                ci = r.ci_bounds.get(metric, (0, 0))
+                metric_str = f"{val:.4f} [{ci[0]:.3f}, {ci[1]:.3f}]"
+                row_parts.append(f"{metric_str:<24}")
 
-            lines.append(
-                f"{r.method_name:<20} {r.dataset_name:<25} {auroc_str:<20} {auprc_str:<20} {r.mean_latency_ms:<12.1f}"
-            )
+            row_parts.append(f"{r.mean_latency_ms:<12.1f}")
+            lines.append(" ".join(row_parts))
 
         return "\n".join(lines)

@@ -7,7 +7,6 @@
 #   02: Figure 2 - Scaling to Llama-3.1-70B
 #   03: Table 2 - RAGTruth generalization
 #   04: Discussion - MoE robustness (Mixtral)
-#   05: Table 3 - Ablation study
 #
 # Prerequisites:
 #   pip install -e ".[all]"
@@ -135,13 +134,13 @@ main() {
                 dry_run="true"
                 shift
                 ;;
-            0[0-5]*)
+            0[0-4]*)
                 experiments+=("$1")
                 shift
                 ;;
             *)
                 print_error "Unknown argument: $1"
-                echo "Usage: $0 [--dry-run] [00] [01] [02] [03] [04] [05]"
+                echo "Usage: $0 [--dry-run] [00] [01] [02] [03] [04]"
                 exit 1
                 ;;
         esac
@@ -155,7 +154,6 @@ main() {
             "02_scaling_law"
             "03_generalization"
             "04_moe_robustness"
-            "05_mechanism_ablation"
         )
     else
         # Expand short names
@@ -167,7 +165,6 @@ main() {
                 02) expanded+=("02_scaling_law") ;;
                 03) expanded+=("03_generalization") ;;
                 04) expanded+=("04_moe_robustness") ;;
-                05) expanded+=("05_mechanism_ablation") ;;
                 *) expanded+=("$exp") ;;
             esac
         done

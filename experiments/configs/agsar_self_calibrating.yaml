@@ -1,0 +1,71 @@
+# AG-SAR v10.0 Self-Calibrating Evaluation
+# All calibration parameters derived mathematically from internal model signals
+# No hardcoded task-specific presets - true zero-shot universal detection
+
+experiment:
+  name: "agsar_self_calibrating"
+  description: "AG-SAR v10.0 with self-calibrating parameters (SC-AGSAR)"
+
+dataset:
+  name: "ALL"  # Load all 4 datasets: HaluEval QA, RAGTruth QA, HaluEval Summ, FAVA
+  num_samples: 1000  # Per dataset (4000 total)
+  seed: 42
+
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  attn_implementation: "eager"  # Required for attention weight extraction
+  dtype: "bfloat16"
+  device_map: "cuda:0"
+  trust_remote_code: true
+
+methods:
+  agsar:
+    # Core AG-SAR parameters (unchanged)
+    semantic_layers: 4
+    power_iteration_steps: 3
+    residual_weight: 0.5
+    # Unified Gating (base values, may be overridden by SC)
+    enable_unified_gating: true
+    stability_sensitivity: 1.0
+    parametric_weight: 0.5
+    # Semantic Dispersion (base values, k is adaptive in SC mode)
+    enable_semantic_dispersion: true
+    dispersion_k: 5
+    dispersion_sensitivity: 1.0
+    # Base aggregation/temperature (overridden per-sample by SC)
+    aggregation_method: "mean"
+    calibration_temperature: 1.0
+    # v9.0 Task-Adaptive: DISABLED (using v10.0 SC instead)
+    enable_task_adaptive: false
+    # v10.0 Self-Calibrating: ENABLED
+    enable_self_calibration: true
+    sc_k_min: 3       # Minimum dispersion k (focused attention)
+    sc_k_max: 15      # Maximum dispersion k (diffuse attention)
+    sc_warmup_samples: 10    # Warmup before using adaptive params
+    sc_aggregation_gamma: 2.0  # Sensitivity for variance-adaptive aggregation
+  # Baselines disabled
+  logprob: false
+  entropy: false
+  llmcheck_attn: false
+  llmcheck_hidden: false
+
+evaluation:
+  confidence_threshold: 0.7
+  metrics:
+    # Full metric suite
+    - auroc
+    - auprc
+    - f1
+    - tpr_at_5fpr
+    - ece
+    - brier
+    - aurc
+    - risk_90
+    - spearman
+  bootstrap_samples: 1000
+  confidence_level: 0.95
+
+output:
+  output_dir: "results/agsar_self_calibrating"
+  save_predictions: true
+  save_scores: true

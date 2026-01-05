@@ -1,20 +1,19 @@
-# RAGTruth Generalization - Tuned Configuration
-# Based on user specification: Disabled Register Filter and MLP Divergence
-# These mechanisms over-mask on Llama-3 and struggle with natural hallucinations
+# RAGTruth Generalization - v8.5 Configuration
+# Clean configuration with obsolete parameters removed
 
 experiment:
   name: "03_generalization_tuned"
-  description: "RAGTruth with disabled Register Filter and MLP Divergence"
+  description: "RAGTruth with v8.5 unified gating and semantic dispersion"
 
 dataset:
   name: "ragtruth"
-  num_samples: 1000
+  num_samples: 100
   seed: 42
   task_type: "QA"
 
 model:
   name: "meta-llama/Llama-3.1-8B-Instruct"
-  attn_implementation: "sdpa"  # Scaled Dot Product Attention (required for weight capture)
+  attn_implementation: "eager"  # Scaled Dot Product Attention (required for weight capture)
   dtype: "bfloat16"
   device_map: "cuda:0"
   trust_remote_code: true
@@ -25,14 +24,6 @@ methods:
     semantic_layers: 4
     power_iteration_steps: 3
     residual_weight: 0.5
-    # Register Filter - DISABLED (over-masks on Llama-3)
-    enable_register_filter: false
-    kurtosis_threshold: 2.0
-    ema_decay: 0.995
-    sink_token_count: 4
-    # Authority Flow - enabled with full recharge
-    enable_spectral_roughness: false  # DISABLED (MLP Divergence weak on natural errors)
-    lambda_roughness: 10.0
     # Unified Gating - enabled
     enable_unified_gating: true
     stability_sensitivity: 1.0
@@ -41,6 +32,9 @@ methods:
     enable_semantic_dispersion: true
     dispersion_k: 5
     dispersion_sensitivity: 1.0
+    # v8.5 Features - disabled (did not improve RAGTruth performance)
+    head_focus_k: 0  # 0 = use all heads
+    enable_surprisal_weighting: false
   logprob: true
   entropy: true
 

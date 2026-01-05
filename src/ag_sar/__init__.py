@@ -37,7 +37,6 @@ from .modeling import ModelAdapter, AttentionCapture
 from .measures import (
     # Authority (core)
     compute_authority_score,
-    compute_register_mask,
     compute_mlp_divergence,
     compute_gated_authority,
     compute_semantic_authority,
@@ -50,12 +49,10 @@ from .measures import (
 
 # Operations (for custom pipelines)
 from .ops import (
-    EMAState,
-    fisher_kurtosis,
-    welford_update,
     compute_authority_flow,
     compute_authority_flow_vectorized,
-    compute_spectral_roughness,
+    compute_mlp_divergence as compute_mlp_divergence_op,
+    compute_stability_gate,
     align_gqa_heads,
     _TRITON_AVAILABLE,
 )
@@ -84,7 +81,6 @@ __all__ = [
     "AttentionCapture",
     # Measures - Authority
     "compute_authority_score",
-    "compute_register_mask",
     "compute_mlp_divergence",
     "compute_gated_authority",
     "compute_semantic_authority",
@@ -94,12 +90,9 @@ __all__ = [
     "compute_semantic_dispersion",
     "compute_semantic_trust",
     # Operations
-    "EMAState",
-    "fisher_kurtosis",
-    "welford_update",
     "compute_authority_flow",
     "compute_authority_flow_vectorized",
-    "compute_spectral_roughness",
+    "compute_stability_gate",
     "align_gqa_heads",
     "_TRITON_AVAILABLE",
     # Utilities - H100 Optimization
