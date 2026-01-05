@@ -1,0 +1,63 @@
+# HaluEval SOTA - Tuned Configuration
+# Testing if the RAGTruth-tuned settings maintain performance on synthetic hallucinations
+# Disabled Register Filter and MLP Divergence (same as 03_generalization_tuned.yaml)
+
+experiment:
+  name: "01_main_sota_tuned"
+  description: "HaluEval with disabled Register Filter and MLP Divergence"
+
+dataset:
+  name: "halueval_qa"
+  num_samples: 2500  # Results in ~5000 samples after pairing
+  seed: 42
+
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  attn_implementation: "sdpa"  # Scaled Dot Product Attention (required for weight capture)
+  dtype: "bfloat16"
+  device_map: "cuda:0"
+  trust_remote_code: true
+
+methods:
+  agsar:
+    # Core AG-SAR
+    semantic_layers: 4
+    power_iteration_steps: 3
+    residual_weight: 0.5
+    # Register Filter - DISABLED (over-masks on Llama-3)
+    enable_register_filter: false
+    kurtosis_threshold: 2.0
+    ema_decay: 0.995
+    sink_token_count: 4
+    # Authority Flow - enabled with full recharge
+    enable_spectral_roughness: false  # DISABLED (MLP Divergence weak on natural errors)
+    lambda_roughness: 10.0
+    # Unified Gating - enabled
+    enable_unified_gating: true
+    stability_sensitivity: 1.0
+    parametric_weight: 0.5
+    # Semantic Dispersion - enabled
+    enable_semantic_dispersion: true
+    dispersion_k: 5
+    dispersion_sensitivity: 1.0
+  logprob: true
+  entropy: true
+
+evaluation:
+  confidence_threshold: 0.7
+  metrics:
+    - auroc
+    - auprc
+    - f1
+    - precision
+    - recall
+    - accuracy
+    - ece
+    - brier
+  bootstrap_samples: 1000
+  confidence_level: 0.95
+
+output:
+  output_dir: "results/01_main_sota_tuned"
+  save_predictions: true
+  save_scores: true
