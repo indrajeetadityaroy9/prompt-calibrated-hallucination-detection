@@ -1,0 +1,25 @@
+# Summarization preset (JEPA-Enhanced)
+# Uses centroid variance for synonym-robust uncertainty
+#
+# Characteristics:
+# - Longer outputs with more variation in token authority
+# - Attention spreads across document (higher dispersion_k needed)
+# - Higher temperature softens overconfident predictions
+# - JEPA-style dispersion tolerates valid paraphrases (Great vs Excellent)
+
+aggregation_method: percentile_25
+calibration_temperature: 2.5
+dispersion_k: 10
+dispersion_sensitivity: 0.8
+
+# CRITICAL CONSTRAINT: parametric_weight MUST be < threshold (default 0.7)
+# This is the "Antonym Safety Valve":
+#   - When model ignores context (Gate~0), fallback = (1-Gate) * Trust * parametric_weight
+#   - Even with Trust=1.0 (confident antonym), max score = 0.6 < 0.7 threshold
+#   - This ensures context-detached hallucinations FAIL regardless of semantic stability
+parametric_weight: 0.6
+
+# JEPA mode for synonym robustness
+# "top1_projection" measures distance from top-1 (good for QA/factual)
+# "centroid_variance" measures spread around centroid (good for paraphrases)
+dispersion_method: centroid_variance

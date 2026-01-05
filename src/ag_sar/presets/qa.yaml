@@ -1,0 +1,19 @@
+# Question Answering preset
+# Focused attention, conservative aggregation for safety
+#
+# Characteristics:
+# - Short, focused responses expected
+# - Higher penalty for confident-but-wrong answers
+# - Conservative aggregation (percentile_10) catches worst-case tokens
+# - Top-1 projection for factual precision (1990 vs 1991 are distinct)
+
+aggregation_method: percentile_10
+calibration_temperature: 1.2
+dispersion_k: 5
+dispersion_sensitivity: 1.0
+parametric_weight: 0.4
+
+# Keep top1_projection for factual precision
+# This measures distance from top-1 prediction, which catches
+# factually distinct but semantically similar tokens (e.g., dates, numbers)
+dispersion_method: top1_projection

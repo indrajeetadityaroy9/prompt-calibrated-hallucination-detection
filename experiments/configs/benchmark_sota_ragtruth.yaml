@@ -1,0 +1,100 @@
+# SOTA Benchmark: Nucleus Variance + Importance Weighting
+# Dataset: RAGTruth (Real RAG Failures)
+#
+# This benchmark compares three configurations:
+# - GPU 0: JEPA (centroid_variance + percentile_25) - Previous best
+# - GPU 1: SOTA (nucleus_variance + importance_weighted) - New upgrades
+#
+# SOTA Upgrades:
+# 1. Nucleus Variance (Top-P): Dynamic cluster size adapts to token confidence
+#    - Confident tokens: Small cluster → Variance = 0
+#    - Uncertain tokens: Large cluster → High variance if semantically diverse
+#
+# 2. Importance Weighting: Self-information weighting for aggregation
+#    - Errors on rare tokens (names, dates) count 5x more
+#    - Aligns uncertainty with human judgment of severity
+#
+# Target: >80% AUROC (current: 76.5%)
+#
+# Usage: python scripts/launch_ragtruth_h2h.py --config experiments/configs/benchmark_sota_ragtruth.yaml
+
+experiment:
+  name: "SOTA_RAGTruth"
+  description: "SOTA upgrades on RAGTruth: Nucleus Variance + Importance Weighting"
+
+output:
+  output_dir: "results/ragtruth_sota"
+  save_predictions: true
+  save_scores: true
+
+# Model configuration
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  dtype: "bfloat16"
+  attn_implementation: "eager"  # Required for AG-SAR hooks
+  trust_remote_code: true
+  batch_size: 1
+
+# Dataset configuration
+dataset:
+  name: "ragtruth"
+  data_file: "data/ragtruth_clean.jsonl"
+  task_type: "all"
+  num_samples: null
+  seed: 42
+
+# Evaluation configuration
+evaluation:
+  confidence_threshold: 0.7
+  metrics:
+    - auroc
+    - auprc
+    - f1
+    - tpr_at_5fpr
+    - aurc
+    - ece
+    - brier
+  bootstrap_samples: 1000
+  confidence_level: 0.95
+
+# Method configurations for parallel execution
+parallel_methods:
+  # GPU 0: JEPA (Previous Best - Centroid Variance + Percentile 25)
+  - name: "JEPA_Centroid"
+    gpu_id: 0
+    agsar:
+      semantic_layers: 4
+      power_iteration_steps: 3
+      residual_weight: 0.5
+      enable_unified_gating: true
+      stability_sensitivity: 1.0
+      enable_semantic_dispersion: true
+      dispersion_k: 10
+      dispersion_sensitivity: 0.8
+      dispersion_method: "centroid_variance"
+      aggregation_method: "percentile_25"
+      parametric_weight: 0.6
+      enable_task_adaptive: false
+      calibration_temperature: 2.5
+
+  # GPU 1: SOTA (Nucleus Variance + Importance Weighting)
+  - name: "SOTA_Nucleus_ImpWeight"
+    gpu_id: 1
+    agsar:
+      semantic_layers: 4
+      power_iteration_steps: 3
+      residual_weight: 0.5
+      enable_unified_gating: true
+      stability_sensitivity: 1.0
+      enable_semantic_dispersion: true
+      # SOTA Upgrade 1: Nucleus Variance (Top-P)
+      # Adapts cluster size to token confidence
+      dispersion_method: "nucleus_variance"
+      nucleus_top_p: 0.95
+      dispersion_sensitivity: 0.8
+      # SOTA Upgrade 2: Importance Weighting
+      # Weights by self-information (-log p)
+      aggregation_method: "importance_weighted"
+      parametric_weight: 0.6
+      enable_task_adaptive: false
+      calibration_temperature: 2.5

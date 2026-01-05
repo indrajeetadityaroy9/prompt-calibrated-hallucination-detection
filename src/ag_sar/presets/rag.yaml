@@ -1,0 +1,13 @@
+# Retrieval-Augmented Generation preset
+# Trust retrieved context more, lower parametric weight
+#
+# Characteristics:
+# - Context is typically high-quality (retrieved from trusted sources)
+# - Model should follow context closely, not rely on parametric knowledge
+# - Lower parametric_weight = trust attention-based authority more
+
+aggregation_method: mean
+calibration_temperature: 1.5
+dispersion_k: 7
+dispersion_sensitivity: 1.2
+parametric_weight: 0.3

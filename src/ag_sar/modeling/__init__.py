@@ -11,5 +11,13 @@ H100 Optimizations:
 """
 
 from .hooks import ModelAdapter, AttentionCapture, load_model_h100
+from .predictor import JepaPredictor
+from .online_predictor import OnlineJepaPredictor
 
-__all__ = ["ModelAdapter", "AttentionCapture", "load_model_h100"]
+__all__ = [
+    "ModelAdapter",
+    "AttentionCapture",
+    "load_model_h100",
+    "JepaPredictor",
+    "OnlineJepaPredictor",
+]

@@ -1,0 +1,87 @@
+# Head-to-Head Benchmark: Top-1 Projection vs JEPA Centroid Variance
+# Dataset: HaluEval Summarization
+#
+# This config runs two AG-SAR variants in parallel:
+# - GPU 0: Baseline (top1_projection) - Legacy token matching
+# - GPU 1: JEPA (centroid_variance) - Semantic stability
+#
+# Usage: python scripts/launch_halueval_h2h.py
+
+experiment:
+  name: "H2H_HaluEval_Summarization"
+  description: "Head-to-head comparison of dispersion methods on HaluEval Summarization"
+
+output:
+  output_dir: "results/halueval_h2h"
+  save_predictions: true
+  save_scores: true
+
+# Model configuration (device_map overridden per GPU by launcher)
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  dtype: "bfloat16"
+  # NOTE: AG-SAR requires "eager" attention for hook-based weight extraction
+  attn_implementation: "eager"
+  trust_remote_code: true
+  batch_size: 1
+
+# Dataset configuration
+dataset:
+  name: "halueval_summarization"
+  # 500 rows -> 1000 samples (500 Faithful + 500 Hallucinated)
+  num_samples: 1000
+  seed: 42
+
+# Evaluation configuration
+evaluation:
+  confidence_threshold: 0.7
+  metrics:
+    - auroc
+    - auprc
+    - f1
+    - tpr_at_5fpr
+    - aurc
+    - ece
+    - brier
+  bootstrap_samples: 1000
+  confidence_level: 0.95
+
+# Method configurations for parallel execution
+# Each method runs on a separate GPU
+parallel_methods:
+  # GPU 0: Baseline (Legacy Token Matching)
+  - name: "Baseline_v8_Top1"
+    gpu_id: 0
+    agsar:
+      semantic_layers: 4
+      power_iteration_steps: 3
+      residual_weight: 0.5
+      enable_unified_gating: true
+      stability_sensitivity: 1.0
+      enable_semantic_dispersion: true
+      dispersion_k: 10
+      dispersion_sensitivity: 0.8
+      dispersion_method: "top1_projection"
+      aggregation_method: "percentile_25"
+      parametric_weight: 0.6
+      # Task-adaptive disabled for controlled comparison
+      enable_task_adaptive: false
+      calibration_temperature: 2.5
+
+  # GPU 1: JEPA (Centroid Variance)
+  - name: "JEPA_Centroid"
+    gpu_id: 1
+    agsar:
+      semantic_layers: 4
+      power_iteration_steps: 3
+      residual_weight: 0.5
+      enable_unified_gating: true
+      stability_sensitivity: 1.0
+      enable_semantic_dispersion: true
+      dispersion_k: 10
+      dispersion_sensitivity: 0.8
+      dispersion_method: "centroid_variance"
+      aggregation_method: "percentile_25"
+      parametric_weight: 0.6
+      enable_task_adaptive: false
+      calibration_temperature: 2.5

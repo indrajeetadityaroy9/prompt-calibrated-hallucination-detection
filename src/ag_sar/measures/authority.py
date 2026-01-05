@@ -196,6 +196,14 @@ def compute_semantic_authority(
     parametric_weight: float = 0.5,
     dispersion_k: int = 5,
     dispersion_sensitivity: float = 5.0,
+    dispersion_method: str = "top1_projection",
+    nucleus_top_p: float = 0.95,
+    # Intrinsic Detection (v12.0)
+    intrinsic_trust: Optional[torch.Tensor] = None,
+    # Gate Sharpening (v12.1 - Fixes Gate Leak)
+    enable_gate_sharpening: bool = False,
+    gate_sharpen_low: float = 0.2,
+    gate_sharpen_high: float = 0.8,
 ) -> torch.Tensor:
     """
     Semantic Dispersion Authority (Consistency over Confidence).
@@ -210,10 +218,23 @@ def compute_semantic_authority(
     - Flow(t) = Authority Flow (prompt provenance tracking)
     - Trust(t) = 1 - Dispersion(t) × dispersion_sensitivity (semantic consistency)
 
+    v12.0 Dynamic Blending (when intrinsic_trust is provided):
+        trust_combined = Gate × JEPA_trust + (1-Gate) × intrinsic_trust
+        A(t) = Gate(t) × Flow(t) + (1 - Gate(t)) × trust_combined × parametric_weight
+
+    This enables:
+    - High Gate (good RAG) → mostly JEPA trust (safe for novel data)
+    - Low Gate (hallucination) → mostly intrinsic trust (catches lies)
+
     Key Insight:
     - Raw Confidence: "I am 99% sure it's 'Paris'" (could be a confident lie)
     - High Dispersion: "Top-5 are 'Paris', 'London', 'Rome'" (semantically confused = hallucination)
     - Low Dispersion: "Top-5 are 'US', 'USA', 'America'" (synonyms = grounded)
+
+    Dispersion Methods:
+    - "top1_projection": Distance from top-1 (best for QA/factual)
+    - "centroid_variance": JEPA-style spread around centroid (Top-K)
+    - "nucleus_variance": SOTA adaptive Top-P clustering (dynamic k)
 
     Args:
         attention_weights: (B, H, S, S) or (B, S, S) attention weights
@@ -227,6 +248,12 @@ def compute_semantic_authority(
         parametric_weight: Weight for trust when ignoring context (default 0.5)
         dispersion_k: Number of top tokens for dispersion (default 5)
         dispersion_sensitivity: Scale factor for dispersion penalty (default 5.0)
+        dispersion_method: "top1_projection", "centroid_variance", or "nucleus_variance"
+        nucleus_top_p: Cumulative probability threshold for nucleus_variance (default 0.95)
+        intrinsic_trust: Optional (B, S) intrinsic trust from Truth Vector (v12.0)
+        enable_gate_sharpening: Force gate to extremes (0 or 1) to prevent signal pollution
+        gate_sharpen_low: Below this threshold, force gate to 0.0 (default 0.2)
+        gate_sharpen_high: Above this threshold, force gate to 1.0 (default 0.8)
 
     Returns:
         authority: (B, S) semantic authority scores in [0, 1]
@@ -242,22 +269,45 @@ def compute_semantic_authority(
     # 2. Compute Stability Gate (Conductivity)
     gate = compute_stability_gate(h_attn, h_block, stability_sensitivity)
 
-    # 3. Compute Semantic Trust (replaces raw confidence)
+    # 2.5 Gate Sharpening (v12.1 - Fixes Gate Leak)
+    # Problem: On no-context scenarios (TruthfulQA), gate ~0.5 allows JEPA noise
+    # to pollute the Truth Vector signal. Solution: binarize the gate.
+    # - Gate < low_thresh → 0.0 (pure intrinsic trust)
+    # - Gate > high_thresh → 1.0 (pure JEPA trust)
+    if enable_gate_sharpening:
+        gate = torch.where(gate < gate_sharpen_low, torch.zeros_like(gate), gate)
+        gate = torch.where(gate > gate_sharpen_high, torch.ones_like(gate), gate)
+
+    # 3. Compute Semantic Trust (JEPA trust from dispersion)
     # Trust = 1 - (Dispersion × sensitivity)
     # High dispersion (confused between unrelated tokens) = Low trust
     # Low dispersion (alternatives are synonyms) = High trust
-    trust = compute_semantic_trust(
-        logits, embed_matrix, k=dispersion_k, sensitivity=dispersion_sensitivity
+    jepa_trust = compute_semantic_trust(
+        logits, embed_matrix, k=dispersion_k, sensitivity=dispersion_sensitivity,
+        method=dispersion_method, top_p=nucleus_top_p
     )
 
-    # 4. Master Equation: Gated interpolation with semantic trust
+    # 3.5 Dynamic Blending with Intrinsic Trust (v12.0)
+    # If intrinsic trust is provided, blend with JEPA trust using Gate
+    # trust_combined = Gate × JEPA_trust + (1-Gate) × intrinsic_trust
+    #
+    # Scenarios:
+    # - Good RAG (Gate=0.95): trust ≈ JEPA_trust (safe for novel data)
+    # - Hallucination (Gate=0.10): trust ≈ intrinsic_trust (catches lies)
+    if intrinsic_trust is not None:
+        blend_alpha = gate.clamp(0.0, 1.0)
+        trust = blend_alpha * jepa_trust + (1.0 - blend_alpha) * intrinsic_trust
+    else:
+        trust = jepa_trust
+
+    # 4. Master Equation: Gated interpolation with (possibly blended) trust
     # A(t) = Gate(t) × Flow(t) + (1 - Gate(t)) × Trust(t) × weight
     #
     # When Gate ≈ 1 (RAG, context-driven):
     #   A(t) ≈ Flow(t) → Trust authority flow from context
     #
     # When Gate ≈ 0 (Free Gen, parametric-driven):
-    #   A(t) ≈ Trust(t) × weight → Trust semantic consistency
+    #   A(t) ≈ Trust(t) × weight → Trust (blended) semantic consistency
     authority = gate * flow + (1.0 - gate) * trust * parametric_weight
 
     # Apply attention mask

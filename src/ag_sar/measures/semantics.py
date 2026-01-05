@@ -21,18 +21,17 @@ import torch.nn.functional as F
 from typing import Optional
 
 
-def compute_semantic_dispersion(
+def compute_top1_projection(
     logits: torch.Tensor,
     embed_matrix: torch.Tensor,
     k: int = 5,
     temperature: float = 1.0,
 ) -> torch.Tensor:
     """
-    Compute Semantic Dispersion of Top-K predictions.
+    Top-1 Projection Semantic Dispersion (Legacy/QA).
 
-    Measures how semantically diverse the model's top predictions are.
-    High dispersion = model is "confused" between unrelated options = risky.
-    Low dispersion = model's alternatives are synonyms = grounded.
+    Measures distance from the top-1 prediction to alternatives.
+    Best for factual QA where "1990" vs "1991" should be distinguished.
 
     Algorithm:
     1. Identify Top-K candidate tokens by probability
@@ -111,11 +110,230 @@ def compute_semantic_dispersion(
     return dispersion
 
 
+def compute_centroid_variance(
+    logits: torch.Tensor,
+    embed_matrix: torch.Tensor,
+    k: int = 10,
+    temperature: float = 1.0,
+) -> torch.Tensor:
+    """
+    JEPA-Style Latent Variance (Summarization).
+
+    Measures geometric spread of top-k predictions around their weighted centroid.
+    Robust to synonyms (e.g., "huge" vs "giant" cluster tightly → low variance).
+
+    WARNING: Antonyms also cluster tightly in embedding space. This method
+    should be combined with Authority Flow for factual verification.
+    The "Antonym Safety Valve" relies on parametric_weight < threshold.
+
+    Args:
+        logits: (B, S, V) or (B, V) model output logits
+        embed_matrix: (V, D) output embedding matrix
+        k: Top-k tokens to consider (default 10 for broader semantic capture)
+        temperature: Softmax temperature
+
+    Returns:
+        variance: (B, S) or (B,) in [0, 1] where 0=tight cluster, 1=dispersed
+    """
+    original_shape = logits.shape
+
+    # Handle 3D input
+    if logits.dim() == 3:
+        B, S, V = logits.shape
+        logits_flat = logits.view(B * S, V)
+    else:
+        B = logits.shape[0]
+        S = 1
+        logits_flat = logits
+
+    # 1. Get probability distribution
+    probs = F.softmax(logits_flat / temperature, dim=-1)
+    top_probs, top_ids = torch.topk(probs, k=k, dim=-1)
+
+    # Normalize to sum to 1 within top-k
+    top_probs_norm = top_probs / (top_probs.sum(dim=-1, keepdim=True) + 1e-10)
+
+    # 2. Retrieve embeddings [N, K, D]
+    top_embeds = F.embedding(top_ids, embed_matrix)
+
+    # 3. Compute weighted centroid (the "mean meaning")
+    # Shape: [N, 1, D]
+    centroid = (top_embeds * top_probs_norm.unsqueeze(-1)).sum(dim=1, keepdim=True)
+
+    # 4. Compute angular distance from centroid
+    # CRITICAL: Normalize centroid to prevent norm-collapse issues
+    top_embeds_n = F.normalize(top_embeds, p=2, dim=-1)
+    centroid_n = F.normalize(centroid, p=2, dim=-1)
+
+    # Cosine similarity: [N, K]
+    cosine_sims = (top_embeds_n * centroid_n).sum(dim=-1)
+
+    # Distance = 1 - Similarity
+    distances = 1.0 - cosine_sims
+
+    # 5. Weighted variance (expected distance to centroid)
+    variance = (distances * top_probs_norm).sum(dim=-1)
+    variance = variance.clamp(0.0, 1.0)
+
+    # Reshape back
+    if len(original_shape) == 3:
+        variance = variance.view(B, S)
+
+    return variance
+
+
+def compute_nucleus_centroid_variance(
+    logits: torch.Tensor,
+    embed_matrix: torch.Tensor,
+    top_p: float = 0.95,
+    temperature: float = 1.0,
+    min_k: int = 1,
+    max_k: int = 50,
+) -> torch.Tensor:
+    """
+    SOTA Nucleus (Top-P) Centroid Variance.
+
+    Dynamic Semantic Receptive Field: Instead of fixed Top-K, uses the smallest
+    set of tokens whose cumulative probability exceeds top_p.
+
+    Key Insight:
+    - Confident token ("Paris"): Nucleus might include only 1 token → Variance = 0
+    - Confused token ("1984/1985"): Nucleus includes many → High variance if diverse
+
+    This adapts the cluster size to the model's confidence, avoiding:
+    - Signal dilution on confident tokens (fixed k=10 captures irrelevant tokens)
+    - Signal truncation on uncertain tokens (fixed k=10 misses important alternatives)
+
+    Args:
+        logits: (B, S, V) or (B, V) model output logits
+        embed_matrix: (V, D) output embedding matrix
+        top_p: Cumulative probability threshold (default 0.95)
+        temperature: Softmax temperature
+        min_k: Minimum tokens in nucleus (default 1)
+        max_k: Maximum tokens to consider (default 50, for efficiency)
+
+    Returns:
+        variance: (B, S) or (B,) in [0, 1] where 0=tight cluster, 1=dispersed
+    """
+    original_shape = logits.shape
+
+    # Handle 3D input
+    if logits.dim() == 3:
+        B, S, V = logits.shape
+        logits_flat = logits.view(B * S, V)
+    else:
+        B = logits.shape[0]
+        S = 1
+        logits_flat = logits
+
+    N = logits_flat.size(0)
+    device = logits_flat.device
+    dtype = logits_flat.dtype
+
+    # 1. Get probability distribution
+    probs = F.softmax(logits_flat / temperature, dim=-1)
+
+    # 2. Sort probabilities descending
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+
+    # 3. Compute cumulative probabilities
+    cumsum_probs = torch.cumsum(sorted_probs, dim=-1)
+
+    # 4. Create nucleus mask: tokens within top_p (always keep at least min_k)
+    # Shift cumsum to include the token that crosses threshold
+    cumsum_shifted = torch.cat([
+        torch.zeros(N, 1, device=device, dtype=dtype),
+        cumsum_probs[:, :-1]
+    ], dim=1)
+    nucleus_mask = cumsum_shifted < top_p
+
+    # Enforce min_k and max_k
+    nucleus_mask[:, :min_k] = True
+    nucleus_mask[:, max_k:] = False
+
+    # 5. Limit to max_k tokens for efficiency
+    sorted_probs = sorted_probs[:, :max_k]
+    sorted_indices = sorted_indices[:, :max_k]
+    nucleus_mask = nucleus_mask[:, :max_k]
+
+    # 6. Get embeddings for nucleus tokens
+    top_embeds = F.embedding(sorted_indices, embed_matrix)  # [N, max_k, D]
+
+    # 7. Apply mask to probabilities (zero out non-nucleus tokens)
+    masked_probs = sorted_probs * nucleus_mask.float()
+
+    # Re-normalize within nucleus
+    masked_probs_sum = masked_probs.sum(dim=-1, keepdim=True) + 1e-10
+    masked_probs_norm = masked_probs / masked_probs_sum
+
+    # 8. Compute weighted centroid
+    centroid = (top_embeds * masked_probs_norm.unsqueeze(-1)).sum(dim=1, keepdim=True)
+
+    # 9. Compute angular distance from centroid
+    top_embeds_n = F.normalize(top_embeds, p=2, dim=-1)
+    centroid_n = F.normalize(centroid, p=2, dim=-1)
+
+    # Cosine similarity: [N, max_k]
+    cosine_sims = (top_embeds_n * centroid_n).sum(dim=-1)
+
+    # Distance = 1 - Similarity
+    distances = 1.0 - cosine_sims
+
+    # 10. Weighted variance (only over nucleus tokens)
+    variance = (distances * masked_probs_norm).sum(dim=-1)
+    variance = variance.clamp(0.0, 1.0)
+
+    # Reshape back
+    if len(original_shape) == 3:
+        variance = variance.view(B, S)
+
+    return variance
+
+
+def compute_semantic_dispersion(
+    logits: torch.Tensor,
+    embed_matrix: torch.Tensor,
+    k: int = 5,
+    temperature: float = 1.0,
+    method: str = "top1_projection",
+    top_p: float = 0.95,
+) -> torch.Tensor:
+    """
+    Dispatcher for semantic dispersion calculation.
+
+    Selects between algorithms based on task type:
+    - "top1_projection": Legacy/QA - measures distance from top-1 prediction
+    - "centroid_variance": JEPA/Summ - measures spread around weighted centroid (Top-K)
+    - "nucleus_variance": SOTA - adaptive Top-P clustering (dynamic k)
+
+    Args:
+        logits: (B, S, V) or (B, V) model output logits
+        embed_matrix: (V, D) output embedding matrix
+        k: Number of top tokens to consider (for top1_projection, centroid_variance)
+        temperature: Softmax temperature
+        method: "top1_projection", "centroid_variance", or "nucleus_variance"
+        top_p: Cumulative probability threshold (for nucleus_variance)
+
+    Returns:
+        dispersion: (B, S) or (B,) semantic dispersion in [0, 1]
+    """
+    if method == "nucleus_variance":
+        return compute_nucleus_centroid_variance(
+            logits, embed_matrix, top_p=top_p, temperature=temperature
+        )
+    elif method == "centroid_variance":
+        return compute_centroid_variance(logits, embed_matrix, k=k, temperature=temperature)
+    else:
+        return compute_top1_projection(logits, embed_matrix, k=k, temperature=temperature)
+
+
 def compute_semantic_trust(
     logits: torch.Tensor,
     embed_matrix: torch.Tensor,
     k: int = 5,
     sensitivity: float = 5.0,
+    method: str = "top1_projection",
+    top_p: float = 0.95,
 ) -> torch.Tensor:
     """
     Compute Semantic Trust score (inverse of dispersion).
@@ -128,13 +346,15 @@ def compute_semantic_trust(
         embed_matrix: (V, D) output embedding matrix
         k: Number of top tokens to consider
         sensitivity: Scale factor (higher = more aggressive penalty)
+        method: "top1_projection", "centroid_variance", or "nucleus_variance"
+        top_p: Cumulative probability threshold for nucleus_variance (default 0.95)
 
     Returns:
         trust: (B, S) or (B,) semantic trust in [0, 1]
                1.0 = High consistency (trustworthy)
                0.0 = High dispersion (untrustworthy)
     """
-    dispersion = compute_semantic_dispersion(logits, embed_matrix, k)
+    dispersion = compute_semantic_dispersion(logits, embed_matrix, k, method=method, top_p=top_p)
 
     # Invert: High dispersion = Low trust
     # Sensitivity scales the impact (dispersion is usually small, e.g., 0.05)

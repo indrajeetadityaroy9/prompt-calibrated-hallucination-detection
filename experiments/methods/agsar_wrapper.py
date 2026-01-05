@@ -1,10 +1,9 @@
 """
 AG-SAR wrapper implementing UncertaintyMethod interface.
 
-Supports multiple calibration modes:
+Supports calibration modes:
 - v8.0 Gold Master: Fixed parameters (default)
-- v9.0 Task-Adaptive: Hardcoded per-task presets
-- v10.0 Self-Calibrating: Mathematically derived from internal signals
+- v9.0 Task-Adaptive: External YAML presets (see src/ag_sar/presets/)
 
 Wraps the core AG-SAR library (src/ag_sar/) with the standardized
 interface for benchmarking. Ensures proper cleanup of hooks.
@@ -16,58 +15,9 @@ import torch
 import torch.nn as nn
 
 from ag_sar import AGSAR, AGSARConfig
-from ag_sar.calibration import SelfCalibrator, apply_temperature_scaling
+from ag_sar.presets import load_preset
 from experiments.methods.base import UncertaintyMethod, MethodResult
 from experiments.configs.schema import AGSARMethodConfig
-
-
-# =============================================================================
-# Task-Adaptive Calibration (v9.0)
-# =============================================================================
-
-# Task-specific calibration presets (empirically tuned)
-# These parameters are selected based on task characteristics:
-# - QA: Focused attention, conservative aggregation for safety
-# - RAG: Trust context more (lower parametric_weight)
-# - Summarization: Diffuse attention, higher dispersion_k for long-form
-# - Attribution: Fine-grained spans, moderate conservative aggregation
-TASK_PRESETS = {
-    "qa": {
-        "aggregation_method": "percentile_10",
-        "calibration_temperature": 1.2,
-        "dispersion_k": 5,
-        "dispersion_sensitivity": 1.0,
-        "parametric_weight": 0.4,
-    },
-    "rag": {
-        "aggregation_method": "mean",
-        "calibration_temperature": 1.5,
-        "dispersion_k": 7,
-        "dispersion_sensitivity": 1.2,
-        "parametric_weight": 0.3,  # Trust context more
-    },
-    "summarization": {
-        "aggregation_method": "percentile_25",
-        "calibration_temperature": 2.5,
-        "dispersion_k": 10,  # More tokens for long-form
-        "dispersion_sensitivity": 0.8,
-        "parametric_weight": 0.6,
-    },
-    "attribution": {
-        "aggregation_method": "percentile_25",
-        "calibration_temperature": 2.0,
-        "dispersion_k": 8,
-        "dispersion_sensitivity": 0.9,
-        "parametric_weight": 0.5,
-    },
-    "default": {
-        "aggregation_method": "mean",
-        "calibration_temperature": 1.0,
-        "dispersion_k": 5,
-        "dispersion_sensitivity": 1.0,
-        "parametric_weight": 0.5,
-    },
-}
 
 
 def detect_task_type(dataset_name: str) -> str:
@@ -139,10 +89,9 @@ class AGSARMethod(UncertaintyMethod):
     """
     AG-SAR uncertainty method wrapper.
 
-    Supports three calibration modes:
+    Supports calibration modes:
     - v8.0: Fixed parameters (default)
     - v9.0: Task-adaptive presets based on dataset name
-    - v10.0: Self-calibrating (parameters derived from internal signals)
 
     Example:
         >>> method = AGSARMethod(model, tokenizer, config=AGSARMethodConfig())
@@ -173,35 +122,18 @@ class AGSARMethod(UncertaintyMethod):
         config = config or AGSARMethodConfig()
         self._config = config
 
-        # Self-Calibrating mode (v10.0) - highest priority
-        if config.enable_self_calibration:
-            self._calibrator = SelfCalibrator(
-                k_min=config.sc_k_min,
-                k_max=config.sc_k_max,
-                warmup_samples=config.sc_warmup_samples,
-                aggregation_gamma=config.sc_aggregation_gamma,
-            )
-            self._mode = "self_calibrating"
-            self._task_type = None
-            # Use base config values - they'll be overridden per-sample
-            effective_aggregation = config.aggregation_method
-            effective_temperature = config.calibration_temperature
-            effective_dispersion_k = config.dispersion_k
-            effective_dispersion_sens = config.dispersion_sensitivity
-            effective_parametric_weight = config.parametric_weight
-
         # Task-adaptive parameter selection (v9.0)
-        elif config.enable_task_adaptive and dataset_name:
+        if config.enable_task_adaptive and dataset_name:
             task_type = config.task_type_override or detect_task_type(dataset_name)
-            preset = TASK_PRESETS.get(task_type, TASK_PRESETS["default"])
+            preset = load_preset(task_type, fallback_to_default=True)
 
             effective_aggregation = preset["aggregation_method"]
             effective_temperature = preset["calibration_temperature"]
             effective_dispersion_k = preset["dispersion_k"]
             effective_dispersion_sens = preset["dispersion_sensitivity"]
             effective_parametric_weight = preset["parametric_weight"]
+            effective_dispersion_method = preset.get("dispersion_method", "top1_projection")
             self._task_type = task_type
-            self._calibrator = None
             self._mode = "task_adaptive"
 
         # v8.0 behavior - use config as-is
@@ -211,8 +143,8 @@ class AGSARMethod(UncertaintyMethod):
             effective_dispersion_k = config.dispersion_k
             effective_dispersion_sens = config.dispersion_sensitivity
             effective_parametric_weight = config.parametric_weight
+            effective_dispersion_method = config.dispersion_method
             self._task_type = None
-            self._calibrator = None
             self._mode = "fixed"
 
         # Map experiment config to library config
@@ -229,8 +161,12 @@ class AGSARMethod(UncertaintyMethod):
             enable_semantic_dispersion=config.enable_semantic_dispersion,
             dispersion_k=effective_dispersion_k,
             dispersion_sensitivity=effective_dispersion_sens,
+            dispersion_method=effective_dispersion_method,
             # Authority Aggregation (Safety-Focused)
             aggregation_method=effective_aggregation,
+            # Intrinsic Detection (v12.0 - Truth Vector)
+            enable_intrinsic_detection=config.enable_intrinsic_detection,
+            truth_vector_path=config.truth_vector_path,
         )
 
         self._engine = AGSAR(model, tokenizer, config=ag_config)
@@ -248,59 +184,13 @@ class AGSARMethod(UncertaintyMethod):
         """
         Compute uncertainty using AG-SAR.
 
-        Supports three modes:
+        Supports two modes:
         - v8.0 Fixed: Uses configured parameters
         - v9.0 Task-Adaptive: Uses preset parameters based on task type
-        - v10.0 Self-Calibrating: Full SC pipeline with all adaptive parameters
 
         Post-hoc calibration via temperature scaling is applied.
         """
         t0 = time.perf_counter()
-
-        # Self-Calibrating mode (v10.0): Use full SC pipeline with raw signals
-        if self._mode == "self_calibrating" and self._calibrator is not None:
-            # Get all raw signals from engine
-            raw_result = self._engine.compute_uncertainty_raw(prompt, response)
-
-            latency = (time.perf_counter() - t0) * 1000
-
-            # Use full self-calibrating score computation
-            sc_result = self._calibrator.compute_full_self_calibrating_score(
-                authority_per_token=raw_result["authority_per_token"],
-                attention_weights=raw_result["attention_weights"],
-                h_attn=raw_result["h_attn"],
-                h_block=raw_result["h_block"],
-                logits=raw_result["logits"],
-                embed_matrix=raw_result["embed_matrix"],
-                response_start=raw_result["response_start"],
-                attention_mask=raw_result["attention_mask"],
-            )
-
-            extra = {
-                "authority": sc_result["authority_aggregated"],
-                "authority_mean": sc_result["authority_mean"],
-                "authority_p10": sc_result["authority_p10"],
-                "authority_var": sc_result["authority_var"],
-                "metric": "v10_full_sc",
-                "raw_score": sc_result["raw_score"],
-                "temperature": sc_result["temperature"],
-                "k_effective": sc_result["k_effective"],
-                "aggregation_method": sc_result["aggregation_method"],
-                "dispersion": sc_result["dispersion"],
-                "divergence": sc_result["divergence"],
-                "stability_gate": sc_result["stability_gate"],
-                "parametric_weight": sc_result["parametric_weight"],
-                "mode": "self_calibrating_full",
-                "samples_seen": sc_result["samples_seen"],
-                "is_warmed_up": sc_result["is_warmed_up"],
-            }
-
-            return MethodResult(
-                score=sc_result["score"],
-                confidence=sc_result["confidence_mean"],
-                latency_ms=latency,
-                extra=extra,
-            )
 
         # v8.0 / v9.0: Standard path
         result = self._engine.compute_uncertainty(prompt, response, return_details=True)

@@ -27,18 +27,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Version guard
-try:
-    import transformers
-    _TRANSFORMERS_VERSION = tuple(int(x) for x in transformers.__version__.split('.')[:2])
-    if _TRANSFORMERS_VERSION >= (5, 0):
-        warnings.warn(
-            f"transformers {transformers.__version__} detected. "
-            "AG-SAR was tested with transformers 4.x. "
-            "If you encounter issues, downgrade to transformers<5.0.0."
-        )
-except (ImportError, ValueError):
-    _TRANSFORMERS_VERSION = (0, 0)
+# Version guard - use adapters module for consistent version checking
+from .adapters import (
+    get_transformers_version,
+    get_adapter,
+    is_version_supported,
+    UnsupportedVersionError,
+    AttentionPatchAdapter,
+)
+
+_TRANSFORMERS_VERSION = get_transformers_version()
+if _TRANSFORMERS_VERSION[0] >= 5:
+    warnings.warn(
+        f"transformers {'.'.join(map(str, _TRANSFORMERS_VERSION))} detected. "
+        "AG-SAR was tested with transformers 4.x. "
+        "If you encounter issues, downgrade to transformers<5.0.0."
+    )
 
 
 def load_model_h100(
@@ -102,6 +106,10 @@ class AttentionCapture:
     block_outputs: Dict[int, torch.Tensor] = field(default_factory=dict)
     attention_weights: Dict[int, torch.Tensor] = field(default_factory=dict)
 
+    # Layer Drift: Mid-layer hidden states for mind-change detection
+    mid_layer_hidden_states: Optional[torch.Tensor] = None
+    mid_layer_idx: Optional[int] = None
+
     def clear(self):
         """Clear all captured data."""
         self.query_states.clear()
@@ -111,6 +119,7 @@ class AttentionCapture:
         self.attn_outputs.clear()
         self.block_outputs.clear()
         self.attention_weights.clear()
+        self.mid_layer_hidden_states = None
 
     def get_device(self, layer_idx: int) -> Optional[torch.device]:
         """Get the device where a layer's tensors are stored."""
@@ -139,6 +148,8 @@ class ModelAdapter:
         model: nn.Module,
         layers: Optional[List[int]] = None,
         dtype: Optional[torch.dtype] = None,
+        drift_layer_ratio: Optional[float] = None,
+        output_hidden_states: bool = False,
     ):
         """
         Initialize model adapter.
@@ -147,6 +158,11 @@ class ModelAdapter:
             model: Language model (GPT-2, Llama, etc.)
             layers: Layer indices to extract (default: all layers)
             dtype: Tensor dtype (default: model's dtype)
+            drift_layer_ratio: Ratio for mid-layer (0.5 = middle) for Layer Drift.
+                               If provided, captures hidden states from this layer
+                               for mind-change detection.
+            output_hidden_states: If True, request hidden states from the model.
+                                  Required for intrinsic hallucination detection (v12.0).
         """
         self.model = model
         self.dtype = dtype or next(model.parameters()).dtype
@@ -161,11 +177,25 @@ class ModelAdapter:
         # Use specified layers or all
         self.layers = layers if layers is not None else list(range(self.num_layers))
 
+        # Layer Drift: Compute mid-layer index if enabled
+        self.drift_layer_ratio = drift_layer_ratio
+        self.drift_layer_idx: Optional[int] = None
+        if drift_layer_ratio is not None:
+            self.drift_layer_idx = int(self.num_layers * drift_layer_ratio)
+            # Ensure it's not the same as the final layer
+            self.drift_layer_idx = min(self.drift_layer_idx, self.num_layers - 2)
+
+        # Intrinsic Detection: Request hidden states from model (v12.0)
+        self.output_hidden_states = output_hidden_states
+
         # Storage and hooks
         self.capture = AttentionCapture()
         self._hooks: List[torch.utils.hooks.RemovableHandle] = []
         self._original_forwards: Dict[int, Callable] = {}
         self._is_registered = False
+
+        # Version-adaptive adapter (for Llama-style architectures)
+        self._arch_adapter: Optional[AttentionPatchAdapter] = None
 
     def _detect_architecture(self) -> str:
         """Detect model architecture from structure."""
@@ -233,7 +263,36 @@ class ModelAdapter:
         else:
             self._register_llama_hooks()
 
+        # Register Layer Drift hook if enabled
+        if self.drift_layer_idx is not None:
+            self._register_drift_layer_hook()
+
         self._is_registered = True
+
+    def _register_drift_layer_hook(self):
+        """Register hook for mid-layer hidden state capture (Layer Drift)."""
+        layer_idx = self.drift_layer_idx
+        self.capture.mid_layer_idx = layer_idx
+
+        if self.architecture == "gpt2":
+            block = self.backbone.h[layer_idx]
+        else:
+            block = self.backbone.layers[layer_idx]
+
+        def drift_hook_fn(module, input_args, output):
+            """Capture hidden states from mid-layer for drift detection."""
+            if isinstance(output, tuple):
+                hidden_states = output[0]
+            else:
+                hidden_states = output
+
+            if isinstance(hidden_states, torch.Tensor) and hidden_states.dim() == 3:
+                self.capture.mid_layer_hidden_states = hidden_states.detach().to(
+                    device=hidden_states.device, dtype=self.dtype
+                )
+
+        handle = block.register_forward_hook(drift_hook_fn)
+        self._hooks.append(handle)
 
     def cleanup(self) -> None:
         """Remove all hooks and restore original methods."""
@@ -277,10 +336,26 @@ class ModelAdapter:
         """Register Llama/Qwen/Mistral hooks via monkey-patching."""
         model_type = getattr(self.model.config, 'model_type', '').lower()
 
+        # Validate version compatibility via adapter (provides clear error messages)
+        arch_name = "llama"
+        if 'qwen' in model_type:
+            arch_name = "qwen"
+        elif 'mistral' in model_type or 'mixtral' in model_type:
+            arch_name = "mistral"
+
+        try:
+            self._arch_adapter = get_adapter(arch_name, _TRANSFORMERS_VERSION)
+        except UnsupportedVersionError as e:
+            # Re-raise with context about what was attempted
+            raise UnsupportedVersionError(
+                e.version, e.architecture,
+                f"Cannot register hooks for {model_type}: {e}"
+            )
+
         for layer_idx in self.layers:
             if 'qwen' in model_type:
                 self._patch_qwen_attention(layer_idx)
-            elif 'mistral' in model_type:
+            elif 'mistral' in model_type or 'mixtral' in model_type:
                 self._patch_mistral_attention(layer_idx)
             else:
                 self._patch_llama_attention(layer_idx)
@@ -617,6 +692,7 @@ class ModelAdapter:
                         input_ids=input_ids,
                         attention_mask=attention_mask,
                         output_attentions=False,
+                        output_hidden_states=self.output_hidden_states,
                         return_dict=True
                     )
             except ImportError:
@@ -624,6 +700,7 @@ class ModelAdapter:
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     output_attentions=False,
+                    output_hidden_states=self.output_hidden_states,
                     return_dict=True
                 )
         else:
@@ -631,6 +708,7 @@ class ModelAdapter:
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 output_attentions=False,
+                output_hidden_states=self.output_hidden_states,
                 return_dict=True
             )
 

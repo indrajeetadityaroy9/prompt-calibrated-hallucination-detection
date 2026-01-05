@@ -71,6 +71,13 @@ from .utils import (
     get_model_device,
 )
 
+# Presets (v9.0 Task-Adaptive)
+from .presets import (
+    load_preset,
+    get_available_presets,
+    clear_preset_cache,
+)
+
 __all__ = [
     # Version
     "__version__",
@@ -106,4 +113,8 @@ __all__ = [
     "apply_attention_mask",
     "get_model_dtype",
     "get_model_device",
+    # Presets
+    "load_preset",
+    "get_available_presets",
+    "clear_preset_cache",
 ]

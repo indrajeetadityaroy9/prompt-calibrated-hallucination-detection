@@ -23,7 +23,15 @@ tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
 agsar = AGSAR(model, tokenizer)  # Default v8.0 config
 score = agsar.compute_uncertainty("What is the capital of France?", "Paris")
-is_hall, conf, details = agsar.detect_hallucination("Who wrote Hamlet?", "Shakespeare")
+
+# Detect context violations (extrinsic hallucinations)
+# NOTE: AG-SAR detects unfaithfulness to provided context, not factual errors
+context = "The Eiffel Tower is located in Paris, France."
+question = "Where is the Eiffel Tower?"
+response = "The Eiffel Tower is in London."
+is_violation, conf, details = agsar.detect_context_violation(
+    f"{context}\n\n{question}", response
+)
 
 # Always cleanup when done
 agsar.cleanup()
@@ -106,11 +114,6 @@ AGSAR Engine (engine.py)
 ├── Main API: compute_uncertainty(), compute_uncertainty_raw(), detect_hallucination()
 ├── Authority Flow + Unified Gating + Semantic Dispersion
 └── Orchestrates: extract → authority_score → gating → dispersion → score
-
-Calibration (calibration.py) [NEW - Experimental]
-├── SelfCalibrator: Derives parameters from internal signals
-├── OnlineStats: Welford's algorithm for streaming statistics
-└── Entropy-adaptive k, variance-adaptive aggregation, temperature scaling
 
 ModelAdapter (modeling/hooks.py)
 ├── Hook-based Q/K/V extraction without O(N²) matrices
@@ -198,7 +201,6 @@ For ablation studies (v3.1 baseline comparison), set `enable_unified_gating=Fals
 | **v7.0** | `enable_unified_gating=True, enable_semantic_dispersion=False` | Adds context-dependent gating |
 | **v8.0** | `enable_unified_gating=True, enable_semantic_dispersion=True` | **Default.** Adds semantic dispersion |
 | **v9.0** | `enable_task_adaptive=True` | Task-specific parameter presets (QA, RAG, Summarization, Attribution) |
-| **v10.0** | `enable_self_calibration=True` | **EXPERIMENTAL.** Self-calibrating parameters from internal signals |
 
 ### v9.0 Task-Adaptive Mode
 Automatically selects calibration parameters based on dataset/task type:
@@ -208,16 +210,6 @@ Automatically selects calibration parameters based on dataset/task type:
 - **Attribution**: Moderate conservative (percentile_25), T=2.0
 
 Config: `experiments/configs/agsar_task_adaptive.yaml`
-
-### v10.0 Self-Calibrating Mode (Experimental)
-Derives all calibration parameters from internal model signals:
-- **Entropy-Adaptive k**: `k_effective = k_min + (k_max - k_min) × H_normalized`
-- **Variance-Adaptive Aggregation**: Interpolates mean↔percentile_10 based on authority variance
-- **Confidence-Modulated Temperature**: Adjusts T based on confidence-entropy gap
-
-**Status**: EXPERIMENTAL - Currently degrades AUROC compared to v8.0. The adaptive components harm ranking ability while improving calibration (ECE). Needs further tuning.
-
-Config: `experiments/configs/agsar_self_calibrating.yaml`
 
 ## Test Organization
 
@@ -243,7 +235,7 @@ experiments/
 │   └── fava.py                # FAVA attribution loader
 ├── methods/
 │   ├── base.py                # UncertaintyMethod ABC
-│   ├── agsar_wrapper.py       # AG-SAR method (v8.0/v9.0/v10.0)
+│   ├── agsar_wrapper.py       # AG-SAR method (v8.0/v9.0)
 │   ├── logprob.py             # Log-probability baseline
 │   ├── entropy.py             # Entropy baseline
 │   ├── selfcheck.py           # SelfCheck baseline
@@ -253,7 +245,6 @@ experiments/
 │   ├── schema.py              # Pydantic config validation
 │   ├── agsar_only.yaml        # AG-SAR v8.0 only
 │   ├── agsar_task_adaptive.yaml    # AG-SAR v9.0
-│   ├── agsar_self_calibrating.yaml # AG-SAR v10.0 (experimental)
 │   └── unified_eval.yaml      # Full benchmark suite
 └── analysis/
     └── benchmark_latency.py   # Zero-latency verification
@@ -271,8 +262,6 @@ experiments/
 
 ## Known Issues
 
-1. **SC-AGSAR (v10.0) AUROC degradation**: The self-calibrating mode currently produces worse discrimination (AUROC 0.63 vs 0.90 baseline on HaluEval QA) while improving calibration (ECE 0.08 vs 0.26). The adaptive k and aggregation components need further tuning.
+1. **Transformers version sensitivity**: Pin to `<4.45.0` for attention hook compatibility.
 
-2. **Transformers version sensitivity**: Pin to `<4.45.0` for attention hook compatibility.
-
-3. **Single-token responses**: `var()` warning for single-token responses in variance computation.
+2. **Single-token responses**: `var()` warning for single-token responses in variance computation.

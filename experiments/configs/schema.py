@@ -54,7 +54,7 @@ class ModelConfig(BaseModel):
 
 
 class AGSARMethodConfig(BaseModel):
-    """AG-SAR v8.0 configuration (maps to AGSARConfig in src/ag_sar/)."""
+    """AG-SAR v8.0/v9.0 configuration (maps to AGSARConfig in src/ag_sar/)."""
 
     # Core parameters
     semantic_layers: int = Field(4, ge=1, le=32, description="Number of final layers to analyze")
@@ -70,6 +70,9 @@ class AGSARMethodConfig(BaseModel):
     enable_semantic_dispersion: bool = Field(True, description="Enable semantic consistency over raw confidence")
     dispersion_k: int = Field(5, ge=2, le=20, description="Top-k tokens for dispersion")
     dispersion_sensitivity: float = Field(1.0, ge=0.0, description="Scale factor for dispersion penalty")
+    dispersion_method: Literal["top1_projection", "centroid_variance"] = Field(
+        "top1_projection", description="Dispersion algorithm: top1_projection (QA) or centroid_variance (JEPA/Summ)"
+    )
 
     # Authority Aggregation (Safety-Focused)
     aggregation_method: Literal["mean", "min", "percentile_10", "percentile_25"] = Field(
@@ -89,14 +92,13 @@ class AGSARMethodConfig(BaseModel):
         None, description="Manual task type override (None = auto-detect from dataset name)"
     )
 
-    # Self-Calibrating Mode (v10.0) - Mathematically derived parameters
-    enable_self_calibration: bool = Field(
-        False, description="Enable self-calibrating mode (derives all parameters from internal signals)"
+    # Intrinsic Detection (v12.0 - Truth Vector)
+    enable_intrinsic_detection: bool = Field(
+        False, description="Enable Truth Vector integration for intrinsic hallucination detection"
     )
-    sc_k_min: int = Field(3, ge=2, le=10, description="Minimum dispersion k (for focused attention)")
-    sc_k_max: int = Field(15, ge=5, le=30, description="Maximum dispersion k (for diffuse attention)")
-    sc_warmup_samples: int = Field(10, ge=1, le=100, description="Warmup samples before adaptive params")
-    sc_aggregation_gamma: float = Field(2.0, ge=0.1, le=10.0, description="Sensitivity for aggregation interpolation")
+    truth_vector_path: Optional[str] = Field(
+        None, description="Path to calibrated Truth Vector .pt file"
+    )
 
 
 class SelfCheckMethodConfig(BaseModel):
