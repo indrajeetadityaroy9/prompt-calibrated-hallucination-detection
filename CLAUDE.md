@@ -4,271 +4,150 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AG-SAR (Attention-Graph Shifting Attention to Relevance) is a zero-latency uncertainty quantification framework for LLMs. It detects hallucinations by analyzing internal attention graph structure without external semantic models.
+AG-SAR (Attention-Graph Shifting Attention to Relevance) is a zero-latency hallucination detection framework for LLMs. It analyzes internal attention graph structure without external semantic models or multiple forward passes. Optimized for **extrinsic hallucination detection** (unfaithful to source context) in RAG settings.
 
-**Key Features:**
-- Optimized for NVIDIA H100 with bfloat16 precision and TF32 acceleration
-- Zero external latency: pure internal model analysis using attention patterns
-- Supports GPT-2, Llama-3/3.1/3.2, Mistral, and Qwen architectures
-- SOTA v8.0: Authority Flow + Unified Gating + Semantic Dispersion
+**Version**: 0.4.0 (v8.0 SOTA Gold Master for ICML/NeurIPS submission)
 
-## Quick Usage
+## Research Abstract
 
-```python
-from ag_sar import AGSAR, AGSARConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer
+### Core Problem
 
-model = AutoModelForCausalLM.from_pretrained("gpt2")
-tokenizer = AutoTokenizer.from_pretrained("gpt2")
+Large Language Models generate fluent text but frequently produce **hallucinations**—statements that appear plausible but are unfaithful to the provided source context. Existing detection methods suffer from either:
+- **High latency**: Requiring multiple forward passes or external verifier models
+- **Semantic blindness**: Relying solely on token probabilities without understanding meaning
+- **Wrong target**: Detecting intrinsic hallucinations (factual errors) rather than extrinsic ones (source unfaithfulness)
 
-agsar = AGSAR(model, tokenizer)  # Default v8.0 config
-score = agsar.compute_uncertainty("What is the capital of France?", "Paris")
+### Key Insight
 
-# Detect context violations (extrinsic hallucinations)
-# NOTE: AG-SAR detects unfaithfulness to provided context, not factual errors
-context = "The Eiffel Tower is located in Paris, France."
-question = "Where is the Eiffel Tower?"
-response = "The Eiffel Tower is in London."
-is_violation, conf, details = agsar.detect_context_violation(
-    f"{context}\n\n{question}", response
-)
+The attention mechanism itself encodes whether a generated token is **grounded in context** or **fabricated from parametric memory**. By tracing how "authority" (information provenance) flows through attention layers, we can distinguish faithful generation from hallucination—without any external models or repeated inference.
 
-# Always cleanup when done
-agsar.cleanup()
+### Three-Pillar Mechanism
+
+**1. Authority Flow**
+Information has a source. When a model generates a token, that token's "authority" should trace back to the prompt/context if grounded, or emerge from internal parameters if hallucinated. AG-SAR computes this recursively:
 ```
-
-## H100 Installation
-
-Follow this specific order to avoid CUDA version mismatches on H100 systems:
-
-```bash
-# 1. Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# 2. Install PyTorch with explicit CUDA index (do not let pip guess)
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Post-install setup for baselines (NLTK sentence tokenization)
-python -m nltk.downloader punkt
-
-# 5. Verify environment
-python -c "import torch; import transformers; print(f'PyTorch: {torch.__version__} | CUDA: {torch.version.cuda}'); print(f'Transformers: {transformers.__version__}'); print(f'H100 Detected: {torch.cuda.get_device_capability()[0] >= 9}')"
+Authority(token) = [attention to prompt tokens] + [attention to prior generated tokens × their authority]
 ```
+Tokens with low prompt-derived authority are suspicious.
+
+**2. Unified Gating**
+Not all parametric knowledge is hallucination—sometimes the model legitimately uses learned facts. The gating mechanism dynamically balances:
+- Context authority (from Authority Flow)
+- Parametric confidence (from model's internal state)
+
+The gate opens toward context when the model attends heavily to source material, and toward parametric memory when generating common knowledge.
+
+**3. Semantic Dispersion**
+Raw token probability is misleading—a model might be "uncertain" between synonyms (US, USA, America) or between unrelated alternatives (Paris, London, Tokyo). AG-SAR measures **semantic consistency** of top-k predictions:
+- Low dispersion (synonyms) → Grounded
+- High dispersion (scattered meanings) → Hallucination
+
+### Technical Contributions
+
+- **O(N) Memory**: Matrix-free eigenvector centrality avoids O(N²) attention matrices
+- **Zero Latency**: Single forward pass, no external models
+- **Architecture Agnostic**: Works across GPT-2, Llama, Mistral, Qwen via unified hooking
+- **Task Adaptivity**: Preset configurations for QA, RAG, summarization, attribution
+
+### Philosophical Position
+
+AG-SAR treats hallucination detection as an **information provenance problem**, not a factuality problem. The question isn't "is this true?" but rather "does this come from the context the user provided?" This framing is particularly suited for RAG systems where faithfulness to retrieved documents matters more than world knowledge.
 
 ## Commands
 
+### Installation
 ```bash
-# Install with dev dependencies
-pip install -e ".[dev]"
+pip install -r requirements.txt
+pip install -e ".[all]"              # Full install with all extras
+pip install -e ".[eval]"             # Evaluation dependencies only
+pip install -e ".[h100]"             # H100 optimizations (Linux only)
+```
 
-# Install all including eval dependencies
-pip install -e ".[all]"
+### Testing
+```bash
+pytest tests/                        # All tests (96 total)
+pytest tests/unit/                   # Unit tests only
+pytest tests/integration/            # Integration tests
+pytest tests/unit/test_ops.py -k "test_authority"  # Specific test pattern
+```
 
-# Run all tests
-pytest tests/
+### Code Quality
+```bash
+black src/ tests/                    # Format code
+ruff check src/ tests/               # Lint
+mypy src/ag_sar/                     # Type check
+```
 
-# Run unit tests only
-pytest tests/unit/ -v
-
-# Run integration tests only
-pytest tests/integration/ -v
-
-# Run specific test file
-pytest tests/unit/test_core_ops.py -v
-
-# Run single test function
-pytest tests/unit/test_ops.py::test_fisher_kurtosis -v
-
-# Run tests with coverage
-pytest --cov=ag_sar tests/
-
-# Linting and formatting
-black .                    # Format code (line-length=100)
-ruff check .               # Lint code
-ruff check . --fix         # Lint and auto-fix
-mypy src/ag_sar/           # Type checking
-
-# Run latency benchmark
-python -m experiments.analysis.benchmark_latency --model gpt2 --seq-len 128
-
-# Run experiment (e.g., HaluEval QA benchmark)
+### Running Experiments
+```bash
 python -m experiments.main --config experiments/configs/01_main_sota.yaml
+python -m experiments.main --config experiments/configs/03_generalization.yaml --output-dir results/custom
+bash reproduce_paper.sh              # Full ICML 2025 reproduction (6 stages)
+bash run_final_matrix.sh             # Batch experiment runner
+```
 
-# Dry run (print config only)
-python -m experiments.main --config experiments/configs/01_main_sota.yaml --dry-run
-
-# Reproduce all paper experiments
-./reproduce_paper.sh
-
-# Run specific experiment (shorthand)
-./reproduce_paper.sh 01              # Run 01_main_sota only
-./reproduce_paper.sh 01 03           # Run multiple experiments
-./reproduce_paper.sh --dry-run       # Print configs without running
+### Demo
+```bash
+python examples/minimal_demo.py      # Quick demo with GPT-2
 ```
 
 ## Architecture
 
 ### Core Package (`src/ag_sar/`)
 
-```
-AGSAR Engine (engine.py)
-├── Main API: compute_uncertainty(), compute_uncertainty_raw(), detect_hallucination()
-├── Authority Flow + Unified Gating + Semantic Dispersion
-└── Orchestrates: extract → authority_score → gating → dispersion → score
+Three-component detection mechanism:
 
-ModelAdapter (modeling/hooks.py)
-├── Hook-based Q/K/V extraction without O(N²) matrices
-├── Architecture detection: GPT-2 (c_attn), Llama/Mistral/Qwen (monkey-patch)
-├── GQA expansion: 8 KV-heads → 32 Q-heads for Llama-3.1
-└── AttentionCapture dataclass for multi-layer storage
+1. **Authority Flow** (`measures/authority.py`) - Tracks signal provenance from prompt to response tokens via recursive attention recharge
+2. **Unified Gating** (`measures/stability.py`) - Context-dependent trust switching between context authority and parametric confidence
+3. **Semantic Dispersion** (`measures/semantics.py`) - Measures top-k prediction consistency (synonyms = grounded, unrelated = hallucination)
 
-Measures (measures/)
-├── authority.py: Authority Flow + Gated/Semantic Authority
-├── semantics.py: Semantic Dispersion (consistency over confidence)
-├── stability.py: Adaptive Gate for model-agnostic normalization
-└── entropy.py: Token entropy (baseline utility)
+**Master Equation**: `A(t) = Gate(t) × Flow(t) + (1 - Gate(t)) × Trust(t) × parametric_weight`
 
-Ops (ops/)
-├── torch_functional.py: PyTorch implementations with torch.compile
-├── triton_kernels.py: Linux-only Triton kernels for H100
-└── Exports: compute_authority_flow, compute_mlp_divergence, compute_stability_gate, etc.
+### Key Modules
 
-Utils (utils/)
-└── tensor.py: H100 optimizations, TF32, Flash Attention, safe_normalize, attention masking
-```
+- `engine.py` - AGSAR orchestrator, main entry point (`AGSAR.compute_uncertainty`)
+- `config.py` - AGSARConfig with 80+ parameters
+- `modeling/hooks.py` - Unified attention extraction hooks
+- `modeling/adapters.py` - Architecture-specific adapters (GPT-2, Llama, Mistral, Qwen)
+- `ops/torch_functional.py` - Pure PyTorch O(N) implementation
+- `ops/triton_kernels.py` - Triton acceleration (Linux only, auto-fallback)
+- `presets/` - Task-adaptive configs (qa.yaml, rag.yaml, summarization.yaml)
 
-### Data Flow
+### Experiments Framework (`experiments/`)
 
-```
-prompt + response → tokenize → ModelAdapter.extract()
-    → Q, K, value_states, attn_outputs, block_outputs
-    → compute_authority_score() [Mechanism 1: Recursive prompt recharge]
-    → compute_gated_authority() [Mechanism 2: Unified RAG/free-gen gating]
-    → compute_semantic_authority() [Mechanism 3: Semantic dispersion]
-    → detect_hallucination(uncertainty > threshold)
-```
+- `main.py` - CLI entry point
+- `configs/` - 43 YAML experiment specifications
+- `methods/` - 8 baseline implementations (LogProb, Entropy, SelfCheckGPT, Semantic Entropy, EigenScore, LLMCheck)
+- `data/` - Dataset loaders (HaluEval, RAGTruth, TruthfulQA, FAVA)
+- `analysis/` - Plotting and metrics computation
 
-## Critical Implementation Details
+## Critical Constraints
 
-### Precision Requirements
-- **BFloat16 required for GPT-2** - float16 causes NaN overflow
-- TF32 enforced at import via `enable_h100_optimizations()` (~3x speedup on H100)
-- `torch.compile` used on hot paths (Ampere+ GPUs only, compute capability >= 8)
+- **transformers version**: Must be `>=4.40.0,<4.45.0`. Version 4.45+ breaks attention hooks.
+- **Triton**: Linux-only. Falls back to PyTorch on Mac/Windows automatically.
+- **Flash Attention**: Requires Linux + CUDA 12+ for H100 optimizations.
 
-### Architecture-Specific Hooks
-- **GPT-2**: Uses c_attn hook (fused QKV projection), no RoPE
-- **Llama/Mistral/Qwen**: Monkey-patches attention.forward for post-RoPE Q/K capture
-- **GQA**: Auto-expands KV heads via `align_gqa_heads()` (8 KV → 32 Q for Llama-3.1-8B)
-
-### Critical Parameters (AGSARConfig)
-
-- `semantic_layers=4`: Final layers contain semantic consolidation
-- `hallucination_threshold=0.7`: Default detection threshold
-- `enable_unified_gating=True`: Context-dependent RAG/free-gen gating
-- `stability_sensitivity=1.0`: Gate sharpness for MLP stability
-- `parametric_weight=0.5`: Weight for confidence when ignoring context
-- `enable_semantic_dispersion=True`: Semantic consistency over raw confidence
-- `dispersion_k=5`: Top-k tokens for dispersion calculation
-- `dispersion_sensitivity=1.0`: Scale factor for dispersion penalty
-
-For ablation studies (v3.1 baseline comparison), set `enable_unified_gating=False`.
-
-### Transformers Version
-**Critical**: transformers >= 4.45 has breaking changes for attention hooks that break the monkey-patch mechanism. The dependency is pinned to `>=4.40.0,<4.45.0` in pyproject.toml. If you must use a newer version, expect hook registration failures on Llama/Mistral/Qwen architectures.
-
-**Symptoms of version mismatch:** `RuntimeError: Attention weights not captured` on Llama/Mistral/Qwen models. GPT-2 will still work (uses different hook mechanism).
-
-### Platform Notes
-- **Triton kernels**: Linux-only (`triton_kernels.py`). Falls back to `torch_functional.py` on macOS/Windows.
-- **Force PyTorch backend**: Set `AG_SAR_USE_TORCH=1` environment variable to bypass Triton even on Linux.
-- **Flash Attention**: Install with `pip install -e ".[h100]"` for full H100 SDPA acceleration. Requires CUDA 12+ and Linux.
-- **Multi-GPU**: Supports `device_map="balanced"` for large models. Tensors stay on native device until final aggregation.
-
-### Resource Management
-- **Cleanup hooks**: Call `agsar.cleanup()` when done to remove model hooks and free resources.
-
-## Key Abstractions
-
-1. **Authority Flow**: Recursive prompt recharge tracks signal provenance: `A(t) = Σ_prompt A_{t,j} + Σ_gen A_{t,j} × A(j)`
-
-2. **Stability Gate**: Detects when MLP overrides attention: `Gate(t) = exp(-sensitivity × (1 - CosineSim(h_attn, h_block)))`
-
-3. **Semantic Dispersion**: Measures consistency of top-k predictions: low dispersion (synonyms) = grounded, high dispersion (unrelated) = hallucination
-
-## Version History (Algorithm Evolution)
-
-| Version | Config Flags | Description |
-|---------|-------------|-------------|
-| **v3.1** | `enable_unified_gating=False, enable_semantic_dispersion=False` | Pure Authority Flow (paper baseline) |
-| **v7.0** | `enable_unified_gating=True, enable_semantic_dispersion=False` | Adds context-dependent gating |
-| **v8.0** | `enable_unified_gating=True, enable_semantic_dispersion=True` | **Default.** Adds semantic dispersion |
-| **v9.0** | `AGSARConfig.from_preset("qa")` | Task-specific parameter presets |
-
-### v9.0 Task-Adaptive Mode
-Use `AGSARConfig.from_preset()` for task-optimized parameters:
-- **QA**: Conservative aggregation (percentile_10), T=1.2
-- **RAG**: Trust context more (parametric_weight=0.3), T=1.5
-- **Summarization**: Higher dispersion_k=10 for long-form, T=2.5
-- **Attribution**: Moderate conservative (percentile_25), T=2.0
-
-## Test Organization
-
-- `tests/unit/`: Individual component tests (ops, config, centrality, hooks, core_ops)
-- `tests/integration/`: Full pipeline tests with real models
-- `tests/conftest.py`: Shared fixtures (device, dtype, tensor dimensions)
-
-## Experiments (Laboratory)
-
-The `experiments/` directory contains scientific evaluation code, separated from the core library:
+## Inference Pipeline
 
 ```
-experiments/
-├── main.py                    # Single CLI entry point
-├── core/
-│   ├── engine.py              # BenchmarkEngine orchestrator
-│   ├── metrics.py             # AUROC, AUPRC, bootstrap CI
-│   └── logging.py             # JSONL streaming logger
-├── data/
-│   ├── base.py                # EvaluationDataset ABC
-│   ├── halueval.py            # HaluEval loader
-│   ├── ragtruth.py            # RAGTruth loader
-│   ├── truthfulqa.py          # TruthfulQA loader
-│   ├── fava.py                # FAVA attribution loader
-│   └── wikibio.py             # WikiBio loader
-├── methods/
-│   ├── base.py                # UncertaintyMethod ABC
-│   ├── agsar_wrapper.py       # AG-SAR method (v8.0/v9.0)
-│   ├── logprob.py             # Log-probability baseline
-│   ├── entropy.py             # Entropy baseline
-│   ├── selfcheck.py           # SelfCheck baseline
-│   ├── eigenscore.py          # EigenScore baseline
-│   └── llm_check.py           # LLM-Check baselines (NeurIPS 2024)
-├── configs/
-│   ├── schema.py              # Pydantic config validation
-│   ├── agsar_only.yaml        # AG-SAR v8.0 only
-│   ├── agsar_task_adaptive.yaml    # AG-SAR v9.0
-│   └── unified_eval.yaml      # Full benchmark suite
-└── analysis/
-    └── benchmark_latency.py   # Zero-latency verification
+Input: (prompt, response)
+  ↓ Tokenization
+  ↓ Forward pass with attention hooks (extract Q/K/V)
+  ↓ Authority Flow (recursive recharge, track prompt authority)
+  ↓ Semantic Dispersion (top-k consistency analysis)
+  ↓ Unified Gating (blend authority + parametric confidence)
+  ↓ Aggregation (mean/percentile/median + temperature calibration)
+Output: (is_hallucination, confidence, details)
 ```
 
-**Paper Experiments** (run via `./reproduce_paper.sh` or individually with `python -m experiments.main --config <config>`):
+## Configuration Presets
 
-| Config | Paper Section | Description |
-|--------|---------------|-------------|
-| `00_ci_smoke_test.yaml` | - | CI validation (fast sanity check) |
-| `01_main_sota.yaml` | Table 1 | SOTA comparison on HaluEval QA |
-| `02_scaling_law.yaml` | Figure 2 | Scaling to Llama-3.1-70B |
-| `03_generalization.yaml` | Table 2 | RAGTruth generalization |
-| `04_moe_robustness.yaml` | Discussion | MoE robustness (Mixtral) |
-| `unified_eval.yaml` | Full Suite | All datasets with all methods |
+Task-specific tuning in `src/ag_sar/presets/`:
+- **QA**: Conservative (percentile_10, T=1.2)
+- **RAG**: Context-focused (mean, T=1.5, low parametric_weight)
+- **Summarization**: Paraphrase-tolerant (percentile_25, T=2.5, centroid_variance)
+- **Attribution**: Fine-grained (percentile_25, T=2.0)
 
-## Known Issues
+## Supported Models
 
-1. **Transformers version sensitivity**: Pin to `<4.45.0` for attention hook compatibility.
-
-2. **Single-token responses**: `var()` warning for single-token responses in variance computation.
+GPT-2, Llama-3/3.1/3.2 (8B, 70B), Mistral (7B, 8x7B), Qwen (7B, 72B) - any model with standard attention interface.
