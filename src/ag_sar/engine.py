@@ -25,15 +25,8 @@ from .config import AGSARConfig
 from .modeling import ModelAdapter
 from .measures import (
     compute_authority_score,
-    # Gated Authority (v7.0+)
     compute_gated_authority,
     compute_semantic_authority,
-    # Layer Stability (v11.0)
-    compute_layer_drift,
-    apply_drift_penalty,
-    # Symbolic Overlap (v13.0 - Hybrid Controller)
-    compute_context_overlap,
-    compute_numeric_consistency,
 )
 from .utils import get_model_dtype, get_model_device
 
@@ -101,35 +94,12 @@ class AGSAR:
         self._semantic_layer_indices = list(range(start_layer, num_layers))
 
         # Initialize model adapter for attention extraction
-        # Pass drift_layer_ratio if Layer Drift is enabled
-        drift_layer_ratio = None
-        if self.config.enable_layer_drift:
-            drift_layer_ratio = self.config.drift_layer_ratio
-
-        # Request hidden states if intrinsic detection is enabled (v12.0)
-        output_hidden_states = self.config.enable_intrinsic_detection
-
         self._adapter = ModelAdapter(
             model=model,
             layers=self._semantic_layer_indices,
             dtype=self.dtype,
-            drift_layer_ratio=drift_layer_ratio,
-            output_hidden_states=output_hidden_states,
         )
         self._adapter.register()
-
-        # Cache lm_head weight for Layer Drift computation
-        self._lm_head_weight = None
-        if self.config.enable_layer_drift:
-            try:
-                if hasattr(model, 'lm_head') and hasattr(model.lm_head, 'weight'):
-                    self._lm_head_weight = model.lm_head.weight.detach()
-                elif hasattr(model, 'get_output_embeddings'):
-                    output_embeddings = model.get_output_embeddings()
-                    if output_embeddings is not None:
-                        self._lm_head_weight = output_embeddings.weight.detach()
-            except Exception:
-                pass
 
         # Capture output embedding matrix (needed for semantic dispersion)
         # This is the "unembedding" matrix that maps hidden states to vocab
@@ -143,55 +113,6 @@ class AGSAR:
                 # Fallback: some models don't have get_output_embeddings
                 if hasattr(model, 'lm_head') and hasattr(model.lm_head, 'weight'):
                     self._embed_matrix = model.lm_head.weight.detach()
-
-        # Initialize Truth Vector for intrinsic hallucination detection (v12.0)
-        self._truth_vector = None
-        self._tv_meta = None
-        self._truth_vector_layer = None
-        if self.config.enable_intrinsic_detection:
-            if self.config.truth_vector_path is None:
-                raise ValueError(
-                    "enable_intrinsic_detection=True but truth_vector_path not set. "
-                    "Run scripts/calibrate_truth_vector.py first."
-                )
-            from .calibration.truth_vector import TruthVectorCalibrator
-            self._truth_vector, self._tv_meta = TruthVectorCalibrator.load(
-                self.config.truth_vector_path,
-                device=str(self._compute_device),
-            )
-            self._truth_vector_layer = self._tv_meta["layer_index"]
-            print(f"Loaded Truth Vector from {self.config.truth_vector_path}")
-            print(f"  Layer: {self._truth_vector_layer}, Samples: {self._tv_meta['n_samples']}")
-
-        # Initialize JEPA Predictor for drift-based detection (Phase 3)
-        self._jepa_predictor = None
-        if self.config.enable_jepa_monitor:
-            from .modeling.online_predictor import OnlineJepaPredictor
-
-            # Use OnlineJepaPredictor for Test-Time Training capability
-            self._jepa_predictor = OnlineJepaPredictor(
-                input_dim=model.config.hidden_size,
-                hidden_dim=self.config.predictor_hidden_dim,
-                lr=self.config.online_adaptation_lr,
-            ).to(self._compute_device)
-
-            # Optionally load pretrained weights as a "prior"
-            if (self.config.jepa_predictor_path and
-                os.path.exists(self.config.jepa_predictor_path)):
-                print(f"Loading JEPA prior from {self.config.jepa_predictor_path}...")
-                state_dict = torch.load(
-                    self.config.jepa_predictor_path,
-                    map_location=self._compute_device,
-                )
-                self._jepa_predictor.load_state_dict(state_dict, strict=False)
-
-            # Save initial state for reset between samples
-            self._jepa_predictor.save_initial_state()
-
-            print(f"  JEPA Monitor: ENABLED (Layer {self.config.jepa_monitor_layer})")
-            print(f"  Online Adaptation: {'ENABLED' if self.config.enable_online_adaptation else 'DISABLED'}")
-            print(f"  TTT Epochs: {self.config.online_adaptation_epochs}")
-            print(f"  Drift Threshold: {self.config.jepa_drift_threshold}")
 
     def _get_compute_device(self, model: nn.Module) -> torch.device:
         """
@@ -318,40 +239,6 @@ class AGSAR:
                 if self.config.enable_semantic_dispersion and self._embed_matrix is not None:
                     embed_matrix = self._embed_matrix.to(compute_device)
 
-                    # Compute Intrinsic Trust if enabled (v12.0)
-                    intrinsic_trust = None
-                    if self.config.enable_intrinsic_detection and self._truth_vector is not None:
-                        from .calibration.truth_vector import compute_intrinsic_score
-                        import torch.nn.functional as F
-
-                        # Get hidden state from truth vector layer
-                        # We need to run the model to get hidden states from that layer
-                        # The hidden states are already captured in model_output
-                        hidden_states = model_output.hidden_states
-                        if hidden_states is not None and len(hidden_states) > self._truth_vector_layer:
-                            tv_hidden = hidden_states[self._truth_vector_layer].to(compute_device)
-
-                            # Compute raw cosine similarity (per token)
-                            truth_vec = self._truth_vector.to(compute_device)
-                            raw_sim = F.cosine_similarity(
-                                tv_hidden,
-                                truth_vec.unsqueeze(0).unsqueeze(0),
-                                dim=-1
-                            )  # (B, S)
-
-                            # Normalize using calibration bounds
-                            mu_pos = self._tv_meta["mu_pos"]
-                            mu_neg = self._tv_meta["mu_neg"]
-                            denom = mu_pos - mu_neg
-
-                            if abs(denom) < 1e-6:
-                                # Fallback: if vector is collapsed, use raw similarity
-                                intrinsic_trust = (raw_sim + 1) / 2
-                            else:
-                                intrinsic_trust = (raw_sim - mu_neg) / denom
-
-                            intrinsic_trust = intrinsic_trust.clamp(0.0, 1.0)
-
                     authority = compute_semantic_authority(
                         attention_weights=attn,
                         prompt_length=response_start,
@@ -366,11 +253,6 @@ class AGSAR:
                         dispersion_sensitivity=self.config.dispersion_sensitivity,
                         dispersion_method=self.config.dispersion_method,
                         nucleus_top_p=self.config.nucleus_top_p,
-                        intrinsic_trust=intrinsic_trust,  # v12.0
-                        # Gate Sharpening (v12.1)
-                        enable_gate_sharpening=self.config.enable_gate_sharpening,
-                        gate_sharpen_low=self.config.gate_sharpen_low,
-                        gate_sharpen_high=self.config.gate_sharpen_high,
                     )
                 else:
                     # Fallback: Raw confidence (when semantic dispersion disabled)
@@ -398,35 +280,6 @@ class AGSAR:
                 attention_mask=attention_mask,
                 use_vectorized=True,
             )
-
-        # Layer Drift (v11.0): Apply "mind-change" penalty if enabled
-        # This detects when the model changed its prediction between mid and final layers
-        if (self.config.enable_layer_drift and
-            self._lm_head_weight is not None and
-            self._adapter.capture.mid_layer_hidden_states is not None):
-
-            mid_hidden = self._adapter.capture.mid_layer_hidden_states.to(compute_device)
-            final_hidden = block_outputs.get(last_layer)
-
-            if final_hidden is not None:
-                final_hidden = final_hidden.to(compute_device)
-                lm_head = self._lm_head_weight.to(compute_device)
-
-                # Compute layer drift (how much did the model change its mind?)
-                drift = compute_layer_drift(
-                    mid_hidden,
-                    final_hidden,
-                    lm_head,
-                    temperature=1.0,
-                    use_kl=False,
-                )
-
-                # Apply drift penalty to authority: high drift = lower authority
-                authority = apply_drift_penalty(
-                    authority,
-                    drift,
-                    sensitivity=self.config.drift_sensitivity,
-                )
 
         # Aggregate authority over response tokens using configured method
         # Conservative methods (min, percentile) improve TPR @ low FPR
@@ -558,25 +411,6 @@ class AGSAR:
         # Compute aggregated authority for baseline comparison (without another forward pass)
         response_authority = authority_per_token[:, response_start:].mean().item()
 
-        # Compute layer drift if enabled
-        layer_drift = None
-        mid_layer_hidden_states = None
-        if (self.config.enable_layer_drift and
-            self._lm_head_weight is not None and
-            self._adapter.capture.mid_layer_hidden_states is not None):
-
-            mid_layer_hidden_states = self._adapter.capture.mid_layer_hidden_states.to(compute_device)
-
-            if h_block is not None:
-                lm_head = self._lm_head_weight.to(compute_device)
-                layer_drift = compute_layer_drift(
-                    mid_layer_hidden_states,
-                    h_block,
-                    lm_head,
-                    temperature=1.0,
-                    use_kl=False,
-                )
-
         return {
             "score": 1.0 - response_authority,  # Baseline uncertainty
             "authority": response_authority,
@@ -591,10 +425,6 @@ class AGSAR:
             "attention_mask": attention_mask,
             "embed_matrix": self._embed_matrix.to(compute_device) if self._embed_matrix is not None else None,
             "model_confidence": model_confidence,
-            # Layer Drift (v11.0)
-            "mid_layer_hidden_states": mid_layer_hidden_states,
-            "mid_layer_idx": self._adapter.capture.mid_layer_idx,
-            "layer_drift": layer_drift,
         }
 
     def detect_context_violation(
@@ -694,263 +524,6 @@ class AGSAR:
     def reset(self):
         """Reset state between prompt-response pairs (no-op in v8.0)."""
         pass
-
-    def compute_drift(
-        self,
-        prompt: str,
-        response: str,
-    ) -> Dict[str, Any]:
-        """
-        Compute Semantic Drift using the JEPA Predictor with Test-Time Training.
-
-        This method:
-        1. Extracts hidden states from the full prompt+response
-        2. If online adaptation is enabled, trains the predictor on CONTEXT transitions
-        3. Measures drift on RESPONSE transitions
-
-        The key insight: By training on context first, the predictor learns
-        "the facts in THIS document" and can detect when the response deviates.
-
-        Args:
-            prompt: Input prompt (should contain context for RAG)
-            response: Generated response
-
-        Returns:
-            Dict containing:
-                - drift: Average MSE drift over response tokens
-                - trust_score: Inverse mapping of drift (high trust = low drift)
-                - is_hallucination: True if drift exceeds threshold
-                - context_loss: Training loss from TTT (if enabled)
-        """
-        if not self.config.enable_jepa_monitor or self._jepa_predictor is None:
-            raise RuntimeError(
-                "JEPA Monitor not enabled. Set enable_jepa_monitor=True in config."
-            )
-
-        import torch.nn.functional as F
-
-        full_text = prompt + response
-        inputs = self.tokenizer(full_text, return_tensors="pt").to(self._compute_device)
-
-        # Identify response token start index
-        prompt_len = self.tokenizer(prompt, return_tensors="pt").input_ids.shape[1]
-        total_len = inputs.input_ids.shape[1]
-
-        # Forward pass to get hidden states
-        with torch.no_grad():
-            outputs = self.model(
-                **inputs,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-
-        # Extract hidden states from monitor layer [Batch, Seq, Dim]
-        hidden_states = outputs.hidden_states[self.config.jepa_monitor_layer]
-
-        # Remove batch dimension for cleaner indexing
-        hidden_seq = hidden_states[0]  # [Seq, Dim]
-
-        # === TEST-TIME TRAINING (The Key Innovation) ===
-        context_loss = 0.0
-        if self.config.enable_online_adaptation and prompt_len > 2:
-            # Reset predictor to initial state (or prior)
-            self._jepa_predictor.reset()
-
-            # Extract CONTEXT hidden states (everything before response)
-            context_states = hidden_seq[:prompt_len]
-
-            # Train predictor on context transitions
-            # This teaches it: "In THIS document, X leads to Y"
-            context_loss = self._jepa_predictor.fit(
-                context_states,
-                epochs=self.config.online_adaptation_epochs,
-            )
-
-        # === MEASURE DRIFT ON RESPONSE ===
-        # Input: h_{prompt_len-1} to h_{total-2} (we need context to predict first response token)
-        # Target: h_{prompt_len} to h_{total-1}
-        response_input = hidden_seq[prompt_len - 1 : -1]
-        response_target = hidden_seq[prompt_len:]
-
-        drift_score, drift_per_token = self._jepa_predictor.compute_drift(
-            response_input, response_target
-        )
-
-        # === RELATIVE DRIFT NORMALIZATION ===
-        # Key insight: Raw drift varies with context complexity.
-        # Normalize by context_loss to get a relative measure:
-        # drift_ratio = response_drift / context_loss
-        # - ratio ≈ 1.0: Response follows same patterns as context (grounded)
-        # - ratio > 1.0: Response deviates from context patterns (hallucination)
-        drift_ratio = drift_score / (context_loss + 1e-6)
-
-        # Map drift to trust (inverse relationship)
-        # Using sigmoid-style mapping for bounded output
-        trust_score = 1.0 / (1.0 + drift_score * 10)
-
-        return {
-            "drift": drift_score,
-            "drift_ratio": drift_ratio,  # Normalized drift (key metric)
-            "trust_score": trust_score,
-            "is_hallucination": drift_ratio > 1.5,  # Use ratio for detection
-            "context_loss": context_loss,
-            "drift_per_token": drift_per_token.numpy() if drift_per_token is not None else None,
-            "prompt_length": prompt_len,
-            "response_length": total_len - prompt_len,
-        }
-
-    def compute_hybrid_trust(
-        self,
-        prompt: str,
-        response: str,
-        context: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Compute trust using the Universal Veto Engine (v13.0 Final).
-
-        Architecture:
-        1. NEURAL TRUST (Dynamic Blending):
-           - Context-Heavy (Gate→1): Use JEPA Variance (best for RAG)
-           - Context-Light (Gate→0): Use Truth Vector (best for myths/lies)
-           neural_trust = gate * jepa_trust + (1 - gate) * intrinsic_trust
-
-        2. SYMBOLIC VETO (Hard Filter):
-           - If entity/numeric violation detected, CAP trust at 0.2
-           - This overrides neural confidence for blatant hallucinations
-
-        Args:
-            prompt: Input prompt (may contain context)
-            response: Generated response text
-            context: Optional explicit context (if separate from prompt)
-
-        Returns:
-            Dict with trust scores and component details
-        """
-        # Use prompt as context if not explicitly provided
-        context_text = context if context else prompt
-
-        # === PHASE 1: NEURAL TRUST (Dynamic Blending) ===
-
-        # 1. Compute base uncertainty (includes gate, dispersion, authority)
-        base_result = self.compute_uncertainty(prompt, response, return_details=True)
-
-        # 2. JEPA Trust (from Authority/Dispersion - best for RAG)
-        jepa_trust = base_result.get('authority', 0.5)
-
-        # 3. Intrinsic Trust (Truth Vector - best for myths/lies)
-        intrinsic_trust = 0.5  # Default neutral
-        if self.config.enable_intrinsic_detection and self._truth_vector is not None:
-            intrinsic_trust = base_result.get('intrinsic_trust', 0.5)
-
-        # 4. Compute Gate (context attention indicator)
-        # High gate = model is attending to context = trust JEPA
-        # Low gate = model ignoring context = trust Truth Vector
-        # Heuristic: Long context = RAG scenario = high gate
-        gate = 0.9 if len(context_text) > 200 else (0.7 if len(context_text) > 50 else 0.3)
-
-        # 5. Dynamic Blending: The Core "Universal" Score
-        neural_trust = (gate * jepa_trust) + ((1.0 - gate) * intrinsic_trust)
-
-        # === PHASE 2: SYMBOLIC VETO (Hard Filter) ===
-
-        # 6. Compute Symbolic Overlap (Entity Check)
-        symbolic_score, symbolic_details = compute_context_overlap(response, context_text)
-
-        # 7. Compute Numeric Consistency
-        numeric_score = 1.0
-        numeric_details = {}
-        if self.config.enable_numeric_check:
-            numeric_score, numeric_details = compute_numeric_consistency(response, context_text)
-
-        # 8. Combined symbolic score (worst of entity/numeric)
-        symbolic_combined = min(symbolic_score, numeric_score)
-
-        # 9. VETO LOGIC: Hard Filter
-        # If symbolic check fails (<=0.5), we CAP trust regardless of neural confidence
-        # This catches "Paris vs London" errors that neural methods miss
-        # Note: 0.5 = single entity violation, which should trigger veto
-        veto_triggered = False
-        veto_cap = 0.2  # Maximum trust when veto triggers
-
-        if symbolic_combined <= 0.5:
-            # VETO: Entity/Numeric violation detected
-            final_trust = min(neural_trust, veto_cap)
-            veto_triggered = True
-        else:
-            # No veto: Use neural trust as-is
-            final_trust = neural_trust
-
-        # 10. Hallucination Detection
-        is_hallucination = veto_triggered or (final_trust < 0.5)
-
-        return {
-            # Final scores
-            "trust_score": final_trust,
-            "uncertainty": 1.0 - final_trust,
-            "is_hallucination": is_hallucination,
-            # Neural components
-            "neural_trust": neural_trust,
-            "jepa_trust": jepa_trust,
-            "intrinsic_trust": intrinsic_trust,
-            "gate": gate,
-            # Symbolic components
-            "symbolic_score": symbolic_score,
-            "numeric_score": numeric_score,
-            "symbolic_combined": symbolic_combined,
-            # Veto status
-            "veto_triggered": veto_triggered,
-            "veto_cap": veto_cap if veto_triggered else None,
-            # Details
-            "symbolic_details": symbolic_details,
-            "numeric_details": numeric_details,
-        }
-
-    def _measure_drift(
-        self,
-        hidden_states: torch.Tensor,
-        start_idx: int,
-    ) -> tuple:
-        """
-        Measure prediction error for response tokens using JEPA predictor.
-
-        Args:
-            hidden_states: (B, S, D) hidden states from monitor layer
-            start_idx: Index where response starts
-
-        Returns:
-            Tuple of (avg_drift, drift_per_token)
-        """
-        import torch.nn.functional as F
-
-        # Ensure we have context for prediction
-        if start_idx < 1:
-            start_idx = 1
-
-        # Input to predictor: h_t (from start-1 to end-1)
-        # Target for predictor: h_{t+1} (from start to end)
-        input_seq = hidden_states[:, start_idx - 1 : -1, :]
-        target_seq = hidden_states[:, start_idx:, :]
-
-        if input_seq.shape[1] == 0:
-            return 0.0, None
-
-        # Predict using JEPA predictor
-        with torch.no_grad():
-            # Convert to float32 for predictor (trained in float32)
-            input_float = input_seq.float()
-            predicted_seq = self._jepa_predictor(input_float)
-
-            # MSE per token (averaged over hidden dim)
-            target_float = target_seq.float()
-            mse_per_token = F.mse_loss(
-                predicted_seq, target_float, reduction="none"
-            ).mean(dim=-1)
-
-        # Average over sequence
-        avg_drift = mse_per_token.mean().item()
-        drift_per_token = mse_per_token.squeeze(0).cpu().numpy()
-
-        return avg_drift, drift_per_token
 
     def cleanup(self):
         """Release resources."""

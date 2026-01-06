@@ -164,9 +164,6 @@ class AGSARMethod(UncertaintyMethod):
             dispersion_method=effective_dispersion_method,
             # Authority Aggregation (Safety-Focused)
             aggregation_method=effective_aggregation,
-            # Intrinsic Detection (v12.0 - Truth Vector)
-            enable_intrinsic_detection=config.enable_intrinsic_detection,
-            truth_vector_path=config.truth_vector_path,
         )
 
         self._engine = AGSAR(model, tokenizer, config=ag_config)

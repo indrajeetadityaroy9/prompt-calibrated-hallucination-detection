@@ -124,6 +124,7 @@ ModelAdapter (modeling/hooks.py)
 Measures (measures/)
 ├── authority.py: Authority Flow + Gated/Semantic Authority
 ├── semantics.py: Semantic Dispersion (consistency over confidence)
+├── stability.py: Adaptive Gate for model-agnostic normalization
 └── entropy.py: Token entropy (baseline utility)
 
 Ops (ops/)
@@ -200,16 +201,18 @@ For ablation studies (v3.1 baseline comparison), set `enable_unified_gating=Fals
 | **v3.1** | `enable_unified_gating=False, enable_semantic_dispersion=False` | Pure Authority Flow (paper baseline) |
 | **v7.0** | `enable_unified_gating=True, enable_semantic_dispersion=False` | Adds context-dependent gating |
 | **v8.0** | `enable_unified_gating=True, enable_semantic_dispersion=True` | **Default.** Adds semantic dispersion |
-| **v9.0** | `enable_task_adaptive=True` | Task-specific parameter presets (QA, RAG, Summarization, Attribution) |
+| **v9.0** | `AGSARConfig.from_preset("qa")` | Task-specific parameter presets |
 
 ### v9.0 Task-Adaptive Mode
-Automatically selects calibration parameters based on dataset/task type:
+Use `AGSARConfig.from_preset()` for task-optimized parameters:
 - **QA**: Conservative aggregation (percentile_10), T=1.2
 - **RAG**: Trust context more (parametric_weight=0.3), T=1.5
 - **Summarization**: Higher dispersion_k=10 for long-form, T=2.5
 - **Attribution**: Moderate conservative (percentile_25), T=2.0
 
-Config: `experiments/configs/agsar_task_adaptive.yaml`
+### Archived Features (_legacy/)
+Experimental features from v10.0-v13.0 (Truth Vector, JEPA Predictor, Hybrid Controller)
+are archived in `_legacy/`. See `_legacy/README.md` for details.
 
 ## Test Organization
 

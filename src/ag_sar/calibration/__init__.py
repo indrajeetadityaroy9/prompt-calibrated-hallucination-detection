@@ -1,18 +1,8 @@
 """
-Calibration module for AG-SAR Truth Vector.
+Calibration module (archived - see _legacy/).
 
-Provides offline calibration of a "truthfulness direction" in the model's
-residual stream for intrinsic hallucination detection.
+The Truth Vector calibration was archived as it is outside the scope
+of the v8.0 detection paper. See _legacy/calibration/ for the archived code.
 """
 
-from .truth_vector import (
-    TruthVectorConfig,
-    TruthVectorCalibrator,
-    compute_intrinsic_score,
-)
-
-__all__ = [
-    "TruthVectorConfig",
-    "TruthVectorCalibrator",
-    "compute_intrinsic_score",
-]
+__all__ = []

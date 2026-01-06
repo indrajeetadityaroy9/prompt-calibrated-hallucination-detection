@@ -92,14 +92,6 @@ class AGSARMethodConfig(BaseModel):
         None, description="Manual task type override (None = auto-detect from dataset name)"
     )
 
-    # Intrinsic Detection (v12.0 - Truth Vector)
-    enable_intrinsic_detection: bool = Field(
-        False, description="Enable Truth Vector integration for intrinsic hallucination detection"
-    )
-    truth_vector_path: Optional[str] = Field(
-        None, description="Path to calibrated Truth Vector .pt file"
-    )
-
 
 class SelfCheckMethodConfig(BaseModel):
     """SelfCheck method configuration."""
