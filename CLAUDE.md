@@ -103,6 +103,11 @@ python -m experiments.main --config experiments/configs/01_main_sota.yaml --dry-
 
 # Reproduce all paper experiments
 ./reproduce_paper.sh
+
+# Run specific experiment (shorthand)
+./reproduce_paper.sh 01              # Run 01_main_sota only
+./reproduce_paper.sh 01 03           # Run multiple experiments
+./reproduce_paper.sh --dry-run       # Print configs without running
 ```
 
 ## Architecture
@@ -210,10 +215,6 @@ Use `AGSARConfig.from_preset()` for task-optimized parameters:
 - **Summarization**: Higher dispersion_k=10 for long-form, T=2.5
 - **Attribution**: Moderate conservative (percentile_25), T=2.0
 
-### Archived Features (_legacy/)
-Experimental features from v10.0-v13.0 (Truth Vector, JEPA Predictor, Hybrid Controller)
-are archived in `_legacy/`. See `_legacy/README.md` for details.
-
 ## Test Organization
 
 - `tests/unit/`: Individual component tests (ops, config, centrality, hooks, core_ops)
@@ -235,7 +236,9 @@ experiments/
 │   ├── base.py                # EvaluationDataset ABC
 │   ├── halueval.py            # HaluEval loader
 │   ├── ragtruth.py            # RAGTruth loader
-│   └── fava.py                # FAVA attribution loader
+│   ├── truthfulqa.py          # TruthfulQA loader
+│   ├── fava.py                # FAVA attribution loader
+│   └── wikibio.py             # WikiBio loader
 ├── methods/
 │   ├── base.py                # UncertaintyMethod ABC
 │   ├── agsar_wrapper.py       # AG-SAR method (v8.0/v9.0)
@@ -261,6 +264,7 @@ experiments/
 | `01_main_sota.yaml` | Table 1 | SOTA comparison on HaluEval QA |
 | `02_scaling_law.yaml` | Figure 2 | Scaling to Llama-3.1-70B |
 | `03_generalization.yaml` | Table 2 | RAGTruth generalization |
+| `04_moe_robustness.yaml` | Discussion | MoE robustness (Mixtral) |
 | `unified_eval.yaml` | Full Suite | All datasets with all methods |
 
 ## Known Issues

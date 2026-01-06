@@ -118,6 +118,24 @@ class EigenScoreMethodConfig(BaseModel):
     temperature: float = Field(1.0, gt=0.0, le=2.0, description="Sampling temperature")
 
 
+class SemanticEntropyMethodConfig(BaseModel):
+    """
+    Semantic Entropy method configuration.
+
+    Based on "Semantic Uncertainty: Linguistic Invariances for Uncertainty Estimation"
+    Kuhn et al., ICLR 2023. https://arxiv.org/abs/2302.09664
+
+    Clusters generated samples by semantic similarity and computes entropy
+    over the cluster distribution.
+    """
+
+    num_samples: int = Field(5, ge=2, le=20, description="Number of stochastic samples to generate")
+    similarity_threshold: float = Field(0.8, ge=0.5, le=1.0, description="Cosine similarity threshold for clustering")
+    embedding_model: str = Field("all-MiniLM-L6-v2", description="Sentence-transformer model for embeddings")
+    max_new_tokens: int = Field(256, ge=10, le=500, description="Max tokens per generation")
+    temperature: float = Field(0.7, gt=0.0, le=2.0, description="Sampling temperature for diversity")
+
+
 class MethodsConfig(BaseModel):
     """
     Methods to run in the experiment.
@@ -137,6 +155,7 @@ class MethodsConfig(BaseModel):
     entropy: bool = Field(False, description="Enable Predictive Entropy baseline")
     selfcheck: Optional[SelfCheckMethodConfig] = Field(None, description="SelfCheck configuration")
     eigenscore: Optional[EigenScoreMethodConfig] = Field(None, description="EigenScore configuration (sampling-based)")
+    semantic_entropy: Optional[SemanticEntropyMethodConfig] = Field(None, description="Semantic Entropy configuration (sampling-based)")
     saplma: bool = Field(False, description="Enable SAPLMA baseline")
     # LLM-Check methods (NeurIPS 2024) - zero-shot, single-pass
     llmcheck_attn: bool = Field(False, description="Enable LLM-Check Attention Score")
@@ -288,6 +307,8 @@ class ExperimentConfig(BaseModel):
             methods.append("selfcheck")
         if self.methods.eigenscore:
             methods.append("eigenscore")
+        if self.methods.semantic_entropy:
+            methods.append("semantic_entropy")
         if self.methods.saplma:
             methods.append("saplma")
         if self.methods.llmcheck_attn:

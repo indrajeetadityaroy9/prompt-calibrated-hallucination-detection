@@ -351,6 +351,6 @@ class SelfCheckNLIMethod(UncertaintyMethod):
             latency_ms=latency,
             extra={
                 "num_samples": len(samples),
-                "sample_lengths": [len(s) for s in samples],
+                "avg_sample_length": sum(len(s) for s in samples) / len(samples) if samples else 0,
             },
         )

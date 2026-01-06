@@ -50,6 +50,7 @@ from experiments.methods.llm_check import (
     LLMCheckHiddenMethod,
     LLMCheckLogitMethod,
 )
+from experiments.methods.semantic_entropy import SemanticEntropyMethod
 
 
 def load_model_and_tokenizer(config: ExperimentConfig):
@@ -212,6 +213,18 @@ def build_methods(config: ExperimentConfig, model, tokenizer) -> Dict:
         )
         print(f"  [+] EigenScore enabled (samples={mc.eigenscore.num_samples})")
 
+    if mc.semantic_entropy:
+        methods["SemanticEntropy"] = SemanticEntropyMethod(
+            model,
+            tokenizer,
+            num_samples=mc.semantic_entropy.num_samples,
+            similarity_threshold=mc.semantic_entropy.similarity_threshold,
+            embedding_model=mc.semantic_entropy.embedding_model,
+            max_new_tokens=mc.semantic_entropy.max_new_tokens,
+            temperature=mc.semantic_entropy.temperature,
+        )
+        print(f"  [+] SemanticEntropy enabled (samples={mc.semantic_entropy.num_samples})")
+
     if mc.saplma:
         methods["SAPLMA"] = SAPLMAMethod(model, tokenizer)
         print("  [+] SAPLMA enabled")
@@ -360,6 +373,15 @@ Examples:
                     num_samples=mc.eigenscore.num_samples,
                     max_new_tokens=mc.eigenscore.max_new_tokens,
                     temperature=mc.eigenscore.temperature,
+                )
+            if mc.semantic_entropy:
+                task_methods["SemanticEntropy"] = SemanticEntropyMethod(
+                    model, tokenizer,
+                    num_samples=mc.semantic_entropy.num_samples,
+                    similarity_threshold=mc.semantic_entropy.similarity_threshold,
+                    embedding_model=mc.semantic_entropy.embedding_model,
+                    max_new_tokens=mc.semantic_entropy.max_new_tokens,
+                    temperature=mc.semantic_entropy.temperature,
                 )
             if mc.saplma:
                 task_methods["SAPLMA"] = SAPLMAMethod(model, tokenizer)

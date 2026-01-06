@@ -41,6 +41,12 @@ methods:
     num_samples: 5
     max_new_tokens: 50
     temperature: 1.0
+  semantic_entropy:
+    num_samples: 5
+    similarity_threshold: 0.8
+    embedding_model: "all-MiniLM-L6-v2"
+    max_new_tokens: 256
+    temperature: 0.7
 
 evaluation:
   confidence_threshold: 0.7

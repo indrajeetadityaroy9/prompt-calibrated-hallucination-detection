@@ -32,7 +32,6 @@ enable_h100_optimizations()
 from .engine import AGSAR
 from .config import AGSARConfig
 from .modeling import ModelAdapter, AttentionCapture
-
 # Measures (for advanced users)
 from .measures import (
     # Authority (core)

@@ -1,0 +1,44 @@
+# ==============================================================================
+# MECHANISM SWEEP: Llama-3.1-70B (Scaling Hypothesis)
+# ==============================================================================
+# Hypothesis: Larger models have stronger parametric memories.
+# Prediction: 70B will have LOWER Gate (more stubborn) than 8B.
+# ==============================================================================
+
+experiment:
+  name: "mechanism_sweep_70b"
+  description: "Scaling hypothesis: Does 70B ignore context more than 8B?"
+
+dataset:
+  name: "halueval_qa"
+  num_samples: 300  # Sufficient for statistical comparison
+  seed: 42
+
+model:
+  name: "meta-llama/Llama-3.1-70B-Instruct"
+  attn_implementation: "eager"
+  dtype: "bfloat16"
+  device_map: "auto"  # Distributes across 2x H100s
+
+methods:
+  agsar:
+    semantic_layers: 4
+    enable_unified_gating: true
+    enable_semantic_dispersion: true
+    dispersion_k: 5
+    dispersion_method: "top1_projection"
+    aggregation_method: "mean"
+    calibration_temperature: 1.0
+
+evaluation:
+  metrics:
+    - auroc
+    - auprc
+    - spearman
+  bootstrap_samples: 1000
+  confidence_level: 0.95
+
+output:
+  output_dir: "results/mechanism_sweep/llama70b"
+  save_predictions: true
+  save_scores: true

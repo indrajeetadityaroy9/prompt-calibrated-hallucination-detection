@@ -204,6 +204,9 @@ class AGSARMethod(UncertaintyMethod):
             "temperature": self._temperature,
             "task_type": self._task_type,
             "mode": self._mode,
+            # Component scores for mechanism analysis (Knowledge Conflict Diagnosis)
+            "gate": result.get("gate"),  # Context reliance (1.0=context, 0.0=memory)
+            "dispersion": result.get("dispersion"),  # Semantic consistency (lower=better)
         }
 
         return MethodResult(

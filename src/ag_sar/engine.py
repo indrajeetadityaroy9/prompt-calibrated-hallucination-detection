@@ -27,7 +27,9 @@ from .measures import (
     compute_authority_score,
     compute_gated_authority,
     compute_semantic_authority,
+    compute_semantic_dispersion,
 )
+from .ops import compute_stability_gate
 from .utils import get_model_dtype, get_model_device
 
 
@@ -324,7 +326,7 @@ class AGSAR:
             token_log_probs = log_probs.gather(2, response_tokens.unsqueeze(-1)).squeeze(-1)
             model_confidence = token_log_probs.exp().mean().item()
 
-            return {
+            details = {
                 'score': uncertainty,
                 'authority': response_authority,
                 'model_confidence': model_confidence,
@@ -332,6 +334,35 @@ class AGSAR:
                 'response_start': response_start,
                 'sequence_length': input_ids.size(1),
             }
+
+            # Compute component scores for mechanism analysis (Knowledge Conflict Diagnosis)
+            if self.config.enable_unified_gating:
+                h_attn = attn_outputs.get(last_layer)
+                h_block = block_outputs.get(last_layer)
+                if h_attn is not None and h_block is not None:
+                    h_attn = h_attn.to(compute_device)
+                    h_block = h_block.to(compute_device)
+
+                    # Gate: Context reliance (1.0 = trust context, 0.0 = trust memory)
+                    gate = compute_stability_gate(
+                        h_attn, h_block, self.config.stability_sensitivity
+                    )
+                    response_gate = gate[:, response_start:].mean().item()
+                    details['gate'] = response_gate
+
+                    # Dispersion: Semantic consistency (lower = more consistent)
+                    if self.config.enable_semantic_dispersion and self._embed_matrix is not None:
+                        embed_matrix = self._embed_matrix.to(compute_device)
+                        dispersion = compute_semantic_dispersion(
+                            logits=logits,
+                            embed_matrix=embed_matrix,
+                            k=self.config.dispersion_k,
+                            method=self.config.dispersion_method,
+                        )
+                        response_dispersion = dispersion[:, response_start:].mean().item()
+                        details['dispersion'] = response_dispersion
+
+            return details
 
         return uncertainty
 

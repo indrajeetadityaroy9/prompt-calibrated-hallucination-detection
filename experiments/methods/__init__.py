@@ -11,6 +11,7 @@ from experiments.methods.llm_check import (
     LLMCheckHiddenMethod,
     LLMCheckLogitMethod,
 )
+from experiments.methods.semantic_entropy import SemanticEntropyMethod
 
 __all__ = [
     "UncertaintyMethod",
@@ -25,4 +26,5 @@ __all__ = [
     "LLMCheckAttentionMethod",
     "LLMCheckHiddenMethod",
     "LLMCheckLogitMethod",
+    "SemanticEntropyMethod",
 ]
