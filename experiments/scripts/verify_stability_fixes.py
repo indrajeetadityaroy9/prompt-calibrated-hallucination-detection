@@ -18,11 +18,12 @@ import os
 import sys
 import time
 
+# Pre-flight installation check
+from experiments.utils.preflight import check_installation
+check_installation()
+
 import torch
 from tqdm import tqdm
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from ag_sar import AGSAR, AGSARConfig
 from ag_sar.generation import AGSARGuidedGenerator

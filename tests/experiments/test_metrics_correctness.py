@@ -7,7 +7,7 @@ produces sensible results on actual hallucination detection data.
 
 import numpy as np
 import pytest
-from experiments.core.metrics import MetricsCalculator
+from experiments.evaluation.metrics import MetricsCalculator
 
 
 class TestMetricsOnHaluEval:
@@ -326,7 +326,7 @@ class TestLatencyHelpers:
 
     def test_compute_latency_metrics(self):
         """Test latency statistics computation."""
-        from experiments.core.metrics import compute_latency_metrics
+        from experiments.evaluation.metrics import compute_latency_metrics
 
         latencies_ms = [10.0, 15.0, 20.0, 25.0, 100.0]  # P95 should catch the 100ms outlier
         token_counts = [50, 60, 55, 70, 65]
@@ -357,7 +357,7 @@ class TestLatencyHelpers:
 
     def test_compute_overhead_pct(self):
         """Test overhead percentage computation."""
-        from experiments.core.metrics import compute_overhead_pct
+        from experiments.evaluation.metrics import compute_overhead_pct
 
         method_latencies = [20.0, 25.0, 30.0]  # Mean = 25
         baseline_latencies = [10.0, 12.0, 8.0]  # Mean = 10

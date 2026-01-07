@@ -11,9 +11,10 @@ Usage:
 """
 
 import sys
-import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+# Pre-flight installation check
+from experiments.utils.preflight import check_installation
+check_installation()
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer

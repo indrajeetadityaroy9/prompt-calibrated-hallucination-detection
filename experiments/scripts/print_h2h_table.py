@@ -20,13 +20,15 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Any
 
+# Pre-flight installation check
+from experiments.utils.preflight import check_installation, get_project_root
+check_installation()
+
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
 
-# Add project root to path
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = get_project_root()
 
 
 def compute_tpr_at_fpr(y_true: np.ndarray, y_scores: np.ndarray, fpr_target: float = 0.05) -> float:

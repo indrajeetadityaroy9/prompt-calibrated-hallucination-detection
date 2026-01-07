@@ -24,16 +24,19 @@ import sys
 from pathlib import Path
 from collections import Counter
 
+# Pre-flight installation check
+from experiments.utils.preflight import check_installation, get_project_root
+check_installation()
+
 from datasets import load_dataset
 from tqdm import tqdm
 
-# Add project root to path
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = get_project_root()
 
-# Set HF token
-HF_TOKEN = os.environ.get("HF_TOKEN", "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")
-os.environ["HF_TOKEN"] = HF_TOKEN
+# Set HF token from environment
+HF_TOKEN = os.environ.get("HF_TOKEN")
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
 
 
 # Llama-3.1-Instruct chat template

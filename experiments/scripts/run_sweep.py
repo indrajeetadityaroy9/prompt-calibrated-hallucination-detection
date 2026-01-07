@@ -26,6 +26,10 @@ import sys
 from pathlib import Path
 from typing import Any, List, Union
 
+# Pre-flight installation check
+from experiments.utils.preflight import check_installation
+check_installation()
+
 import yaml
 
 
@@ -99,17 +103,14 @@ def run_single_experiment(config_dict: dict, output_dir: Path) -> dict:
     Returns:
         Summary dict with metrics
     """
-    # Import here to avoid circular imports and allow proper path setup
+    # Import here to avoid circular imports
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    # Add src to path for ag_sar imports
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
-
     from ag_sar import enable_h100_optimizations, get_optimal_dtype
-    from experiments.core.determinism import set_global_seed, DEFAULT_SEED
+    from experiments.evaluation.determinism import set_global_seed, DEFAULT_SEED
     from experiments.configs.schema import ExperimentConfig
-    from experiments.core.engine import BenchmarkEngine
+    from experiments.evaluation.engine import BenchmarkEngine
     from experiments.data.halueval import HaluEvalDataset
     from experiments.data.ragtruth import RAGTruthDataset
     from experiments.data.truthfulqa import TruthfulQADataset

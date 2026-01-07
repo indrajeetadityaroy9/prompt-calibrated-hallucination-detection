@@ -1,4 +1,23 @@
-"""Configuration for AG-SAR uncertainty quantification pipeline."""
+"""
+AG-SAR Configuration Module.
+
+This module defines AGSARConfig, the validated configuration dataclass that
+controls all aspects of the uncertainty quantification pipeline.
+
+Mechanism Configuration:
+    AG-SAR's three-pillar architecture is configured here:
+    - Authority Flow parameters (recharge_weight, residual_weight)
+    - Unified Gating parameters (stability_sensitivity, parametric_weight)
+    - Semantic Dispersion parameters (dispersion_k, dispersion_method)
+
+Pipeline Position:
+    Configuration is consumed by the AGSAR engine at initialization time.
+    Most parameters are immutable after engine construction.
+
+Validation:
+    All parameters are validated in __post_init__ with explicit bounds and
+    error messages. Invalid configurations raise ValueError immediately.
+"""
 
 from dataclasses import dataclass, field
 from typing import Optional, Literal
@@ -8,170 +27,286 @@ import torch
 @dataclass
 class AGSARConfig:
     """
-    Configuration for AG-SAR uncertainty quantification pipeline.
+    Configuration for the AG-SAR uncertainty quantification pipeline.
 
-    AG-SAR (Attention-Graph Shifting Attention to Relevance) detects hallucinations
-    by analyzing internal attention graph structure without external semantic models.
+    This dataclass defines all tunable parameters for hallucination detection.
+    Parameters are organized by mechanism (Authority Flow, Unified Gating,
+    Semantic Dispersion) with empirically validated defaults.
 
-    SOTA v8.0 Mechanism (Default - Gold Master):
-        1. Authority Flow: Tracks signal provenance from prompt to response
-        2. Unified Gating: Dynamically balances context vs parametric trust
-        3. Semantic Dispersion: Measures consistency over raw confidence
-        4. Late-Layer Focus: Final 4 layers where decisions are consolidated
+    Mechanism Overview:
+        AG-SAR computes uncertainty U(t) for each response token t as:
 
-    Performance (Llama-3.1-8B, H100):
-        - HaluEval QA: 0.89 AUROC (+30% vs LogProb baseline)
-        - RAGTruth: 0.72 AUROC (+18% vs LogProb baseline)
-        - Latency: ~1.1ms per inference
+            U(t) = 1 - A(t)
 
-    Scope: AG-SAR detects EXTRINSIC hallucinations (unfaithful to source context),
-    not INTRINSIC hallucinations (unfaithful to reality). For RAG faithfulness
-    monitoring, the ground truth is provided in the context.
+        where A(t) is the aggregated authority score computed via:
 
-    For ablation studies:
-        - Set enable_unified_gating=False for v3.1 pure Authority Flow
-        - Set enable_semantic_dispersion=False for v7.0 gating without dispersion
+            A(t) = G(t) × Flow(t) + (1 - G(t)) × Trust(t) × parametric_weight
 
-    H100 Optimizations:
-        - BFloat16 precision (3x faster than FP32, stable numerics)
-        - Flash Attention 2 (~2x speedup over SDPA)
-        - TF32 for matrix operations (~3x speedup)
-        - Hopper-tuned Triton kernels (BLOCK_SIZE=256)
+        Components:
+            - Flow(t): Authority derived from attention to prompt tokens
+            - G(t): Stability gate ∈ [0,1] based on attention vs MLP residual
+            - Trust(t): Semantic trust = 1 - dispersion × sensitivity
+
+    Detection Scope:
+        AG-SAR detects EXTRINSIC hallucinations (unfaithful to provided context),
+        NOT INTRINSIC hallucinations (factually incorrect but consistent with
+        model's parametric knowledge). Optimal for RAG faithfulness monitoring.
+
+    Attributes:
+        recharge_weight: Initial authority assigned to prompt tokens. Higher
+            values increase sensitivity to prompt-derived information.
+            Range: (0, ∞), Default: 1.0
+
+        enable_unified_gating: Whether to use the stability gate mechanism.
+            When True, dynamically balances context authority vs parametric
+            confidence. When False, uses pure authority flow (ablation mode).
+            Default: True
+
+        stability_sensitivity: Sharpness of the stability gate sigmoid.
+            Higher values make the gate more binary (context vs parametric).
+            Range: (0, ∞), Default: 1.0
+
+        parametric_weight: Weight for parametric confidence when gate is low.
+            Controls how much to trust model's internal confidence when it
+            ignores context. Range: [0, 1], Default: 0.5
+
+        enable_semantic_dispersion: Whether to use semantic consistency instead
+            of raw confidence. When True, measures embedding-space coherence of
+            top-k predictions. Default: True
+
+        dispersion_k: Number of top tokens to consider for dispersion.
+            Larger k captures more alternatives but may include noise.
+            Range: [1, ∞), Default: 5
+
+        dispersion_sensitivity: Scale factor for dispersion penalty.
+            Higher values penalize semantic inconsistency more strongly.
+            Range: [0, ∞), Default: 1.0
+
+        dispersion_method: Algorithm for computing semantic dispersion.
+            - "top1_projection": Distance from top-1 embedding (QA-optimized)
+            - "centroid_variance": Variance around weighted centroid (summarization)
+            - "nucleus_variance": Adaptive top-p clustering (dynamic)
+            Default: "top1_projection"
+
+        aggregation_method: How to aggregate per-token authority into sequence score.
+            - "mean": Average (good for ranking)
+            - "min": Minimum (conservative, catches worst-case)
+            - "percentile_10": 10th percentile (robust conservative)
+            - "percentile_25": 25th percentile (moderate)
+            - "importance_weighted": Weight by self-information (rare tokens count more)
+            Default: "mean"
+
+        semantic_layers: Number of final layers to analyze. Late layers contain
+            consolidated decisions; middle layers may have uncommitted representations.
+            Range: [1, num_layers], Default: 4
+
+        hallucination_threshold: Decision boundary for binary classification.
+            Uncertainty scores above this threshold are classified as violations.
+            Range: [0, 1], Default: 0.7
     """
 
-    # ===== Authority Flow (Core Mechanism) =====
-    recharge_weight: float = 1.0  # Initial prompt authority
+    # =========================================================================
+    # AUTHORITY FLOW PARAMETERS
+    # =========================================================================
+    # Authority Flow tracks information provenance from prompt to response.
+    # Tokens deriving authority from prompt are grounded; those from memory
+    # are flagged as potentially hallucinated.
 
-    # ===== Unified Gating (Context-Dependent) =====
-    # Unified framework for RAG and Free Generation (enabled by default).
-    # Dynamically shifts trust between Provenance (Flow) and Confidence (Parametric)
-    # based on whether the model is attending to context or ignoring it.
-    #
-    # Master Equation:
-    #   A(t) = Gate(t) × Flow(t) + (1 - Gate(t)) × Trust(t) × parametric_weight
-    #
-    # - In RAG: attn_to_context ≈ 1.0 → Gate ≈ 1 → Trust Flow
-    # - In Free Gen: attn_to_context ≈ 0.0 → Gate ≈ 0 → Trust Parametric
-    enable_unified_gating: bool = True  # Enable context-dependent gating (DEFAULT ON)
-    stability_sensitivity: float = 1.0  # Controls conductivity gate sharpness (1.0 optimal)
-    parametric_weight: float = 0.5  # Weight for confidence injection when ignoring context
+    recharge_weight: float = 1.0
+    """Initial authority for prompt tokens. Default 1.0 normalizes flow."""
 
-    # ===== Semantic Dispersion (Consistency over Confidence) =====
-    # Replaces raw confidence with semantic consistency of top-k predictions (enabled by default).
-    # Key insight: "Confidently wrong" vs "Semantically confused"
-    # - Low dispersion: Top-k tokens are synonyms (US, USA, America) → Grounded
-    # - High dispersion: Top-k tokens are unrelated (Paris, London, Rome) → Hallucination
-    #
-    # Master Equation:
-    #   A(t) = Gate(t) × Flow(t) + (1 - Gate(t)) × Trust(t) × parametric_weight
-    #   where Trust(t) = 1 - Dispersion(t) × sensitivity
-    enable_semantic_dispersion: bool = True  # Use semantic dispersion instead of confidence (DEFAULT ON)
-    dispersion_k: int = 5  # Number of top tokens to consider
-    dispersion_sensitivity: float = 1.0  # Scale factor for dispersion penalty (1.0 optimal)
+    # =========================================================================
+    # UNIFIED GATING PARAMETERS
+    # =========================================================================
+    # The stability gate G(t) determines whether to trust context-derived
+    # authority (G≈1) or parametric confidence (G≈0). Computed from the
+    # ratio of attention output to MLP residual norms.
 
-    # Dispersion Algorithm Selection
-    # - "top1_projection": Legacy/QA - measures distance from top-1 prediction
-    # - "centroid_variance": JEPA/Summ - measures spread around weighted centroid (Top-K)
-    # - "nucleus_variance": SOTA/Summ - adaptive Top-P clustering (dynamic k)
+    enable_unified_gating: bool = True
+    """Enable dynamic context/parametric trust balancing. Set False for ablation."""
+
+    stability_sensitivity: float = 1.0
+    """Sigmoid sharpness for gate computation. Higher = more binary gate."""
+
+    parametric_weight: float = 0.5
+    """Weight for parametric confidence when gate is low (ignoring context)."""
+
+    # =========================================================================
+    # SEMANTIC DISPERSION PARAMETERS
+    # =========================================================================
+    # Semantic Dispersion measures top-k prediction consistency in embedding
+    # space. Low dispersion (synonyms) indicates grounded generation; high
+    # dispersion (unrelated alternatives) indicates hallucination risk.
+
+    enable_semantic_dispersion: bool = True
+    """Use embedding-space consistency instead of raw confidence."""
+
+    dispersion_k: int = 5
+    """Number of top tokens for dispersion computation."""
+
+    dispersion_sensitivity: float = 1.0
+    """Scale factor for dispersion penalty in trust computation."""
+
     dispersion_method: Literal["top1_projection", "centroid_variance", "nucleus_variance"] = "top1_projection"
+    """Algorithm for semantic dispersion. See class docstring for details."""
 
-    # Nucleus Variance (Top-P) Parameters
-    # Only used when dispersion_method="nucleus_variance"
-    # Controls the cumulative probability threshold for dynamic clustering
-    # - 0.95: Captures 95% of probability mass (larger clusters for uncertain tokens)
-    # - 0.90: Tighter clusters (more aggressive)
     nucleus_top_p: float = 0.95
+    """Cumulative probability threshold for nucleus_variance method only."""
 
-    # ===== Authority Aggregation (Safety-Focused) =====
-    # Controls how authority scores across response tokens are aggregated.
-    # - "mean": Average authority (default, good for ranking)
-    # - "min": Minimum authority (conservative, catches worst-case tokens)
-    # - "percentile_10": 10th percentile (robust conservative)
-    # - "percentile_25": 25th percentile (moderate conservative)
-    # - "importance_weighted": Weights by self-information (-log p) to emphasize rare tokens
-    #
-    # SOTA Recommendation: "importance_weighted" for hallucination detection.
-    # Errors on rare tokens (names, dates) count 5x more than common tokens (the, and).
-    # This aligns uncertainty with human judgment of severity.
-    #
-    # For safety-critical applications, use "min" or "percentile_10" to improve TPR@5%FPR.
+    # =========================================================================
+    # AGGREGATION PARAMETERS
+    # =========================================================================
+    # Controls how per-token authority scores are reduced to a sequence score.
+
     aggregation_method: Literal["mean", "min", "percentile_10", "percentile_25", "importance_weighted"] = "mean"
+    """Reduction method for per-token authority. See class docstring."""
 
-    # ===== Semantic Layer Selection =====
-    # Controls which layers are analyzed for Authority Flow computation.
-    # Default: Use the last 4 layers (e.g., layers 28-31 for Llama-3-8B's 32 layers)
-    #
-    # EMPIRICAL FINDING (contradicts DoLa/ROME hypothesis):
-    # We tested middle-layer focus (layers 16-24) and found it DEGRADES performance
-    # by -3.3% AUROC on RAGTruth. The "Consolidation Hypothesis" explains this:
-    # - While facts may be retrieved in middle layers, the STRUCTURAL DECISION
-    #   to commit to those facts is a late-stage phenomenon (layers 28-31).
-    # - Late layers do not "smooth away" errors; they CONSOLIDATE them,
-    #   making hallucinations topologically visible in the attention graph.
-    # - Therefore, late-layer focus (default) is optimal for hallucination detection.
+    # =========================================================================
+    # LAYER SELECTION
+    # =========================================================================
+    # Which transformer layers to analyze for authority computation.
+
     semantic_layers: int = 4
+    """Number of final layers to analyze. Late-layer focus is empirically optimal."""
 
-    # ===== Centrality Computation =====
+    # =========================================================================
+    # CENTRALITY COMPUTATION
+    # =========================================================================
+    # Parameters for power iteration eigenvector computation.
+
     residual_weight: float = 0.5
+    """Self-loop weight in attention graph. Balances direct vs indirect authority."""
+
     power_iteration_steps: int = 3
+    """Iterations for eigenvector approximation. 3 sufficient for convergence."""
+
     power_iteration_tol: float = 1e-4
+    """Convergence tolerance for early stopping."""
 
-    # ===== Hallucination Detection =====
+    # =========================================================================
+    # DETECTION THRESHOLD
+    # =========================================================================
+
     hallucination_threshold: float = 0.7
+    """Decision boundary for binary classification. Uncertainty > threshold = violation."""
 
-    # ===== H100 Optimization Defaults =====
-    # Precision: BFloat16 is optimal for H100 (range of FP32, speed of FP16)
+    # =========================================================================
+    # HARDWARE OPTIMIZATION
+    # =========================================================================
+    # Parameters for GPU inference optimization. Defaults tuned for H100.
+
     preferred_dtype: torch.dtype = field(default_factory=lambda: torch.bfloat16)
+    """Compute precision. BFloat16 optimal for Ampere/Hopper (FP32 range, FP16 speed)."""
 
-    # Attention: Flash Attention 2 provides ~2x speedup on H100
     attn_implementation: Literal["flash_attention_2", "sdpa", "eager"] = "flash_attention_2"
+    """Attention backend. Flash Attention 2 provides ~2x speedup when available."""
 
-    # TF32: 3x throughput vs FP32 on Hopper Tensor Cores
     use_tf32: bool = True
+    """Enable TF32 for matmul. ~3x speedup on Ampere/Hopper tensor cores."""
 
-    # torch.compile: Enables Inductor backend optimizations
     use_torch_compile: bool = True
+    """Enable torch.compile for graph optimization."""
+
     compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "reduce-overhead"
+    """Compilation mode. reduce-overhead minimizes kernel launch latency."""
 
-    # Batch size: H100 80GB can handle large batches
     eval_batch_size: int = 32
+    """Batch size for batched inference."""
 
-    # Multi-GPU: Device placement strategy for model parallelism
     device_map: Literal["auto", "balanced", "sequential"] = "balanced"
-    low_cpu_mem_usage: bool = True
+    """Multi-GPU placement strategy."""
 
-    # ===== Model Architecture =====
+    low_cpu_mem_usage: bool = True
+    """Minimize CPU memory during model loading."""
+
+    # =========================================================================
+    # MODEL ARCHITECTURE (AUTO-DETECTED)
+    # =========================================================================
+
     num_attention_heads: Optional[int] = None
+    """Override auto-detected attention head count."""
+
     num_hidden_layers: Optional[int] = None
+    """Override auto-detected layer count."""
+
     model_architecture: str = "auto"
+    """Architecture family. Auto-detected from model config."""
+
     num_kv_heads: Optional[int] = None
+    """Key-value head count for GQA models (Llama-3+). None = auto-detect."""
 
     def __post_init__(self):
-        """Validate configuration."""
+        """
+        Validate all configuration parameters.
+
+        Raises:
+            ValueError: If any parameter is outside its valid range.
+
+        Side Effects:
+            Emits UserWarning if float16 dtype is selected (numerically unstable).
+        """
+        import warnings
+
+        # Authority Flow validation
+        if self.recharge_weight <= 0:
+            raise ValueError(f"recharge_weight must be > 0, got {self.recharge_weight}")
+
+        # Centrality validation
         if not 0.0 <= self.residual_weight <= 1.0:
             raise ValueError(f"residual_weight must be in [0, 1], got {self.residual_weight}")
         if self.power_iteration_steps < 1:
-            raise ValueError(f"power_iteration_steps must be >= 1")
-        if self.semantic_layers < 1:
-            raise ValueError(f"semantic_layers must be >= 1")
+            raise ValueError(f"power_iteration_steps must be >= 1, got {self.power_iteration_steps}")
+        if self.power_iteration_tol <= 0:
+            raise ValueError(f"power_iteration_tol must be > 0, got {self.power_iteration_tol}")
 
+        # Layer selection validation
+        if self.semantic_layers < 1:
+            raise ValueError(f"semantic_layers must be >= 1, got {self.semantic_layers}")
+
+        # Unified Gating validation
+        if self.stability_sensitivity <= 0:
+            raise ValueError(f"stability_sensitivity must be > 0, got {self.stability_sensitivity}")
+        if not 0.0 <= self.parametric_weight <= 1.0:
+            raise ValueError(f"parametric_weight must be in [0, 1], got {self.parametric_weight}")
+
+        # Semantic Dispersion validation
+        if self.dispersion_k < 1:
+            raise ValueError(f"dispersion_k must be >= 1, got {self.dispersion_k}")
+        if self.dispersion_sensitivity < 0:
+            raise ValueError(f"dispersion_sensitivity must be >= 0, got {self.dispersion_sensitivity}")
+        if not 0.0 < self.nucleus_top_p <= 1.0:
+            raise ValueError(f"nucleus_top_p must be in (0, 1], got {self.nucleus_top_p}")
+
+        # Detection threshold validation
+        if not 0.0 <= self.hallucination_threshold <= 1.0:
+            raise ValueError(f"hallucination_threshold must be in [0, 1], got {self.hallucination_threshold}")
+
+        # Batch size validation
+        if self.eval_batch_size < 1:
+            raise ValueError(f"eval_batch_size must be >= 1, got {self.eval_batch_size}")
+
+        # Dtype stability warning
         if self.preferred_dtype == torch.float16:
-            import warnings
             warnings.warn(
-                "float16 may cause NaN overflow with GPT-2. Use bfloat16 instead.",
+                "float16 may cause NaN overflow with some models. Use bfloat16 for stability.",
                 UserWarning
             )
 
     def to_dict(self) -> dict:
-        """Convert config to dictionary."""
+        """
+        Serialize configuration to dictionary.
+
+        Returns:
+            dict: All configuration parameters with string dtype representation.
+        """
         return {
-            # Authority Flow (Core)
+            # Authority Flow
             'recharge_weight': self.recharge_weight,
-            # Unified Gating (v7.0+)
+            # Unified Gating
             'enable_unified_gating': self.enable_unified_gating,
             'stability_sensitivity': self.stability_sensitivity,
             'parametric_weight': self.parametric_weight,
-            # Semantic Dispersion (v8.0)
+            # Semantic Dispersion
             'enable_semantic_dispersion': self.enable_semantic_dispersion,
             'dispersion_k': self.dispersion_k,
             'dispersion_sensitivity': self.dispersion_sensitivity,
@@ -179,13 +314,14 @@ class AGSARConfig:
             'nucleus_top_p': self.nucleus_top_p,
             # Aggregation
             'aggregation_method': self.aggregation_method,
-            # Computation
+            # Centrality
             'semantic_layers': self.semantic_layers,
             'residual_weight': self.residual_weight,
             'power_iteration_steps': self.power_iteration_steps,
             'power_iteration_tol': self.power_iteration_tol,
+            # Detection
             'hallucination_threshold': self.hallucination_threshold,
-            # H100 Optimization
+            # Hardware
             'preferred_dtype': str(self.preferred_dtype),
             'attn_implementation': self.attn_implementation,
             'use_tf32': self.use_tf32,
@@ -194,13 +330,22 @@ class AGSARConfig:
             'eval_batch_size': self.eval_batch_size,
             'device_map': self.device_map,
             'low_cpu_mem_usage': self.low_cpu_mem_usage,
-            # Model
+            # Architecture
             'model_architecture': self.model_architecture,
         }
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> 'AGSARConfig':
-        """Create config from dictionary."""
+        """
+        Deserialize configuration from dictionary.
+
+        Args:
+            config_dict: Dictionary with configuration parameters.
+                String dtype values are automatically converted.
+
+        Returns:
+            AGSARConfig: Validated configuration instance.
+        """
         if 'preferred_dtype' in config_dict:
             dtype_str = config_dict['preferred_dtype']
             if isinstance(dtype_str, str):
@@ -215,52 +360,51 @@ class AGSARConfig:
     @classmethod
     def from_preset(cls, preset_name: str, **overrides) -> 'AGSARConfig':
         """
-        Create config from a task-specific preset.
+        Create configuration from a task-specific preset.
 
-        Presets provide task-optimized calibration parameters for:
-        - qa: Question answering (conservative aggregation)
-        - rag: Retrieval-augmented generation (trust context more)
-        - summarization: Long-form text (higher dispersion_k)
-        - attribution: Source attribution (moderate conservative)
-        - default: Baseline parameters
+        Presets provide empirically calibrated parameters for specific tasks:
+        - "qa": Question answering (conservative aggregation, low dispersion_k)
+        - "rag": Retrieval-augmented generation (trust context, high sensitivity)
+        - "summarization": Long-form text (higher dispersion_k, centroid method)
+        - "attribution": Source attribution (moderate conservative)
+        - "default": Baseline parameters
 
         Args:
-            preset_name: Name of the preset (e.g., "qa", "rag")
-            **overrides: Additional parameters to override preset values
+            preset_name: Preset identifier (e.g., "qa", "rag").
+            **overrides: Parameters to override after preset loading.
 
         Returns:
-            AGSARConfig with preset parameters applied
+            AGSARConfig: Configuration with preset values applied.
+
+        Raises:
+            ValueError: If preset_name is not recognized.
 
         Example:
             >>> config = AGSARConfig.from_preset("qa")
             >>> config.aggregation_method
             'percentile_10'
-
             >>> config = AGSARConfig.from_preset("rag", dispersion_k=10)
             >>> config.dispersion_k
             10
         """
         from ag_sar.presets import load_preset
 
-        # Load preset parameters
         preset_params = load_preset(preset_name)
 
-        # Map preset keys to config parameter names
+        # Map preset keys to config parameters
         config_kwargs = {}
-        if "aggregation_method" in preset_params:
-            config_kwargs["aggregation_method"] = preset_params["aggregation_method"]
-        if "dispersion_k" in preset_params:
-            config_kwargs["dispersion_k"] = preset_params["dispersion_k"]
-        if "dispersion_sensitivity" in preset_params:
-            config_kwargs["dispersion_sensitivity"] = preset_params["dispersion_sensitivity"]
-        if "parametric_weight" in preset_params:
-            config_kwargs["parametric_weight"] = preset_params["parametric_weight"]
-        if "dispersion_method" in preset_params:
-            config_kwargs["dispersion_method"] = preset_params["dispersion_method"]
+        key_mapping = [
+            "aggregation_method",
+            "dispersion_k",
+            "dispersion_sensitivity",
+            "parametric_weight",
+            "dispersion_method",
+        ]
+        for key in key_mapping:
+            if key in preset_params:
+                config_kwargs[key] = preset_params[key]
 
-        # Note: calibration_temperature is handled by the wrapper, not AGSARConfig
-
-        # Apply overrides
+        # Apply user overrides
         config_kwargs.update(overrides)
 
         return cls(**config_kwargs)

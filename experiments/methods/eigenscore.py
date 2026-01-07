@@ -40,6 +40,7 @@ class EigenScoreMethod(UncertaintyMethod):
         max_new_tokens: int = 50,
         temperature: float = 1.0,
         device: Optional[torch.device] = None,
+        seed: int = 42,
     ):
         """
         Initialize EigenScore.
@@ -51,12 +52,14 @@ class EigenScoreMethod(UncertaintyMethod):
             max_new_tokens: Max tokens per sample (default: 50)
             temperature: Sampling temperature (default: 1.0)
             device: Compute device
+            seed: Random seed for reproducibility (default: 42)
         """
         super().__init__(model, tokenizer, device)
 
         self.num_samples = num_samples
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
+        self.seed = seed
 
         # Regularization for covariance matrix
         self.alpha = 1e-3
@@ -240,9 +243,15 @@ class EigenScoreMethod(UncertaintyMethod):
             embeddings.append(emb)
 
             # 2. Generate additional samples
-            for _ in range(self.num_samples - 1):
+            for sample_idx in range(self.num_samples - 1):
                 # Clear cached hidden states
                 self._hidden_states = {}
+
+                # Set seed before each generation for reproducibility
+                # Use sample_idx as offset to get different but deterministic samples
+                torch.manual_seed(self.seed + sample_idx + 1)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(self.seed + sample_idx + 1)
 
                 # Generate a new response
                 with torch.no_grad():

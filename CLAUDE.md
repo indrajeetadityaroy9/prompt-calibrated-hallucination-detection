@@ -53,11 +53,24 @@ Raw token probability is misleading—a model might be "uncertain" between synon
 
 AG-SAR treats hallucination detection as an **information provenance problem**, not a factuality problem. The question isn't "is this true?" but rather "does this come from the context the user provided?" This framing is particularly suited for RAG systems where faithfulness to retrieved documents matters more than world knowledge.
 
+## Usage
+
+```python
+from ag_sar import AGSAR, AGSARConfig
+config = AGSARConfig()  # Uses v8.0 defaults
+agsar = AGSAR(model, tokenizer, config)
+
+# Compute uncertainty score (0=confident, 1=uncertain)
+score = agsar.compute_uncertainty(prompt, response)
+
+# Binary hallucination detection
+is_violation, confidence, details = agsar.detect_context_violation(prompt, response)
+```
+
 ## Commands
 
 ### Installation
 ```bash
-pip install -r requirements.txt
 pip install -e ".[all]"              # Full install with all extras
 pip install -e ".[eval]"             # Evaluation dependencies only
 pip install -e ".[h100]"             # H100 optimizations (Linux only)
@@ -80,8 +93,8 @@ mypy src/ag_sar/                     # Type check
 
 ### Running Experiments
 ```bash
-python -m experiments.main --config experiments/configs/01_main_sota.yaml
-python -m experiments.main --config experiments/configs/03_generalization.yaml --output-dir results/custom
+python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml
+python -m experiments.main --config experiments/configs/generalization/cross_dataset.yaml --output-dir results/custom
 bash reproduce_paper.sh              # Full ICML 2025 reproduction (6 stages)
 bash run_final_matrix.sh             # Batch experiment runner
 ```
@@ -115,17 +128,27 @@ Three-component detection mechanism:
 
 ### Experiments Framework (`experiments/`)
 
-- `main.py` - CLI entry point
-- `configs/` - 43 YAML experiment specifications
-- `methods/` - 8 baseline implementations (LogProb, Entropy, SelfCheckGPT, Semantic Entropy, EigenScore, LLMCheck)
-- `data/` - Dataset loaders (HaluEval, RAGTruth, TruthfulQA, FAVA)
+- `main.py` - CLI entry point for running benchmarks
+- `evaluation/` - Benchmark engine, metrics (AUROC, AUPRC, ECE), logging infrastructure
+- `configs/` - YAML experiment specifications organized by purpose:
+  - `benchmarks/` - Main SOTA comparisons
+  - `ablations/` - Component ablation studies
+  - `scaling/` - Model size sweeps
+  - `generalization/` - Cross-dataset evaluation
+  - `architecture/` - Architecture tests (Qwen, MoE, FAVA)
+  - `mechanism_analysis/` - Mechanism sweeps and knowledge conflict
+  - `baselines/` - Parallel baseline comparisons
+  - `validation/` - CI smoke tests
+- `methods/` - Baseline implementations (LogProb, Entropy, SelfCheckGPT, Semantic Entropy, EigenScore, SAPLMA, LLMCheck variants)
+- `data/` - Dataset loaders: HaluEval, RAGTruth, TruthfulQA, WikiText, FAVA
+- `scripts/` - Utility scripts for benchmarking, dataset prep, and result formatting
 - `analysis/` - Plotting and metrics computation
 
 ## Critical Constraints
 
 - **transformers version**: Must be `>=4.40.0,<4.45.0`. Version 4.45+ breaks attention hooks.
-- **Triton**: Linux-only. Falls back to PyTorch on Mac/Windows automatically.
-- **Flash Attention**: Requires Linux + CUDA 12+ for H100 optimizations.
+- **Triton**: Optional acceleration. Falls back to PyTorch automatically if unavailable.
+- **Flash Attention**: Requires CUDA 12+ for H100 optimizations.
 
 ## Inference Pipeline
 
@@ -151,3 +174,69 @@ Task-specific tuning in `src/ag_sar/presets/`:
 ## Supported Models
 
 GPT-2, Llama-3/3.1/3.2 (8B, 70B), Mistral (7B, 8x7B), Qwen (7B, 72B) - any model with standard attention interface.
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HF_TOKEN` | HuggingFace token for gated models (Llama, Mistral) | Required for gated models |
+| `AG_SAR_USE_TORCH` | Set to `1` to force PyTorch fallback (skip Triton) | `0` (use Triton if available) |
+| `PYTHONHASHSEED` | Set by reproducibility utilities for hash determinism | Set by `set_global_seed()` |
+| `CUDA_VISIBLE_DEVICES` | Control which GPUs are visible | All GPUs |
+
+## Reproducibility
+
+For deterministic, reproducible experiments:
+
+```bash
+# Run with explicit seed and deterministic mode
+python -m experiments.main \
+    --config experiments/configs/benchmarks/main_sota.yaml \
+    --seed 42 \
+    --deterministic
+```
+
+The `--deterministic` flag enables:
+- `torch.backends.cudnn.deterministic = True`
+- `torch.backends.cudnn.benchmark = False`
+- `torch.use_deterministic_algorithms(True)` where supported
+
+**Note**: Deterministic mode may reduce performance by 10-20%.
+
+### Sampling Method Seeds
+
+All sampling-based methods (SelfCheck, EigenScore, SemanticEntropy) accept a `seed` parameter for reproducibility. Seeds are set before each generation call.
+
+## Hardware Requirements
+
+### Minimum
+- GPU: Any CUDA-capable GPU with 8GB+ VRAM
+- CPU: 4+ cores
+- RAM: 16GB
+
+### Recommended (for full reproduction)
+- GPU: 2x NVIDIA H100 80GB (or A100 40GB)
+- CPU: 24+ cores
+- RAM: 256GB
+
+### Model-Specific Requirements
+
+| Model | VRAM Required | Device Map |
+|-------|---------------|------------|
+| GPT-2 | 2GB | Single GPU |
+| Llama-3-8B | 16GB (bf16) | Single GPU |
+| Llama-3-70B | 140GB (bf16) | 2x H100 (balanced) |
+| Mixtral-8x7B | 90GB (bf16) | 2x H100 (balanced) |
+
+### H100 Optimizations
+
+Automatically enabled on H100/A100:
+- TF32 precision (3x faster matmul)
+- Flash Attention 2 (when available)
+- cuDNN benchmark mode (unless `--deterministic`)
+
+To check if optimizations are active:
+```python
+from ag_sar.utils import is_tf32_enabled, is_h100
+print(f"TF32: {is_tf32_enabled()}, H100: {is_h100()}")
+```

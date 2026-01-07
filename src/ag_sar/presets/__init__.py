@@ -73,6 +73,12 @@ def load_preset(name: str, fallback_to_default: bool = True) -> Dict[str, Any]:
             preset_path = _PRESETS_DIR / "default.yaml"
             if not preset_path.exists():
                 # Return hardcoded defaults if file missing
+                import warnings
+                warnings.warn(
+                    f"Preset '{name}' not found and default.yaml is missing from {_PRESETS_DIR}. "
+                    "Using hardcoded defaults. This may indicate an incomplete installation.",
+                    RuntimeWarning,
+                )
                 return {
                     "aggregation_method": "mean",
                     "calibration_temperature": 1.0,

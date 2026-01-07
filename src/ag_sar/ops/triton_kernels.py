@@ -2,7 +2,7 @@
 Triton GPU Kernels for Matrix-Free Centrality.
 
 O(N) memory centrality computation optimized for H100 (Hopper).
-Only available on Linux with NVIDIA GPUs.
+Requires Triton and NVIDIA CUDA GPU.
 
 H100 Optimization Notes:
     - Larger BLOCK sizes (256) utilize H100's massive L2/SRAM (50MB)
@@ -10,14 +10,6 @@ H100 Optimization Notes:
     - num_stages=3-4 for optimal pipelining with TMA
     - BFloat16 for stable numerics at high speed
 """
-
-import sys
-
-if sys.platform != "linux":
-    raise ImportError(
-        "Triton kernels are only available on Linux. "
-        "Use centrality_kernel_fallback from torch_functional.py instead."
-    )
 
 import triton
 import triton.language as tl

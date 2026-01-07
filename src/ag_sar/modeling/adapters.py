@@ -46,12 +46,22 @@ def get_transformers_version() -> Tuple[int, int, int]:
     Returns:
         (major, minor, patch) version tuple
 
+    Raises:
+        ImportError: If transformers is not installed
+
     Example:
         >>> get_transformers_version()
         (4, 42, 0)
     """
     try:
         import transformers
+    except ImportError:
+        raise ImportError(
+            "transformers library is required but not installed. "
+            "Install with: pip install 'transformers>=4.40.0,<4.45.0'"
+        )
+
+    try:
         parts = transformers.__version__.split('.')
         major = int(parts[0]) if len(parts) > 0 else 0
         minor = int(parts[1]) if len(parts) > 1 else 0
@@ -59,8 +69,13 @@ def get_transformers_version() -> Tuple[int, int, int]:
         patch_str = parts[2].split('+')[0].split('.')[0] if len(parts) > 2 else "0"
         patch = int(''.join(c for c in patch_str if c.isdigit()) or "0")
         return (major, minor, patch)
-    except (ImportError, ValueError, IndexError):
-        return (0, 0, 0)
+    except (ValueError, IndexError) as e:
+        warnings.warn(
+            f"Could not parse transformers version '{transformers.__version__}': {e}. "
+            "Assuming version 4.40.0 for compatibility.",
+            RuntimeWarning,
+        )
+        return (4, 40, 0)
 
 
 def check_version_supported(version: Tuple[int, int, int], architecture: str) -> None:

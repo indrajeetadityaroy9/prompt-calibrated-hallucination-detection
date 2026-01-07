@@ -8,7 +8,7 @@ Usage:
     python -m experiments.main --config experiments/configs/exp1_halueval_qa.yaml
 """
 
-from experiments.core.engine import BenchmarkEngine
+from experiments.evaluation.engine import BenchmarkEngine
 from experiments.configs.schema import ExperimentConfig
 
 __all__ = ["BenchmarkEngine", "ExperimentConfig"]

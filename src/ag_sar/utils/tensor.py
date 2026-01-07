@@ -29,27 +29,43 @@ def enable_tf32() -> None:
         torch.set_float32_matmul_precision('high')
 
 
-def enable_h100_optimizations() -> None:
+def enable_h100_optimizations(deterministic: bool = False) -> None:
     """
     Enable all Hopper-specific optimizations.
 
     Call this at the very top of __init__.py for maximum performance.
 
+    Args:
+        deterministic: If True, disable non-deterministic optimizations
+                       (benchmark mode) for reproducibility. Default False
+                       prioritizes performance.
+
     Enables:
         - TF32 for 3x faster FP32 matrix operations
-        - cuDNN benchmark mode for optimized convolution algorithms
+        - cuDNN benchmark mode for optimized convolution algorithms (unless deterministic)
         - Flash SDP for memory-efficient attention (when available)
+
+    Note:
+        When deterministic=True, sets cudnn.benchmark=False and cudnn.deterministic=True.
+        This ensures reproducibility but may reduce performance by 10-20%.
     """
     if not torch.cuda.is_available():
         return
 
     # TF32: 3x faster on H100 for FP32 math operations
+    # (deterministic with respect to input - same inputs = same outputs)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.set_float32_matmul_precision('high')
 
-    # cuDNN: Auto-tune for best convolution algorithms
-    torch.backends.cudnn.benchmark = True
+    # cuDNN mode: trade off performance vs reproducibility
+    if deterministic:
+        # Reproducibility mode: same inputs always produce same outputs
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    else:
+        # Performance mode: auto-tune algorithms (may vary between runs)
+        torch.backends.cudnn.benchmark = True
 
     # Enable Flash SDP when available (requires PyTorch 2.0+)
     if hasattr(torch.backends.cuda, 'enable_flash_sdp'):

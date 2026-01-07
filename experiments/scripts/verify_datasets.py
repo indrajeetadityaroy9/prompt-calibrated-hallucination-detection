@@ -14,13 +14,12 @@ Exit codes:
 """
 
 import sys
-import os
 from pathlib import Path
 from typing import List, Tuple
 
-# Ensure repo root is in path
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+# Pre-flight installation check
+from experiments.utils.preflight import check_installation
+check_installation()
 
 
 def verify_halueval_schema() -> Tuple[bool, List[str]]:

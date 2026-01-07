@@ -50,6 +50,7 @@ class SemanticEntropyMethod(UncertaintyMethod):
         max_new_tokens: int = 256,
         temperature: float = 0.7,
         device: Optional[torch.device] = None,
+        seed: int = 42,
     ):
         """
         Initialize Semantic Entropy method.
@@ -63,6 +64,7 @@ class SemanticEntropyMethod(UncertaintyMethod):
             max_new_tokens: Max tokens per generation
             temperature: Sampling temperature for diversity
             device: Compute device
+            seed: Random seed for reproducibility (default: 42)
         """
         super().__init__(model, tokenizer, device)
 
@@ -70,6 +72,7 @@ class SemanticEntropyMethod(UncertaintyMethod):
         self.similarity_threshold = similarity_threshold
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
+        self.seed = seed
 
         # Ensure pad token is set (required for batch generation)
         if self.tokenizer.pad_token is None:
@@ -98,6 +101,11 @@ class SemanticEntropyMethod(UncertaintyMethod):
         Returns:
             List of generated response strings
         """
+        # Set seed before generation for reproducibility
+        torch.manual_seed(self.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.seed)
+
         inputs = self.tokenizer(
             prompt,
             return_tensors="pt",

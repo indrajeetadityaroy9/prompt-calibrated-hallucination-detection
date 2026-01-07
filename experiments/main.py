@@ -7,34 +7,37 @@ It replaces the old scattered scripts (run.py, compare_baselines.py, etc.).
 
 Usage:
     # Run a full experiment
-    python -m experiments.main --config experiments/configs/exp1_halueval_qa.yaml
+    python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml
 
     # Dry run (print config and exit)
-    python -m experiments.main --config experiments/configs/exp1_halueval_qa.yaml --dry-run
+    python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml --dry-run
 
     # Override output directory
-    python -m experiments.main --config experiments/configs/exp1_halueval_qa.yaml --output-dir results/custom
+    python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml --output-dir results/custom
+
+    # Reproducibility mode (deterministic, overridden seed)
+    python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml --seed 123 --deterministic
 """
 
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
+
+# Pre-flight installation check (must be first to ensure ag_sar is importable)
+from experiments.utils.preflight import check_installation
+check_installation()
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# Add src to path for ag_sar imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 from ag_sar import enable_h100_optimizations, get_optimal_dtype
+from experiments.evaluation.determinism import set_global_seed, DEFAULT_SEED
 
-# Phase 0.2: Set global seed BEFORE any model or data loading
-from experiments.core.determinism import set_global_seed, DEFAULT_SEED
-set_global_seed(DEFAULT_SEED)
+# Note: Global seed is set in main() after parsing CLI args to support --seed override
 
 from experiments.configs.schema import ExperimentConfig
-from experiments.core.engine import BenchmarkEngine
+from experiments.evaluation.engine import BenchmarkEngine
 from experiments.data.halueval import HaluEvalDataset
 from experiments.data.ragtruth import RAGTruthDataset
 from experiments.data.truthfulqa import TruthfulQADataset
@@ -53,20 +56,21 @@ from experiments.methods.llm_check import (
 from experiments.methods.semantic_entropy import SemanticEntropyMethod
 
 
-def load_model_and_tokenizer(config: ExperimentConfig):
+def load_model_and_tokenizer(config: ExperimentConfig, deterministic: bool = False):
     """
     Load model with H100 optimizations.
 
     Args:
         config: Experiment configuration
+        deterministic: Enable deterministic mode for reproducibility
 
     Returns:
         Tuple of (model, tokenizer)
     """
     print(f"Loading model: {config.model.name}")
 
-    # Enable optimizations
-    enable_h100_optimizations()
+    # Enable optimizations (with optional determinism)
+    enable_h100_optimizations(deterministic=deterministic)
 
     # Determine dtype
     dtype_map = {
@@ -255,8 +259,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python -m experiments.main --config experiments/configs/exp1_halueval_qa.yaml
-  python -m experiments.main --config experiments/configs/exp1_halueval_qa.yaml --dry-run
+  python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml
+  python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml --dry-run
+  python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml --seed 123 --deterministic
         """,
     )
     parser.add_argument(
@@ -276,8 +281,26 @@ Examples:
         default=None,
         help="Override output directory from config",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=f"Override random seed (default: {DEFAULT_SEED})",
+    )
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Enable deterministic mode for bit-exact reproducibility (may reduce performance)",
+    )
 
     args = parser.parse_args()
+
+    # Set global seed BEFORE any model/data loading
+    seed = args.seed if args.seed is not None else DEFAULT_SEED
+    set_global_seed(seed, deterministic=args.deterministic)
+
+    if args.deterministic:
+        print(f"[Deterministic mode enabled] Seed: {seed}")
 
     # Load config
     try:
@@ -317,7 +340,7 @@ Examples:
     # Load model
     print("\n[1/4] Loading model...")
     try:
-        model, tokenizer = load_model_and_tokenizer(config)
+        model, tokenizer = load_model_and_tokenizer(config, deterministic=args.deterministic)
     except Exception as e:
         print(f"Error loading model: {e}")
         return 1

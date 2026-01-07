@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Parallel Launcher for Head-to-Head RAGTruth Benchmark.
+Parallel Launcher for Head-to-Head HaluEval Benchmark.
 
 Runs two AG-SAR variants simultaneously on 2x H100 GPUs:
 - GPU 0: Baseline (top1_projection)
 - GPU 1: JEPA (centroid_variance)
 
-This is the "Final Boss" benchmark - real RAG failures from production LLMs.
+This cuts experiment time in half by utilizing both GPUs in parallel.
 
 Usage:
-    python scripts/prepare_ragtruth.py  # Run first to prepare data
-    python scripts/launch_ragtruth_h2h.py
-    python scripts/launch_ragtruth_h2h.py --config experiments/configs/benchmark_ragtruth.yaml
+    python scripts/launch_halueval_h2h.py
+    python scripts/launch_halueval_h2h.py --config experiments/configs/benchmark_h2h_halueval.yaml
 """
 
 import argparse
@@ -20,52 +19,24 @@ import os
 import sys
 import time
 import multiprocessing
+from copy import deepcopy
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Any
-from dataclasses import dataclass
+
+# Pre-flight installation check
+from experiments.utils.preflight import check_installation, get_project_root
+check_installation()
 
 import yaml
 import torch
 
-# Add project root to path
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
+PROJECT_ROOT = get_project_root()
 
-# Set HF token
-HF_TOKEN = os.environ.get("HF_TOKEN", "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")
-os.environ["HF_TOKEN"] = HF_TOKEN
-
-
-@dataclass
-class RAGTruthSample:
-    """A single RAGTruth evaluation sample."""
-    id: str
-    prompt: str
-    response: str
-    label: int
-    task_type: str = ""
-    model: str = ""
-
-
-def load_ragtruth_jsonl(data_file: Path, num_samples: int = None) -> List[RAGTruthSample]:
-    """Load RAGTruth samples from JSONL file."""
-    samples = []
-    with open(data_file) as f:
-        for line in f:
-            row = json.loads(line.strip())
-            samples.append(RAGTruthSample(
-                id=row["id"],
-                prompt=row["prompt"],
-                response=row["response"],
-                label=row["label"],
-                task_type=row.get("task_type", ""),
-                model=row.get("model", ""),
-            ))
-            if num_samples and len(samples) >= num_samples:
-                break
-    return samples
+# Set HF token from environment
+HF_TOKEN = os.environ.get("HF_TOKEN")
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
 
 
 def run_worker(method_config: Dict, base_config: Dict, gpu_id: int, output_dir: Path):
@@ -85,6 +56,9 @@ def run_worker(method_config: Dict, base_config: Dict, gpu_id: int, output_dir: 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from ag_sar import AGSAR, AGSARConfig
+
+    from experiments.data.halueval import HaluEvalDataset
+    from experiments.evaluation.metrics import MetricsCalculator
 
     # Set CUDA device
     torch.cuda.set_device(gpu_id)
@@ -120,16 +94,16 @@ def run_worker(method_config: Dict, base_config: Dict, gpu_id: int, output_dir: 
     model.eval()
     print(f"[GPU {gpu_id}] Model loaded on {device}")
 
-    # Load dataset from JSONL
+    # Load dataset
     ds_config = base_config["dataset"]
-    data_file = PROJECT_ROOT / ds_config["data_file"]
-    if not data_file.exists():
-        print(f"[GPU {gpu_id}] ERROR: Data file not found: {data_file}")
-        print(f"[GPU {gpu_id}] Run: python scripts/prepare_ragtruth.py")
-        return None
-
-    samples = load_ragtruth_jsonl(data_file, ds_config.get("num_samples"))
-    print(f"[GPU {gpu_id}] Dataset loaded: {len(samples)} samples")
+    variant = ds_config["name"].replace("halueval_", "")
+    dataset = HaluEvalDataset(
+        variant=variant,
+        num_samples=ds_config.get("num_samples"),
+        seed=ds_config.get("seed", 42),
+    )
+    dataset.load()
+    print(f"[GPU {gpu_id}] Dataset loaded: {len(dataset)} samples")
 
     # Create AG-SAR engine with method-specific config
     agsar_config_dict = method_config.get("agsar", {})
@@ -170,7 +144,7 @@ def run_worker(method_config: Dict, base_config: Dict, gpu_id: int, output_dir: 
     from tqdm import tqdm
 
     print(f"[GPU {gpu_id}] Starting evaluation...")
-    for sample in tqdm(samples, desc=f"[GPU {gpu_id}] {method_name}", position=gpu_id):
+    for sample in tqdm(dataset, desc=f"[GPU {gpu_id}] {method_name}", position=gpu_id):
         try:
             result = engine.compute_uncertainty(
                 sample.prompt,
@@ -187,8 +161,6 @@ def run_worker(method_config: Dict, base_config: Dict, gpu_id: int, output_dir: 
                 "uncertainty": uncertainty,
                 "authority": result.get("authority", 0),
                 "latency_ms": latency,
-                "task_type": sample.task_type,
-                "source_model": sample.model,
             })
 
             scores.append(uncertainty)
@@ -209,15 +181,10 @@ def run_worker(method_config: Dict, base_config: Dict, gpu_id: int, output_dir: 
     scores_arr = np.array(scores)
     labels_arr = np.array(labels)
 
-    # Check for valid labels
-    n_pos = (labels_arr == 1).sum()
-    n_neg = (labels_arr == 0).sum()
-    print(f"[GPU {gpu_id}] Label distribution: {n_pos} hallucinated, {n_neg} faithful")
-
     # AUROC
     auroc = roc_auc_score(labels_arr, scores_arr) if len(np.unique(labels_arr)) > 1 else 0.0
 
-    # AUPRC (critical for imbalanced data)
+    # AUPRC
     auprc = average_precision_score(labels_arr, scores_arr) if len(np.unique(labels_arr)) > 1 else 0.0
 
     # TPR @ 5% FPR
@@ -269,8 +236,6 @@ def run_worker(method_config: Dict, base_config: Dict, gpu_id: int, output_dir: 
         "avg_unc_hallucinated": float(avg_unc_hallucinated),
         "avg_unc_faithful": float(avg_unc_faithful),
         "n_samples": len(results),
-        "n_hallucinated": int(n_pos),
-        "n_faithful": int(n_neg),
     }
 
     # Save results
@@ -279,7 +244,7 @@ def run_worker(method_config: Dict, base_config: Dict, gpu_id: int, output_dir: 
         "method": method_name,
         "config": {
             "model": model_config["name"],
-            "dataset": "ragtruth",
+            "dataset": ds_config["name"],
             "agsar": agsar_config_dict,
         },
         "metrics": metrics,
@@ -291,7 +256,7 @@ def run_worker(method_config: Dict, base_config: Dict, gpu_id: int, output_dir: 
 
     print(f"\n[GPU {gpu_id}] {method_name} Complete!")
     print(f"  AUROC: {auroc:.4f}")
-    print(f"  AUPRC: {auprc:.4f} (KEY METRIC)")
+    print(f"  AUPRC: {auprc:.4f}")
     print(f"  TPR@5%FPR: {tpr_at_5fpr:.4f}")
     print(f"  AURC: {aurc:.4f}")
     print(f"  Avg Latency: {avg_latency:.2f}ms")
@@ -301,18 +266,12 @@ def run_worker(method_config: Dict, base_config: Dict, gpu_id: int, output_dir: 
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Launch Head-to-Head RAGTruth Benchmark")
+    parser = argparse.ArgumentParser(description="Launch Head-to-Head HaluEval Benchmark")
     parser.add_argument(
         "--config",
         type=str,
-        default="experiments/configs/benchmark_ragtruth.yaml",
+        default="experiments/configs/benchmark_h2h_halueval.yaml",
         help="Path to benchmark config",
-    )
-    parser.add_argument(
-        "--data-file",
-        type=str,
-        default=None,
-        help="Override data file path",
     )
     args = parser.parse_args()
 
@@ -324,30 +283,19 @@ def main():
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
-    # Override data file if specified
-    if args.data_file:
-        config["dataset"]["data_file"] = args.data_file
-
     # Setup output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = PROJECT_ROOT / config["output"]["output_dir"] / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
-    print("RAGTruth Head-to-Head Benchmark (Final Boss)")
+    print("Head-to-Head HaluEval Benchmark on 2x H100")
     print("=" * 60)
     print(f"Config: {config_path}")
-    print(f"Data File: {config['dataset']['data_file']}")
+    print(f"Dataset: {config['dataset']['name']}")
     print(f"Samples: {config['dataset'].get('num_samples', 'all')}")
     print(f"Output: {output_dir}")
     print()
-
-    # Check data file exists
-    data_file = PROJECT_ROOT / config["dataset"]["data_file"]
-    if not data_file.exists():
-        print(f"ERROR: Data file not found: {data_file}")
-        print("Run: python scripts/prepare_ragtruth.py")
-        sys.exit(1)
 
     # Check GPU availability
     n_gpus = torch.cuda.device_count()

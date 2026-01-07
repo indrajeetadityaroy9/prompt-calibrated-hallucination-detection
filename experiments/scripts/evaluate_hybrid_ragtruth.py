@@ -9,11 +9,11 @@ Usage:
 """
 
 import sys
-import os
 import argparse
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# Pre-flight installation check
+from experiments.utils.preflight import check_installation
+check_installation()
 
 import torch
 import numpy as np

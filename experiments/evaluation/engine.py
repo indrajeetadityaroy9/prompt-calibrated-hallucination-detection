@@ -27,8 +27,8 @@ from tqdm import tqdm
 
 from experiments.data.base import EvaluationDataset
 from experiments.methods.base import UncertaintyMethod
-from experiments.core.metrics import MetricsCalculator
-from experiments.core.logging import JSONLLogger, load_jsonl_results
+from experiments.evaluation.metrics import MetricsCalculator
+from experiments.evaluation.logging import JSONLLogger, load_jsonl_results
 from experiments.configs.schema import ExperimentConfig
 
 
