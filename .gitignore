@@ -86,11 +86,6 @@ processed_data/
 embeddings/
 cache/
 
-# Resources (research papers, consolidated LaTeX)
-resources/
-*.tar.gz
-*.tex
-
 # Benchmark outputs (not source code in benchmarks/)
 .benchmarks/
 benchmark_results/
