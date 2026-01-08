@@ -1,13 +1,21 @@
 #!/bin/bash
 set -e  # Exit immediately if a command fails
 
-# AG-SAR Reproduction Script (ICML 2025)
-# This script reproduces the experimental results presented in Tables 1 and 2.
+# =============================================================================
+# AG-SAR Paper Reproduction Script (ICML/NeurIPS 2025)
+# =============================================================================
+#
+# This script reproduces all experimental results from the paper:
+#   - Table 1: AG-SAR vs Fast Baselines (LogProb, Entropy, LLM-Check)
+#   - Table 2: AG-SAR vs SOTA (SelfCheckGPT, EigenScore)
+#   - Table 3: Ablation Studies (component contributions)
+#   - Figure 3: Mechanism Visualization (anatomy plots)
 #
 # Usage:
-#   ./reproduce_paper.sh               # Full reproduction
-#   ./reproduce_paper.sh --skip-install  # Skip venv setup (assumes dependencies installed)
-#   HF_TOKEN=your_token ./reproduce_paper.sh  # With HuggingFace token for gated models
+#   ./reproduce_paper.sh                  # Full reproduction (~4-6 hours)
+#   ./reproduce_paper.sh --skip-install   # Skip venv setup
+#   ./reproduce_paper.sh --table1-only    # Only Table 1 (fast, ~30 min)
+#   ./reproduce_paper.sh --table2-only    # Only Table 2 (slow, ~2 hours)
 #
 # Requirements:
 #   - Python 3.10+
@@ -19,15 +27,27 @@ set -e  # Exit immediately if a command fails
 #   AG_SAR_USE_TORCH: Set to "1" to force PyTorch backend (skip Triton)
 
 echo "========================================================"
-echo "   AG-SAR: Universal Hallucination Sensor (v8.0 SOTA)   "
+echo "   AG-SAR: Universal Hallucination Sensor              "
+echo "   Paper Reproduction Script                           "
 echo "========================================================"
 
 # Parse arguments
 SKIP_INSTALL=false
+TABLE1_ONLY=false
+TABLE2_ONLY=false
+
 for arg in "$@"; do
     case $arg in
         --skip-install)
             SKIP_INSTALL=true
+            shift
+            ;;
+        --table1-only)
+            TABLE1_ONLY=true
+            shift
+            ;;
+        --table2-only)
+            TABLE2_ONLY=true
             shift
             ;;
     esac
@@ -37,6 +57,11 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# H100 Optimization Flags
+export NCCL_P2P_LEVEL=NVL
+export OMP_NUM_THREADS=24
+export TOKENIZERS_PARALLELISM=false
+
 # Check for HF_TOKEN
 if [ -z "$HF_TOKEN" ]; then
     echo "WARNING: HF_TOKEN not set. Gated models (Llama, Mistral) may fail."
@@ -44,31 +69,34 @@ if [ -z "$HF_TOKEN" ]; then
     echo ""
 fi
 
-# Virtual Environment Setup
+# =============================================================================
+# Step 0: Virtual Environment Setup
+# =============================================================================
 if [ "$SKIP_INSTALL" = false ]; then
     echo "[0/7] Setting up Virtual Environment..."
     if [ -d "venv" ]; then
         echo "   Found existing virtual environment, activating..."
         source venv/bin/activate
     else
-        echo "   No virtual environment found, creating one..."
+        echo "   Creating virtual environment..."
         python3 -m venv venv
         source venv/bin/activate
         echo "   Installing dependencies..."
         pip install --upgrade pip
         pip install -r requirements.txt
-        pip install -e ".[all]"
+        pip install -e .
     fi
     echo "   Virtual environment active: $VIRTUAL_ENV"
 else
     echo "[0/7] Skipping virtual environment setup (--skip-install)"
-    # Try to activate existing venv if present
     if [ -d "venv" ]; then
         source venv/bin/activate 2>/dev/null || true
     fi
 fi
 
-# 1. Smoke Test (Pre-flight verification)
+# =============================================================================
+# Step 1: Smoke Test (Pre-flight verification)
+# =============================================================================
 echo ""
 echo "[1/7] Running Smoke Test..."
 python smoke_test.py --skip-inference || {
@@ -76,13 +104,14 @@ python smoke_test.py --skip-inference || {
     exit 1
 }
 
-# 2. Environment Check
+# =============================================================================
+# Step 2: Environment Verification
+# =============================================================================
 echo ""
 echo "[2/7] Verifying Environment..."
 python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
 python -c "import ag_sar; print(f'AG-SAR Package: v{ag_sar.__version__}')"
 
-# Check CUDA
 python -c "
 import torch
 if not torch.cuda.is_available():
@@ -93,37 +122,90 @@ else:
         print(f'GPU {i}: {props.name} ({props.total_memory / 1e9:.1f}GB)')
 "
 
-# 3. Data Verification
+# =============================================================================
+# Step 3: Dataset Verification
+# =============================================================================
 echo ""
 echo "[3/7] Verifying Datasets..."
 python -m experiments.scripts.verify_datasets || {
     echo "WARNING: Dataset verification had issues. Continuing anyway..."
 }
 
-# 4. Table 1: Main SOTA Comparison (HaluEval QA + Summarization)
-# Compares AG-SAR against Predictive Entropy and SelfCheckGPT
-echo ""
-echo "[4/7] Running Table 1 Benchmark (SOTA Comparison)..."
-python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml --deterministic
+START_TIME=$(date +%s)
 
-# 5. Table 2: Generalization (RAGTruth)
-# Demonstrates performance on Out-Of-Distribution RAG data
-echo ""
-echo "[5/7] Running Table 2 Benchmark (Generalization)..."
-python -m experiments.main --config experiments/configs/generalization/cross_dataset.yaml --deterministic
+# =============================================================================
+# Step 4: Table 1 - AG-SAR vs Fast Baselines
+# =============================================================================
+# Methods: AG-SAR, LogProb, Entropy, LLM-Check (Attention + Hidden)
+# Datasets: HaluEval QA, RAGTruth, HaluEval Summ, TruthfulQA
+# Samples: 500 per dataset (statistical significance > 95%)
+# Runtime: ~30 minutes
+# =============================================================================
+if [ "$TABLE2_ONLY" = false ]; then
+    echo ""
+    echo "[4/7] Running Table 1: AG-SAR vs Fast Baselines..."
+    echo "   Config: experiments/configs/benchmarks/reproduce_main_results.yaml"
+    echo "   Methods: AG-SAR, LogProb, Entropy, LLM-Check variants"
+    echo "   Estimated runtime: ~30 minutes"
+    python -m experiments.main \
+        --config experiments/configs/benchmarks/reproduce_main_results.yaml \
+        --deterministic
+else
+    echo ""
+    echo "[4/7] Skipping Table 1 (--table2-only)"
+fi
 
-# 6. Ablation Studies (confirming component contributions)
-echo ""
-echo "[6/7] Running Ablation Studies..."
-echo "   - Run 1: No Unified Gating (v3.1 Baseline)"
-python -m experiments.main --config experiments/configs/ablations/no_gating.yaml --deterministic
-echo "   - Run 2: No Semantic Dispersion (v7.0 Baseline)"
-python -m experiments.main --config experiments/configs/ablations/no_dispersion.yaml --deterministic
+# =============================================================================
+# Step 5: Table 2 - AG-SAR vs SOTA (Sampling Methods)
+# =============================================================================
+# Methods: AG-SAR, SelfCheckGPT (5x sampling), EigenScore, LLM-Check
+# This is the "gold standard" comparison for NeurIPS/ICML reviewers
+# Runtime: ~2 hours (SelfCheck dominates due to 5x forward passes)
+# =============================================================================
+if [ "$TABLE1_ONLY" = false ]; then
+    echo ""
+    echo "[5/7] Running Table 2: AG-SAR vs SOTA (SelfCheck, EigenScore)..."
+    echo "   Config: experiments/configs/benchmarks/sota_core_claims.yaml"
+    echo "   Methods: AG-SAR, SelfCheckGPT, EigenScore, LLM-Check"
+    echo "   NOTE: This step takes ~2 hours due to sampling-based methods"
+    python -m experiments.main \
+        --config experiments/configs/benchmarks/sota_core_claims.yaml \
+        --deterministic
+else
+    echo ""
+    echo "[5/7] Skipping Table 2 (--table1-only)"
+fi
 
-# 7. Artifact Generation
+# =============================================================================
+# Step 6: Table 3 - Ablation Studies
+# =============================================================================
+# Confirms contribution of each component:
+#   - No Gating: Disables Unified Gating (pure Authority Flow)
+#   - No Dispersion: Disables Semantic Dispersion
+# =============================================================================
+if [ "$TABLE1_ONLY" = false ] && [ "$TABLE2_ONLY" = false ]; then
+    echo ""
+    echo "[6/7] Running Table 3: Ablation Studies..."
+
+    echo "   Run 1/2: No Unified Gating (Pure Authority Flow)"
+    python -m experiments.main \
+        --config experiments/configs/ablations/no_gating.yaml \
+        --deterministic
+
+    echo "   Run 2/2: No Semantic Dispersion"
+    python -m experiments.main \
+        --config experiments/configs/ablations/no_dispersion.yaml \
+        --deterministic
+else
+    echo ""
+    echo "[6/7] Skipping Ablations (partial run mode)"
+fi
+
+# =============================================================================
+# Step 7: Results Summary
+# =============================================================================
 echo ""
 echo "[7/7] Generating Results Summary..."
-# Find the latest results directory
 LATEST_RESULTS=$(find results -type d -mindepth 1 -maxdepth 1 2>/dev/null | sort | tail -1)
 if [ -n "$LATEST_RESULTS" ]; then
     python -m experiments.scripts.print_h2h_table --results-dir "$LATEST_RESULTS" --format markdown
@@ -131,12 +213,24 @@ else
     echo "   No results directory found to generate table."
 fi
 
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+HOURS=$((DURATION / 3600))
+MINUTES=$(((DURATION % 3600) / 60))
+
 echo ""
 echo "========================================================"
-echo "   Reproduction Complete. Results saved to results/     "
+echo "   Reproduction Complete                               "
 echo "========================================================"
+echo "Total runtime: ${HOURS}h ${MINUTES}m"
+echo ""
+echo "Results saved to: results/"
 echo ""
 echo "Next steps:"
 echo "  1. Review results in results/ directory"
 echo "  2. Check individual experiment logs for detailed metrics"
-echo "  3. Compare with paper Tables 1 and 2"
+echo "  3. Compare with paper Tables 1, 2, and 3"
+echo ""
+echo "To generate paper figures:"
+echo "  python paper/figures/generate_auroc_curves.py"
+echo "  python paper/tables/generate_main_results.py"

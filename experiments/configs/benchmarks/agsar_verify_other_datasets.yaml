@@ -1,0 +1,47 @@
+# Temporary config: Verify AG-SAR on RAGTruth and HaluEval Summarization
+# Run with: python -m experiments.main --config experiments/configs/benchmarks/agsar_verify_other_datasets.yaml
+
+experiment:
+  name: "agsar_verify_other_datasets"
+  description: "Quick verification of AG-SAR on RAGTruth and HaluEval Summarization"
+
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  dtype: "bfloat16"
+  device_map: "auto"
+  attn_implementation: "eager"
+  trust_remote_code: true
+
+dataset:
+  name: "ragtruth"
+  num_samples: 200  # Smaller sample for quick verification
+  seed: 42
+
+methods:
+  # Only AG-SAR for quick verification
+  agsar:
+    semantic_layers: 4
+    power_iteration_steps: 3
+    residual_weight: 0.5
+    enable_unified_gating: true
+    gate_temperature: 1.0
+    memory_weight: 0.5
+    enable_semantic_dispersion: true
+    dispersion_k: 5
+    dispersion_sensitivity: 1.0
+    dispersion_method: "top1_projection"
+    aggregation_method: "percentile_10"
+
+evaluation:
+  confidence_threshold: 0.7
+  metrics:
+    - auroc
+    - auprc
+    - f1
+    - accuracy
+  bootstrap_samples: 500
+
+output:
+  output_dir: "results/agsar_verify_other_datasets"
+  save_predictions: true
+  save_scores: true

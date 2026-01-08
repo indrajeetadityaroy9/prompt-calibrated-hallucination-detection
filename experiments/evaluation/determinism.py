@@ -56,16 +56,18 @@ def set_global_seed(seed: int = DEFAULT_SEED, deterministic: bool = False) -> No
         torch.backends.cudnn.benchmark = False
 
         # Enable deterministic algorithms globally (PyTorch 1.8+)
+        # Use warn_only=True (PyTorch 1.11+) to avoid errors from operations
+        # that don't have deterministic implementations (e.g., scatter, Triton kernels)
         if hasattr(torch, 'use_deterministic_algorithms'):
             try:
-                torch.use_deterministic_algorithms(True)
-            except RuntimeError:
-                # Some operations don't have deterministic implementations
-                # Fall back to warning mode
+                # Try warn_only mode first (PyTorch 1.11+)
+                torch.use_deterministic_algorithms(True, warn_only=True)
+            except TypeError:
+                # Older PyTorch without warn_only parameter - skip to avoid runtime errors
                 import warnings
                 warnings.warn(
-                    "Some PyTorch operations do not have deterministic implementations. "
-                    "Results may not be fully reproducible.",
+                    "PyTorch version does not support warn_only mode for deterministic algorithms. "
+                    "Skipping torch.use_deterministic_algorithms() to avoid runtime errors.",
                     RuntimeWarning,
                 )
 

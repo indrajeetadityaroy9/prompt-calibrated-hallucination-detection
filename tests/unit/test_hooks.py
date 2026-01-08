@@ -1,5 +1,5 @@
 """
-QA Tests: Model Hooks & Architecture Verification for AG-SAR v3.1
+QA Tests: Model Hooks & Architecture Verification for AG-SAR.
 
 Purpose: Verify hooks capture Pre-MLP tensors on real architectures.
 

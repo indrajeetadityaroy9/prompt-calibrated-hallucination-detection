@@ -1,5 +1,5 @@
 """
-Advanced Behavioral Verification Tests for AG-SAR v8.5
+Advanced Behavioral Verification Tests for AG-SAR.
 
 These tests verify SCIENTIFIC CORRECTNESS, not just code execution.
 They catch subtle bugs (broadcasting errors, hook misalignment, memory leaks)
@@ -40,7 +40,7 @@ class TestPreMLPIntegrity:
         h_attn must NOT equal final hidden states.
 
         If they are identical, the hook captured post-MLP output,
-        causing stability gate to detect MLP non-linearities
+        causing agreement gate to detect MLP non-linearities
         as hallucinations (False Positives).
         """
         extractor = ModelAdapter(
@@ -107,7 +107,7 @@ class TestDimensionBroadcast:
     def test_stability_gate_dimension_handling(self):
         """
         SCIENTIFIC CHECK:
-        Stability Gate must correctly compute:
+        Agreement Gate must correctly compute:
         Gate = exp(-sensitivity × divergence)
         with proper dimension reduction.
         """
@@ -203,7 +203,7 @@ class TestFullPipelineBatch:
         agsar.cleanup()
 
     def test_reset_is_noop(self, small_model, mock_tokenizer):
-        """Test that reset() is a no-op in v8.5 (no streaming state)."""
+        """Test that reset() is a no-op (no streaming state)."""
         config = AGSARConfig(semantic_layers=2)
         agsar = AGSAR(small_model, mock_tokenizer, config)
 

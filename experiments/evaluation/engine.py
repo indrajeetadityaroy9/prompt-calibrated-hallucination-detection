@@ -68,7 +68,7 @@ class BenchmarkEngine:
     - Bootstrap confidence intervals
     - Automatic method cleanup between evaluations
     - Progress tracking with tqdm
-    - Task-adaptive method factory (v9.0) for per-dataset method configuration
+    - Task-adaptive method factory for per-dataset method configuration
 
     Example:
         >>> engine = BenchmarkEngine(config, methods, datasets)
@@ -82,7 +82,6 @@ class BenchmarkEngine:
         methods: Dict[str, UncertaintyMethod],
         datasets: Dict[str, EvaluationDataset],
         resume_from: Optional[str] = None,
-        method_factory: Optional[callable] = None,
     ):
         """
         Initialize benchmark engine.
@@ -92,14 +91,11 @@ class BenchmarkEngine:
             methods: Dict of {method_name: UncertaintyMethod instance}
             datasets: Dict of {dataset_name: EvaluationDataset instance}
             resume_from: Optional path to JSONL file to resume from (Phase 5.3)
-            method_factory: Optional callable(dataset_name) -> Dict[str, UncertaintyMethod]
-                            If provided, creates fresh methods per-dataset for task-adaptive mode.
         """
         self.config = config
         self.methods = methods
         self.datasets = datasets
         self.resume_from = resume_from
-        self.method_factory = method_factory
 
         self.metrics_calc = MetricsCalculator(
             bootstrap_samples=config.evaluation.bootstrap_samples,
@@ -157,13 +153,7 @@ class BenchmarkEngine:
         for dataset_name, dataset in self.datasets.items():
             self._print_dataset_header(dataset_name, dataset)
 
-            # Task-adaptive mode (v9.0): Create fresh methods per-dataset
-            if self.method_factory is not None:
-                current_methods = self.method_factory(dataset_name)
-            else:
-                current_methods = self.methods
-
-            for method_name, method in current_methods.items():
+            for method_name, method in self.methods.items():
                 print(f"\n  [{method_name}] Running...")
 
                 try:

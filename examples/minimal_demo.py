@@ -14,7 +14,7 @@ from ag_sar import AGSAR, AGSARConfig
 
 def main():
     print("=" * 60)
-    print("AG-SAR: Zero-Latency Hallucination Detection Demo")
+    print("AG-SAR: Single-Pass Hallucination Detection Demo")
     print("=" * 60)
 
     # Load a small model for demo (GPT-2)
@@ -110,46 +110,6 @@ def main():
     print("\nDemo completed successfully!")
 
 
-def demo_v31_authority_flow():
-    """Demonstrate v3.1 Authority Flow metric."""
-    print("\n" + "=" * 60)
-    print("AG-SAR v3.1: Authority Flow Demo")
-    print("=" * 60)
-
-    # Load model
-    print("\nLoading GPT-2...")
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    model = AutoModelForCausalLM.from_pretrained("gpt2", torch_dtype=torch.float32)
-    model.eval()
-    tokenizer.pad_token = tokenizer.eos_token
-
-    # Configure for v3.1
-    config = AGSARConfig(
-        semantic_layers=2,
-        uncertainty_metric="v31",
-        enable_authority_flow=True,
-        enable_register_filter=True,
-        enable_spectral_roughness=False,  # Disable for small models
-    )
-
-    agsar = AGSAR(model, tokenizer, config)
-
-    # Test
-    prompt = "The Eiffel Tower is located in"
-    response = "Paris, France."
-
-    print(f"\nPrompt: {prompt}")
-    print(f"Response: {response}")
-
-    result = agsar.compute_uncertainty(prompt, response, return_details=True)
-
-    print(f"\nAuthority Flow Score: {result['score']:.4f}")
-    if "authority_scores" in result:
-        print(f"Authority distribution captured")
-
-    agsar.cleanup()
-
-
 def demo_with_return_details():
     """Demonstrate detailed output from uncertainty computation."""
     print("\n" + "=" * 60)
@@ -188,5 +148,4 @@ if __name__ == "__main__":
     main()
 
     # Uncomment to run additional demos:
-    # demo_v31_authority_flow()
     # demo_with_return_details()

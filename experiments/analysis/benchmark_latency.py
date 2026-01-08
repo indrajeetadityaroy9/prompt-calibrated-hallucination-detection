@@ -1,7 +1,7 @@
 """
-AG-SAR v3.1 Latency Benchmark
+AG-SAR Latency Benchmark
 
-Verifies the "Zero-Latency" promise by measuring overhead of:
+Verifies the "Single-Pass Inference-Time" promise by measuring overhead of:
 1. Hook registration and capture
 2. Authority Flow computation
 3. Spectral Roughness calculation
@@ -194,7 +194,7 @@ def benchmark_model(
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-    # Create AG-SAR engine with v8.0 defaults
+    # Create AG-SAR engine with default config
     ag_config = AGSARConfig(
         semantic_layers=min(4, model.config.n_layer if hasattr(model.config, 'n_layer') else model.config.num_hidden_layers),
         enable_register_filter=True,
@@ -241,7 +241,7 @@ def benchmark_model(
     print("\n[2/3] Measuring AG-SAR latency...")
 
     # Use the full AG-SAR pipeline: hooks + authority flow + optional gating
-    # This measures realistic overhead including all v8.0 components
+    # This measures realistic overhead including all AG-SAR components
     from ag_sar.measures import compute_authority_score
 
     # Warmup
@@ -252,8 +252,7 @@ def benchmark_model(
             attn = engine._adapter.capture.attention_weights.get(engine._semantic_layer_indices[-1])
             if attn is not None:
                 authority = compute_authority_score(
-                    attn, prompt_length, register_mask=None,
-                    attention_mask=None, use_vectorized=True
+                    attn, prompt_length,                     attention_mask=None, use_vectorized=True
                 )
 
     if device == "cuda":
@@ -271,8 +270,7 @@ def benchmark_model(
             attn = engine._adapter.capture.attention_weights.get(engine._semantic_layer_indices[-1])
             if attn is not None:
                 authority = compute_authority_score(
-                    attn, prompt_length, register_mask=None,
-                    attention_mask=None, use_vectorized=True
+                    attn, prompt_length,                     attention_mask=None, use_vectorized=True
                 )
 
     if device == "cuda":
@@ -332,7 +330,7 @@ def benchmark_model(
     passed = overhead_pct <= 10.0 or overhead_ms <= 2.0
 
     if passed:
-        print("PASS: Zero-Latency constraint satisfied!")
+        print("PASS: Single-Pass latency constraint satisfied!")
         print(f"  (Threshold: <10% overhead OR <2ms absolute)")
     else:
         print("FAIL: Overhead too high!")

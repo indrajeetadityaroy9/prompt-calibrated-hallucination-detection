@@ -32,8 +32,8 @@ methods:
     power_iteration_steps: 3
     residual_weight: 0.5
     enable_unified_gating: true
-    stability_sensitivity: 1.0
-    parametric_weight: 0.5
+    gate_temperature: 1.0
+    memory_weight: 0.5
     enable_semantic_dispersion: true
     dispersion_k: 5
     dispersion_sensitivity: 1.0

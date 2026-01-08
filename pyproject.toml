@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ag-sar"
 version = "0.4.0"
-description = "Attention-Graph Shifting Attention to Relevance: Zero-Latency Hallucination Detection"
+description = "Attention-Graph Shifting Attention to Relevance: Single-Pass Inference-Time Hallucination Detection"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -25,11 +25,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# THE CORE (Zero-Latency, O(N) operations only)
+# THE CORE (Single-Pass Inference-Time, O(N) operations only)
 dependencies = [
     "torch>=2.2.0",            # Required for FlashAttn and torch.compile
     "transformers>=4.40.0,<4.45.0",  # CRITICAL: >=4.45 breaks attention hooks
-    "numpy>=1.20.0",           # Array utilities
+    "numpy>=1.20.0,<2.0",      # Array utilities (2.x breaks pandas/scipy)
     "accelerate>=0.26.0",      # Efficient model loading (device_map)
     # Triton is strictly Linux-only. On Mac/Windows, the custom kernel
     # will fallback to the pure PyTorch implementation.
@@ -44,7 +44,7 @@ h100 = [
 # THE LAB (Evaluation, Plotting, Baselines)
 eval = [
     "scikit-learn>=1.2",       # AUROC, Precision-Recall, calibration
-    "scipy>=1.10",             # Statistical significance tests
+    "scipy>=1.10,<1.14",       # Statistical significance tests (1.14+ breaks imports)
     "matplotlib>=3.7",         # Confidence-Discrepancy Plots
     "seaborn>=0.12",           # Heatmaps for Attention
     "pandas>=2.0",             # Result aggregation tables
@@ -55,8 +55,10 @@ eval = [
     "evaluate>=0.4.0",         # HuggingFace evaluate
     "nltk>=3.8",               # Tokenization utilities
     "spacy>=3.5",              # NLP pipeline
-    "sentence-transformers>=2.2",  # Embedding models
+    "sentence-transformers>=2.2",  # Embedding models (requires tf-keras)
+    "tf-keras>=2.15",          # Keras 3 compatibility shim
     "pyyaml>=6.0",             # Config file parsing
+    "pydantic>=2.0",           # Config validation for experiments/
 ]
 dev = [
     "pytest>=7.0",
@@ -64,7 +66,6 @@ dev = [
     "black>=23.0",
     "ruff>=0.1.0",
     "mypy>=1.0",
-    "pydantic>=2.0",             # Config validation for experiments/
 ]
 all = [
     "ag-sar[dev,eval,h100]",

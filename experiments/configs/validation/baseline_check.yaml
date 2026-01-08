@@ -1,9 +1,9 @@
 # Baseline Validation
-# AG-SAR v8.0 on RAGTruth for validation
+# AG-SAR baseline on RAGTruth for validation
 
 experiment:
   name: "validate_baseline"
-  description: "AG-SAR v8.0 baseline on RAGTruth"
+  description: "AG-SAR baseline baseline on RAGTruth"
 
 dataset:
   name: "ragtruth"
@@ -20,13 +20,13 @@ model:
 
 methods:
   agsar:
-    # Core AG-SAR v8.0
+    # Core AG-SAR baseline
     semantic_layers: 4
     power_iteration_steps: 3
     residual_weight: 0.5
     enable_unified_gating: true
-    stability_sensitivity: 1.0
-    parametric_weight: 0.5
+    gate_temperature: 1.0
+    memory_weight: 0.5
     enable_semantic_dispersion: true
     dispersion_k: 5
     dispersion_sensitivity: 1.0

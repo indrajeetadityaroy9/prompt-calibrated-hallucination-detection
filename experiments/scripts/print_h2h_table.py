@@ -7,7 +7,7 @@ Generates a conference-ready results table with:
 - AUPRC (Precision-focused, important for imbalanced data)
 - TPR @ 5% FPR (Production metric: catch rate at low false alarm)
 - AURC (Selective generation utility)
-- Latency (Zero-latency claim verification)
+- Latency (Single-pass inference-time claim verification)
 
 Usage:
     python scripts/print_h2h_table.py --results-dir results/halueval_h2h/20240105_120000

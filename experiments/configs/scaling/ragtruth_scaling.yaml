@@ -1,4 +1,4 @@
-# Scaling Law Test on RAGTruth - TUNED v8.1 Configuration
+# Scaling Law Test on RAGTruth - TUNED tuned Configuration
 # Purpose: Test if 70B's sharper attention heads improve detection on natural hallucinations
 # REQUIREMENTS: 2× H100 80GB (140GB+ VRAM needed)
 #
@@ -8,7 +8,7 @@
 
 experiment:
   name: "02_scaling_law_ragtruth"
-  description: "AG-SAR v8.1-tuned scaling test on Llama-3.1-70B with RAGTruth"
+  description: "AG-SAR tuned-tuned scaling test on Llama-3.1-70B with RAGTruth"
 
 dataset:
   name: ragtruth
@@ -29,18 +29,18 @@ methods:
     semantic_layers: 4
     power_iteration_steps: 3
     residual_weight: 0.5
-    # Register Filter - DISABLED (v8.1-tuned: over-masks on Llama-3)
+    # Register Filter - DISABLED (tuned-tuned: over-masks on Llama-3)
     enable_register_filter: false
     kurtosis_threshold: 2.0
     ema_decay: 0.995
     sink_token_count: 4
-    # MLP Divergence - DISABLED (v8.1-tuned: weak on natural errors)
+    # MLP Divergence - DISABLED (tuned-tuned: weak on natural errors)
     enable_spectral_roughness: false
     lambda_roughness: 10.0
     # Unified Gating - ENABLED
     enable_unified_gating: true
-    stability_sensitivity: 1.0
-    parametric_weight: 0.5
+    gate_temperature: 1.0
+    memory_weight: 0.5
     # Semantic Dispersion - ENABLED
     enable_semantic_dispersion: true
     dispersion_k: 5

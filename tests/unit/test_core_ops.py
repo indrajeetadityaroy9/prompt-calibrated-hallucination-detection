@@ -1,5 +1,5 @@
 """
-Unit tests for AG-SAR core operations (v8.0 Gold Master).
+Unit tests for AG-SAR core operations.
 
 Tests the core mechanisms:
 1. Authority Flow (compute_authority_flow, compute_authority_flow_vectorized)
@@ -88,10 +88,10 @@ class TestComputeAuthorityFlowVectorized:
 
 
 class TestIntegration:
-    """Integration tests for v8.0 pipeline."""
+    """Integration tests for full pipeline."""
 
-    def test_full_v80_pipeline(self):
-        """Test complete v8.0 pipeline flow (Authority Flow + Stability Gate)."""
+    def test_full_pipeline(self):
+        """Test complete pipeline flow (Authority Flow + Agreement Gate)."""
         torch.manual_seed(42)
         B, H, S, D = 2, 4, 32, 64
         prompt_length = 16
@@ -106,7 +106,7 @@ class TestIntegration:
         assert authority.shape == (B, S)
         assert (authority[:, :prompt_length] == 1.0).all()
 
-        # Step 2: Stability Gate
+        # Step 2: Agreement Gate
         gate = compute_stability_gate(h_attn, h_block, sensitivity=1.0)
         assert gate.shape == (B, S)
         assert (gate >= 0).all()

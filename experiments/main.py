@@ -365,66 +365,12 @@ Examples:
         print(f"Error initializing methods: {e}")
         return 1
 
-    # Task-adaptive mode (v9.0): Create method factory for per-dataset method creation
-    method_factory = None
-    if config.methods.agsar and config.methods.agsar.enable_task_adaptive:
-        print("  [!] Task-adaptive mode enabled (v9.0)")
-
-        def create_task_adaptive_methods(dataset_name: str):
-            """Factory function that creates fresh methods per-dataset."""
-            task_methods = {}
-            mc = config.methods
-
-            # Create fresh AG-SAR with dataset_name for task detection
-            if mc.agsar:
-                task_methods["AG-SAR"] = AGSARMethod(
-                    model, tokenizer,
-                    config=mc.agsar,
-                    dataset_name=dataset_name,
-                )
-
-            # Other methods don't need task adaptation (yet)
-            if mc.logprob:
-                task_methods["LogProb"] = LogProbMethod(model, tokenizer)
-            if mc.entropy:
-                task_methods["Entropy"] = PredictiveEntropyMethod(model, tokenizer)
-            if mc.selfcheck:
-                task_methods["SelfCheck"] = SelfCheckNLIMethod(model, tokenizer, config=mc.selfcheck)
-            if mc.eigenscore:
-                task_methods["EigenScore"] = EigenScoreMethod(
-                    model, tokenizer,
-                    num_samples=mc.eigenscore.num_samples,
-                    max_new_tokens=mc.eigenscore.max_new_tokens,
-                    temperature=mc.eigenscore.temperature,
-                )
-            if mc.semantic_entropy:
-                task_methods["SemanticEntropy"] = SemanticEntropyMethod(
-                    model, tokenizer,
-                    num_samples=mc.semantic_entropy.num_samples,
-                    similarity_threshold=mc.semantic_entropy.similarity_threshold,
-                    embedding_model=mc.semantic_entropy.embedding_model,
-                    max_new_tokens=mc.semantic_entropy.max_new_tokens,
-                    temperature=mc.semantic_entropy.temperature,
-                )
-            if mc.saplma:
-                task_methods["SAPLMA"] = SAPLMAMethod(model, tokenizer)
-            if mc.llmcheck_attn:
-                task_methods["LLMCheck-Attn"] = LLMCheckAttentionMethod(model, tokenizer)
-            if mc.llmcheck_hidden:
-                task_methods["LLMCheck-Hidden"] = LLMCheckHiddenMethod(model, tokenizer)
-            if mc.llmcheck_logit:
-                task_methods["LLMCheck-Logit"] = LLMCheckLogitMethod(model, tokenizer)
-
-            return task_methods
-
-        method_factory = create_task_adaptive_methods
-
     # Run benchmark
     print("\n[4/4] Running benchmark...")
     print("-" * 60)
 
     try:
-        engine = BenchmarkEngine(config, methods, datasets, method_factory=method_factory)
+        engine = BenchmarkEngine(config, methods, datasets)
         results = engine.run()
 
         # Print summary table

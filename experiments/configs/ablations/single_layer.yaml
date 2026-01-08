@@ -1,7 +1,7 @@
 # Ablation: Single Layer vs Late-Layer Focus
 # Tests if multi-layer analysis helps
 #
-# Default v8.0 uses semantic_layers=4 (last 4 layers).
+# Default baseline uses semantic_layers=4 (last 4 layers).
 # This ablation uses semantic_layers=1 (only final layer).
 #
 # Expected: Lower AUROC, demonstrating multi-layer contribution
@@ -29,10 +29,10 @@ methods:
     semantic_layers: 1  # Only final layer (vs default 4)
     power_iteration_steps: 3
     residual_weight: 0.5
-    # Full v8.0 features
+    # Full baseline features
     enable_unified_gating: true
-    stability_sensitivity: 1.0
-    parametric_weight: 0.5
+    gate_temperature: 1.0
+    memory_weight: 0.5
     enable_semantic_dispersion: true
     dispersion_k: 5
     dispersion_sensitivity: 1.0

@@ -5,7 +5,7 @@ Parameter sweep runner with runtime config overrides.
 Usage:
     python -m experiments.scripts.run_sweep \
         --base-config experiments/configs/01_main_sota.yaml \
-        --param methods.agsar.stability_sensitivity \
+        --param methods.agsar.gate_temperature \
         --values 0.5 1.0 2.0 5.0 \
         --output-dir results/sweep_stability
 
@@ -37,7 +37,7 @@ def deep_update(config: dict, path: str, value: Any) -> None:
     """
     Updates nested dict/list using dot-notation path.
 
-    Example: path="methods.agsar.stability_sensitivity"
+    Example: path="methods.agsar.gate_temperature"
     Handles both dict keys and list indices (numeric keys).
 
     Args:
@@ -243,7 +243,7 @@ def main():
 Examples:
   python -m experiments.scripts.run_sweep \\
       --base-config experiments/configs/01_main_sota.yaml \\
-      --param methods.agsar.stability_sensitivity \\
+      --param methods.agsar.gate_temperature \\
       --values 0.5 1.0 2.0 5.0 \\
       --output-dir results/sweep_stability
 
@@ -265,7 +265,7 @@ Examples:
         "--param",
         type=str,
         required=True,
-        help="Dot-notation path to parameter to sweep (e.g., methods.agsar.stability_sensitivity)",
+        help="Dot-notation path to parameter to sweep (e.g., methods.agsar.gate_temperature)",
     )
     parser.add_argument(
         "--values",

@@ -1,5 +1,5 @@
 """
-QA Tests: Mathematical Kernel Verification for AG-SAR v8.0 Gold Master.
+QA Tests: Mathematical Kernel Verification for AG-SAR.
 
 Purpose: Verify Authority Flow and supporting kernels against known ground truths.
 

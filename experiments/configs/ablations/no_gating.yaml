@@ -1,16 +1,16 @@
-# Ablation: Disable Unified Gating (v3.1 baseline)
+# Ablation: Disable Unified Gating (pure-authority-flow baseline)
 # Tests Authority Flow alone without context-dependent gating
 #
-# This reproduces the v3.1 baseline for paper comparison:
+# This reproduces the pure-authority-flow baseline for paper comparison:
 # - Pure Authority Flow (recursive prompt recharge)
 # - No stability gating
 # - No semantic dispersion
 #
-# Expected: Lower AUROC than v8.0, demonstrating gating contribution
+# Expected: Lower AUROC than baseline, demonstrating gating contribution
 
 experiment:
   name: "ablation_no_gating"
-  description: "v3.1 baseline - Authority Flow without Unified Gating"
+  description: "pure-authority-flow baseline - Authority Flow without Unified Gating"
 
 dataset:
   name: "ragtruth"
@@ -27,7 +27,7 @@ model:
 
 methods:
   agsar:
-    # v3.1 baseline configuration
+    # pure-authority-flow baseline configuration
     semantic_layers: 4
     power_iteration_steps: 3
     residual_weight: 0.5

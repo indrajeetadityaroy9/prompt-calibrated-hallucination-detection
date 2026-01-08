@@ -1,6 +1,6 @@
 # AG-SAR: Attention-Graph Shifting Attention to Relevance
 
-Zero-latency uncertainty quantification for LLMs via internal attention graph analysis.
+Single-pass inference-time uncertainty quantification for LLMs via internal attention graph analysis.
 
 ## Overview
 

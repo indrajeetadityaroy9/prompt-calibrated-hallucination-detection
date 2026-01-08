@@ -5,9 +5,9 @@ The "Antonym Blind Spot" is a critical risk when using centroid variance:
 words like "hot/cold" or "positive/negative" cluster together in embedding
 space despite being factually opposite.
 
-The "Antonym Safety Valve" relies on: parametric_weight < threshold.
+The "Antonym Safety Valve" relies on: memory_weight < threshold.
 When Gate~0 (context ignored) and Trust=1.0 (confident antonym),
-the max score = (1-Gate) * Trust * parametric_weight < threshold.
+the max score = (1-Gate) * Trust * memory_weight < threshold.
 """
 
 import pytest
@@ -121,19 +121,19 @@ class TestAntonymSafetyValve:
     """
     Tests verifying the "Antonym Safety Valve" mechanism.
 
-    The safety valve relies on: parametric_weight < threshold.
+    The safety valve relies on: memory_weight < threshold.
     This ensures that even when JEPA thinks antonyms are "trusted",
     the final authority score stays below the hallucination threshold.
     """
 
     def test_antonym_safety_valve_math(self):
         """
-        Verify the parametric_weight < threshold safety valve catches antonyms.
+        Verify the memory_weight < threshold safety valve catches antonyms.
 
         Scenario: Model ignores context and confidently predicts an antonym.
         - Gate ~ 0 (context ignored)
         - Trust ~ 1.0 (antonyms cluster tightly in embedding space)
-        - Safety Valve: parametric_weight (0.6) < threshold (0.7) -> FAIL
+        - Safety Valve: memory_weight (0.6) < threshold (0.7) -> FAIL
         """
         # Simulate a context-detached hallucination (Gate ~ 0)
         gate = 0.1  # Model ignored context
@@ -145,19 +145,19 @@ class TestAntonymSafetyValve:
         trust = 1.0 - variance  # High trust due to clustering
 
         # Parameters from summarization preset
-        parametric_weight = 0.6
+        memory_weight = 0.6
         threshold = 0.7  # Default hallucination threshold
 
         # Master equation when Gate ~ 0:
-        # A(t) = Gate * Flow + (1 - Gate) * Trust * parametric_weight
-        final_score = (gate * flow) + ((1 - gate) * trust * parametric_weight)
+        # A(t) = Gate * Flow + (1 - Gate) * Trust * memory_weight
+        final_score = (gate * flow) + ((1 - gate) * trust * memory_weight)
 
         # The score should be < threshold
         # With the values above: 0.1*0 + 0.9*0.95*0.6 = 0.513 < 0.7
         assert final_score < threshold, (
             f"Antonym bypassed safety valve! "
             f"Score {final_score:.3f} >= threshold {threshold}. "
-            f"Ensure parametric_weight ({parametric_weight}) < threshold ({threshold})"
+            f"Ensure memory_weight ({memory_weight}) < threshold ({threshold})"
         )
 
     def test_safety_valve_edge_cases(self):
@@ -167,15 +167,15 @@ class TestAntonymSafetyValve:
         # Case 1: Worst case - Gate=0, Trust=1.0
         gate = 0.0
         trust = 1.0
-        parametric_weight = 0.6
-        score = gate * 0 + (1 - gate) * trust * parametric_weight
+        memory_weight = 0.6
+        score = gate * 0 + (1 - gate) * trust * memory_weight
         assert score < threshold, f"Edge case 1 failed: {score} >= {threshold}"
 
         # Case 2: Moderate gate, high trust
         gate = 0.3
         trust = 0.95
         flow = 0.2  # Some flow from context
-        score = gate * flow + (1 - gate) * trust * parametric_weight
+        score = gate * flow + (1 - gate) * trust * memory_weight
         # 0.3*0.2 + 0.7*0.95*0.6 = 0.06 + 0.399 = 0.459
         assert score < threshold, f"Edge case 2 failed: {score} >= {threshold}"
 
@@ -183,20 +183,20 @@ class TestAntonymSafetyValve:
         """
         Verify the summarization preset satisfies the safety valve constraint.
 
-        The preset must have parametric_weight < threshold.
+        The preset must have memory_weight < threshold.
         """
         # Values from summarization.yaml
-        parametric_weight = 0.6
+        memory_weight = 0.6
         threshold = 0.7  # Default from config
 
-        assert parametric_weight < threshold, (
+        assert memory_weight < threshold, (
             f"CRITICAL: summarization preset violates safety valve! "
-            f"parametric_weight ({parametric_weight}) >= threshold ({threshold}). "
+            f"memory_weight ({memory_weight}) >= threshold ({threshold}). "
             f"Antonyms will bypass hallucination detection."
         )
 
         # Maximum possible score when ignoring context entirely
-        max_score_when_ignoring_context = parametric_weight * 1.0  # Trust can be at most 1.0
+        max_score_when_ignoring_context = memory_weight * 1.0  # Trust can be at most 1.0
         assert max_score_when_ignoring_context < threshold, (
             f"Maximum score when ignoring context ({max_score_when_ignoring_context}) "
             f">= threshold ({threshold})"

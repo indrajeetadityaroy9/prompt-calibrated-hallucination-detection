@@ -1,8 +1,0 @@
-# Default AG-SAR preset (v8.0 baseline parameters)
-# No task-specific tuning - use for unknown or mixed task types
-
-aggregation_method: mean
-calibration_temperature: 1.0
-dispersion_k: 5
-dispersion_sensitivity: 1.0
-parametric_weight: 0.5

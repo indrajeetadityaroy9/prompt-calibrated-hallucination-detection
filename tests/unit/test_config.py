@@ -1,4 +1,4 @@
-"""Tests for AGSARConfig (v8.5)."""
+"""Tests for AGSARConfig."""
 
 import pytest
 import torch
@@ -13,74 +13,57 @@ class TestAGSARConfig:
         config = AGSARConfig()
 
         assert config.semantic_layers == 4
-        assert config.residual_weight == 0.5
-        assert config.power_iteration_steps == 3
-        assert config.power_iteration_tol == 1e-4
-        assert config.hallucination_threshold == 0.7
-        assert config.preferred_dtype == torch.bfloat16
-        # Unified Gating and Semantic Dispersion enabled by default
-        assert config.enable_unified_gating is True
-        assert config.enable_semantic_dispersion is True
-        # Stability Gate parameters
-        assert config.stability_sensitivity == 1.0
-        assert config.parametric_weight == 0.5
+        assert config.varentropy_lambda == 1.0
+        assert config.sigma_multiplier == -1.0
+        assert config.calibration_window == 64
+        assert config.hallucination_threshold == 0.5
+        assert config.dtype == "bfloat16"
 
     def test_custom_values(self):
         """Test custom configuration values."""
         config = AGSARConfig(
             semantic_layers=6,
-            hallucination_threshold=0.5,
-            stability_sensitivity=2.0,
+            varentropy_lambda=0.5,
+            hallucination_threshold=0.7,
         )
 
         assert config.semantic_layers == 6
-        assert config.hallucination_threshold == 0.5
-        assert config.stability_sensitivity == 2.0
-
-    def test_invalid_residual_weight(self):
-        """Test validation of residual weight."""
-        with pytest.raises(ValueError, match="residual_weight"):
-            AGSARConfig(residual_weight=-0.1)
-
-        with pytest.raises(ValueError, match="residual_weight"):
-            AGSARConfig(residual_weight=1.5)
-
-    def test_invalid_power_iteration(self):
-        """Test validation of power iteration parameters."""
-        with pytest.raises(ValueError, match="power_iteration_steps"):
-            AGSARConfig(power_iteration_steps=0)
+        assert config.varentropy_lambda == 0.5
+        assert config.hallucination_threshold == 0.7
 
     def test_invalid_semantic_layers(self):
         """Test validation of semantic layers."""
         with pytest.raises(ValueError, match="semantic_layers"):
             AGSARConfig(semantic_layers=0)
 
-    def test_to_dict(self):
-        """Test serialization to dictionary."""
-        config = AGSARConfig()
-        d = config.to_dict()
+    def test_invalid_varentropy_lambda(self):
+        """Test validation of varentropy_lambda."""
+        with pytest.raises(ValueError, match="varentropy_lambda"):
+            AGSARConfig(varentropy_lambda=-1.0)
 
-        assert isinstance(d, dict)
-        assert 'semantic_layers' in d
-        assert 'preferred_dtype' in d
-        assert d['semantic_layers'] == 4
-        assert d['enable_unified_gating'] is True
-        assert d['enable_semantic_dispersion'] is True
-        assert d['stability_sensitivity'] == 1.0
-        assert d['parametric_weight'] == 0.5
+        with pytest.raises(ValueError, match="varentropy_lambda"):
+            AGSARConfig(varentropy_lambda=6.0)
 
-    def test_from_dict(self):
-        """Test creation from dictionary."""
-        d = {
-            'semantic_layers': 3,
-            'stability_sensitivity': 2.0,
-        }
-        config = AGSARConfig.from_dict(d)
+    def test_invalid_hallucination_threshold(self):
+        """Test validation of hallucination_threshold."""
+        with pytest.raises(ValueError, match="hallucination_threshold"):
+            AGSARConfig(hallucination_threshold=-0.1)
 
-        assert config.semantic_layers == 3
-        assert config.stability_sensitivity == 2.0
+        with pytest.raises(ValueError, match="hallucination_threshold"):
+            AGSARConfig(hallucination_threshold=1.5)
 
-    def test_fp16_warning(self):
-        """Test warning for float16 usage."""
-        with pytest.warns(UserWarning, match="float16"):
-            AGSARConfig(preferred_dtype=torch.float16)
+    def test_invalid_calibration_window(self):
+        """Test validation of calibration_window."""
+        with pytest.raises(ValueError, match="calibration_window"):
+            AGSARConfig(calibration_window=0)
+
+    def test_torch_dtype(self):
+        """Test torch dtype conversion."""
+        config = AGSARConfig(dtype="bfloat16")
+        assert config.torch_dtype == torch.bfloat16
+
+        config = AGSARConfig(dtype="float16")
+        assert config.torch_dtype == torch.float16
+
+        config = AGSARConfig(dtype="float32")
+        assert config.torch_dtype == torch.float32
