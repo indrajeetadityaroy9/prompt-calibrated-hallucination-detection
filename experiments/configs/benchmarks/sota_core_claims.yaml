@@ -1,0 +1,63 @@
+# SOTA Benchmark: AG-SAR v3 vs Baselines on HaluEval QA
+# NeurIPS 2025 Submission Core Claims Validation
+
+experiment:
+  name: "sota_core_claims_final"
+  description: "AG-SAR v3 Epiplexity Framework vs SelfCheck and baselines"
+
+# Standardize on Llama-3.1-8B (GQA model, verifies Triton kernel)
+model:
+  name: "meta-llama/Llama-3.1-8B"
+  dtype: "bfloat16"
+  device_map: "auto"
+  attn_implementation: "sdpa"
+  trust_remote_code: true
+  batch_size: 8
+
+# HaluEval QA: Standard hallucination detection benchmark
+dataset:
+  name: "halueval_qa"
+  num_samples: 500
+  seed: 42
+
+methods:
+  # --- THE PROPOSED METHOD (AG-SAR v3) ---
+  agsar:
+    semantic_layers: 4
+    varentropy_lambda: 1.0
+    sigma_multiplier: -1.0
+    calibration_window: 64
+
+  # --- BASELINES ---
+  logprob: true
+  entropy: true
+
+  # --- SAMPLING-BASED COMPETITOR ---
+  selfcheck:
+    num_samples: 5
+    max_new_tokens: 100
+    temperature: 1.0
+
+  # --- EIGENSCORE (ICLR 2024) ---
+  eigenscore:
+    num_samples: 5
+    max_new_tokens: 50
+    temperature: 1.0
+
+evaluation:
+  confidence_threshold: 0.7
+  metrics:
+    - "auroc"
+    - "auprc"
+    - "f1"
+    - "accuracy"
+    - "ece"
+    - "brier"
+    - "spearman"
+  bootstrap_samples: 1000
+  confidence_level: 0.95
+
+output:
+  output_dir: "results/sota_core_claims_final"
+  save_predictions: true
+  save_scores: true
