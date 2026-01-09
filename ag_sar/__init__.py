@@ -15,10 +15,6 @@ Where:
 
 __version__ = "0.5.0"
 
-# Enable hardware optimizations
-from .utils import enable_h100_optimizations
-enable_h100_optimizations()
-
 # Core API
 from .engine import AGSAR
 from .config import AGSARConfig
@@ -42,7 +38,9 @@ from .ops import (
 # Utilities
 from .utils import (
     enable_tf32,
+    enable_h100_optimizations,
     is_tf32_enabled,
+    get_optimal_dtype,
     get_model_dtype,
     get_model_device,
 )
@@ -61,7 +59,9 @@ __all__ = [
     "compute_mlp_divergence",
     "fused_stability_gate",
     "enable_tf32",
+    "enable_h100_optimizations",
     "is_tf32_enabled",
+    "get_optimal_dtype",
     "get_model_dtype",
     "get_model_device",
 ]
