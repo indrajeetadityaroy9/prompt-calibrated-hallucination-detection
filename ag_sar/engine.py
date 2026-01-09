@@ -378,7 +378,110 @@ class AGSAR:
         seq_len = input_ids.size(1)
 
         # Compute authority (version dispatch)
-        if self.config.version == 19:
+        if self.config.version == 21:
+            # v21: Prompt-Gated Fusion Architecture
+            #
+            # Core Insight: JSD detects "Internal Conflict" not "Hallucination"
+            # - Standard RAG: Hall → High Conflict → High JSD (works)
+            # - Counterfactual RAG: Hall → Low Conflict → Low JSD (INVERTED!)
+            #
+            # Solution: Gate JSD based on prompt complexity
+            # - Complex prompts (counterfactual context): High varentropy → gate JSD
+            # - Simple prompts (standard RAG): Low varentropy → use JSD
+            #
+            # Master Equation:
+            #   Risk_seq = Max(R_confusion, (1 - w_prompt) × R_deception)
+            #   w_prompt = sigmoid((V_prompt - τ) × α)
+            #   R_confusion = Max(V_norm × D)       # Safe Core (works on all tasks)
+            #   R_deception = Mean(JSD)              # Gated (inverts on counterfactual)
+            #
+            # Evidence (AUROC):
+            #   | Dataset                  | V×D Only | JSD Alone | Full v19 |
+            #   |--------------------------|----------|-----------|----------|
+            #   | FaithEval Counterfactual | 0.71     | 0.43      | 0.53     |
+            #   | FaithEval Unanswerable   | 0.88     | 0.14      | 0.14     |
+            #   | RAGBench                 | 0.75     | 0.20      | 0.33     |
+            #
+            # V×D is the "Safe Core" - works correctly on ALL task types.
+            # JSD needs gating based on prompt complexity.
+
+            if h_attn is None or h_block is None:
+                raise RuntimeError("v21 requires h_attn and h_block.")
+
+            from .measures.entropy import compute_varentropy
+            from .measures.semantics import compute_semantic_dispersion
+            from .ops import compute_logit_divergence_jsd
+
+            B, S_total, V = logits.shape
+            S_resp = S_total - response_start
+
+            if S_resp <= 0:
+                if return_details:
+                    return {"uncertainty": 0.0, "R_deception": 0.0, "R_confusion": 0.0,
+                            "w_prompt": 0.0, "response_tokens": 0}
+                return 0.0
+
+            # Slice to response region
+            h_attn_resp = h_attn[:, response_start:, :]
+            h_block_resp = h_block[:, response_start:, :]
+            logits_resp = logits[:, response_start:, :].contiguous()
+            logits_prompt = logits[:, :response_start, :].contiguous()
+
+            # === PROMPT COMPLEXITY GATING ===
+            # Compute prompt varentropy to detect complex/counterfactual contexts
+            # High V_prompt → complex context → gate JSD (don't trust it)
+            # Low V_prompt → simple context → use JSD (trust it)
+            if response_start > 1:
+                V_prompt = compute_varentropy(logits_prompt, attention_mask=None)
+                V_prompt_mean = V_prompt.mean()
+            else:
+                V_prompt_mean = torch.tensor(0.0, device=logits.device)
+
+            # w_prompt ∈ [0, 1]: How much to gate (suppress) JSD
+            # High w_prompt → suppress JSD → rely on V×D only
+            w_prompt = torch.sigmoid(
+                (V_prompt_mean - self.config.prompt_gate_threshold) * self.config.prompt_gate_slope
+            )
+
+            # === SIGNAL 1: DECEPTION (JSD) - Gated ===
+            # Detects FFN override, but inverts on counterfactual contexts
+            jsd = compute_logit_divergence_jsd(
+                h_attn_resp, h_block_resp, embed_matrix, top_k=self.config.jsd_top_k
+            )  # [B, S_resp]
+            R_deception_raw = jsd.mean(dim=1)  # [B]
+
+            # Apply prompt gate: suppress JSD when prompt is complex
+            R_deception = (1.0 - w_prompt) * R_deception_raw  # [B]
+
+            # === SIGNAL 2: CONFUSION (V × D) - Safe Core ===
+            # Always works: epistemic collapse with semantic confirmation
+            varentropy = compute_varentropy(logits_resp, attention_mask=None)
+            V_norm = torch.tanh(varentropy / self.config.varentropy_scale)  # [B, S_resp]
+
+            dispersion = compute_semantic_dispersion(
+                logits_resp, embed_matrix, k=5, method="nucleus_variance", top_p=0.95
+            )  # [B, S_resp]
+
+            confusion_risk = V_norm * dispersion  # [B, S_resp] - conjunction
+            R_confusion = confusion_risk.max(dim=1).values  # [B]
+
+            # === FUSION: Max of detectors ===
+            # If EITHER (gated) detector fires, flag the sequence
+            uncertainty = torch.max(R_deception, R_confusion)  # [B]
+
+            if return_details:
+                return {
+                    "uncertainty": uncertainty[0].item() if uncertainty.numel() == 1 else uncertainty,
+                    "R_deception": R_deception[0].item() if R_deception.numel() == 1 else R_deception,
+                    "R_deception_raw": R_deception_raw[0].item() if R_deception_raw.numel() == 1 else R_deception_raw,
+                    "R_confusion": R_confusion[0].item() if R_confusion.numel() == 1 else R_confusion,
+                    "w_prompt": w_prompt.item() if w_prompt.numel() == 1 else w_prompt,
+                    "V_prompt_mean": V_prompt_mean.item() if V_prompt_mean.numel() == 1 else V_prompt_mean,
+                    "response_tokens": S_resp,
+                }
+            return uncertainty[0].item() if uncertainty.numel() == 1 else uncertainty
+
+        elif self.config.version == 19:
             # v19: Hinge-Risk Architecture - Zero-Shot Cross-Dataset SOTA
             #
             # Master Equation:

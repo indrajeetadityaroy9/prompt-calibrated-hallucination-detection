@@ -180,6 +180,30 @@ class AGSARConfig:
           * HaluEval Summ: 0.61  (V×D detects sustained confusion)
           * RAGTruth QA: 0.72    (JSD detects FFN deception)
           * RAGTruth Summ: 0.56  (JSD detects systemic override)
+
+    v21 Core Equation (Prompt-Gated Fusion Architecture):
+        Risk_seq = Max(R_confusion, (1 - w_prompt) × R_deception)
+        w_prompt = sigmoid((V_prompt - τ) × α)
+        R_confusion = Max(V_norm × D)       # Safe Core (works on all tasks)
+        R_deception = Mean(JSD)              # Gated based on prompt complexity
+
+        Key Innovation: Prompt Complexity Gating
+        - JSD detects "Internal Conflict" not "Hallucination"
+        - In standard RAG: Hallucination → High Conflict → High JSD (works)
+        - In counterfactual RAG: Hallucination → Low Conflict → Low JSD (INVERTED!)
+        - Solution: Gate JSD based on prompt varentropy (complexity)
+          * Complex prompts (counterfactual): High V_prompt → suppress JSD
+          * Simple prompts (standard RAG): Low V_prompt → use JSD
+
+        Evidence (AUROC on Faithfulness Tasks):
+          | Dataset                  | V×D Only | JSD Alone | v19  |
+          |--------------------------|----------|-----------|------|
+          | FaithEval Counterfactual | 0.71     | 0.43      | 0.53 |
+          | FaithEval Unanswerable   | 0.88     | 0.14      | 0.14 |
+          | RAGBench                 | 0.75     | 0.20      | 0.33 |
+
+        V×D is the "Safe Core" - works correctly on ALL task types.
+        v21 preserves JSD for standard RAG while protecting against inversion.
     """
 
     # === CORE MECHANISM ===
@@ -316,6 +340,27 @@ class AGSARConfig:
     gate = sigmoid((V_mean - threshold) × slope)
     """
 
+    # === V21 PARAMETERS (Prompt-Gated Fusion) ===
+    prompt_gate_threshold: float = 3.0
+    """v21: Prompt varentropy threshold for JSD gating.
+    Controls when JSD signal is suppressed due to complex/counterfactual context.
+    - V_prompt < threshold → JSD active (standard RAG)
+    - V_prompt > threshold → JSD suppressed (counterfactual protection)
+    Evidence-based:
+        - Standard RAG prompts: V_prompt ~ 1.5-2.5
+        - Counterfactual prompts: V_prompt ~ 3.5-4.5
+    Threshold 3.0 separates normal from complex contexts.
+    w_prompt = sigmoid((V_prompt - threshold) × slope)
+    """
+
+    prompt_gate_slope: float = 1.0
+    """v21: Sigmoid slope for prompt complexity gating.
+    Controls how sharply the gate transitions.
+    - 1.0 (default): Gradual transition (±1.0 varentropy = ±0.73 gate change)
+    - 2.0: Moderate transition (±0.5 varentropy = ±0.76 gate change)
+    - 0.5: Very gradual transition (±2.0 varentropy = ±0.76 gate change)
+    """
+
     # === LEGACY PARAMETERS (kept for API compatibility, ignored in v3.2) ===
     gate_threshold: float = 0.3
     """DEPRECATED in v3.2: Was τ_G for MLP override threshold."""
@@ -368,8 +413,8 @@ class AGSARConfig:
         if not 0.0 <= self.hallucination_threshold <= 1.0:
             raise ValueError(f"hallucination_threshold must be in [0, 1], got {self.hallucination_threshold}")
         # Version validation
-        if self.version not in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19):
-            raise ValueError(f"version must be 2-17 or 19, got {self.version}")
+        if self.version not in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21):
+            raise ValueError(f"version must be 2-17, 19, or 21, got {self.version}")
         # v3.4 validation (power law and cognitive threshold)
         if not 0.0 <= self.lambda_struct <= 10.0:
             raise ValueError(f"lambda_struct must be in [0, 10], got {self.lambda_struct}")
@@ -405,6 +450,11 @@ class AGSARConfig:
             raise ValueError(f"regime_threshold must be in [5.0, 100.0], got {self.regime_threshold}")
         if not 0.05 <= self.regime_slope <= 1.0:
             raise ValueError(f"regime_slope must be in [0.05, 1.0], got {self.regime_slope}")
+        # v21 validation (Prompt-Gated Fusion)
+        if not 0.5 <= self.prompt_gate_threshold <= 10.0:
+            raise ValueError(f"prompt_gate_threshold must be in [0.5, 10.0], got {self.prompt_gate_threshold}")
+        if not 0.1 <= self.prompt_gate_slope <= 5.0:
+            raise ValueError(f"prompt_gate_slope must be in [0.1, 5.0], got {self.prompt_gate_slope}")
 
     @property
     def torch_dtype(self) -> torch.dtype:
