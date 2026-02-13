@@ -1,46 +1,20 @@
-# AG-SAR Complete Dependencies
-# Install with: pip install -r requirements.txt
-# Tested on: Python 3.10, CUDA 12+, H100 GPU
+# Core dependencies
+transformers>=4.43.0,<5.0.0
+torch>=2.1.0,<2.3.0
+accelerate>=0.25.0
 
-# =============================================================================
-# CORE DEPENDENCIES (Required for basic AG-SAR functionality)
-# =============================================================================
-torch>=2.2.0
-transformers>=4.40.0,<4.45.0      # CRITICAL: >=4.45 breaks attention hooks
-numpy>=1.20.0,<2.0                # 2.x breaks pandas/scipy binary compat
-accelerate>=0.26.0
+# Scientific computing
+numpy>=1.24.0,<2.0.0
+scipy>=1.10.0
 
-# Hardware Acceleration (Linux only)
-triton>=2.1.0; sys_platform == "linux"
-flash-attn>=2.5.0; sys_platform == "linux"
+# Metrics and evaluation
+scikit-learn>=1.3.0
 
-# =============================================================================
-# EVALUATION DEPENDENCIES (For experiments and benchmarks)
-# =============================================================================
-scikit-learn>=1.2
-scipy>=1.10,<1.14                 # 1.14+ breaks linesearch imports
-matplotlib>=3.7
-seaborn>=0.12
-pandas>=2.0
-datasets>=2.0
-tqdm>=4.65
-rouge-score>=0.1.2
-bert-score>=0.3.13
-evaluate>=0.4.0
-nltk>=3.8
-spacy>=3.5
-sentence-transformers>=2.2
-pyyaml>=6.0
-pydantic>=2.0
+# Data handling
+datasets>=2.14.0
 
-# TF/Keras compatibility (required for sentence-transformers)
-tf-keras>=2.15
+# Progress bars
+tqdm>=4.65.0
 
-# =============================================================================
-# DEVELOPMENT DEPENDENCIES (For testing and code quality)
-# =============================================================================
-pytest>=7.0
-pytest-cov>=4.0
-black>=23.0
-ruff>=0.1.0
-mypy>=1.0
+# Logging
+coloredlogs>=15.0  # Optional, for nicer logging output

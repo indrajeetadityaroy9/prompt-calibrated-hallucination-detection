@@ -4,104 +4,145 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AG-SAR (Attention-Graph Shifting Attention to Relevance) is a research framework for single-pass inference-time hallucination detection in LLMs via internal attention graph analysis. It achieves O(N) memory complexity through matrix-free eigenvector centrality computation.
+AG-SAR (Aggregated Signal Architecture for Risk) is a zero-shot hallucination detection system for LLaMA 3.1. It computes internal signals during text generation and aggregates them via prompt-anchored normalization + Noisy-OR for polarity-stable risk scoring. This project targets ICML submission and focuses on detecting **contextual hallucinations** in retrieval-augmented generation (RAG) systems.
 
-**Core equation:**
-```
-Uncertainty(t) = 1 - Authority(t)
-Authority(t) = Gate(t) × Flow(t) + (1 - Gate(t)) × Trust(t)
-Trust(t) = 1 - Dispersion(t) × (1 + λ × Varentropy(t))
-```
+## Commands
 
-## Build & Development Commands
-
+### Install Dependencies
 ```bash
-# Installation
-pip install -e ".[dev]"          # Development (testing, linting)
-pip install -e ".[eval]"         # Evaluation framework (benchmarks)
-pip install -e ".[h100]"         # H100 acceleration (Linux only)
-pip install -e ".[all]"          # Everything
+pip install -r requirements.txt
+```
 
-# Testing
-pytest tests/                    # All tests
-pytest tests/unit/               # Unit tests only
-pytest tests/integration/        # Integration tests
-pytest tests/unit/test_config.py -v  # Single test file
+### Hugging Face Authentication
+Gated Llama 3.1 models require authentication:
+```bash
+huggingface-cli login
+# Or set HF_TOKEN environment variable
+```
 
-# Linting & Formatting
-black ag_sar/ experiments/       # Format code (100 char line length)
-ruff check ag_sar/ experiments/  # Style check
-mypy ag_sar/                     # Type checking
+### Run Tests
+```bash
+python -m pytest tests/
+python -m pytest tests/test_full_pipeline.py
+```
 
-# Run experiments
-python -m experiments.main --config experiments/configs/validation/smoke_test.yaml
-python -m experiments.main --config path/to/config.yaml --dry-run  # Preview config
-python -m experiments.main --config path/to/config.yaml --seed 123 --deterministic
+### Run Benchmarks
+```bash
+python experiments/main.py --config experiments/configs/benchmarks/sota_confirmation.yaml
+```
+
+### Pilot Evaluation
+```bash
+python scripts/run_pilot_halueval.py      # HaluEval dataset
+python scripts/run_pilot_ragtruth.py      # RAGTruth dataset
+python scripts/run_pilot_rigorous.py      # Comprehensive evaluation
+python scripts/eval_truthfulqa.py         # TruthfulQA evaluation
+```
+
+### Verification
+```bash
+python tests/verify_polarity.py           # Verify signal polarity (higher = riskier)
 ```
 
 ## Architecture
 
-### Core Package (`ag_sar/`)
-
-**Entry Point:** `engine.py` - The `AGSAR` class orchestrates the full pipeline:
-```python
-agsar = AGSAR(model, tokenizer, config=AGSARConfig())
-agsar.calibrate_on_prompt(prompt)  # Optional adaptive threshold tuning
-uncertainty = agsar.compute_uncertainty(prompt, response)
+### Pipeline Flow
+```
+Input → Model(Hooks) → Signal Extraction → Prompt-Anchored Normalization → Noisy-OR Fusion → Risk Score
 ```
 
-**Three-Pillar Measures** (`measures/`):
-- `authority.py` - Authority flow computation (recursive attention from prompt tokens)
-- `semantics.py` - Semantic dispersion (top-k prediction consistency)
-- `stability.py` - Stability gating (MLP-attention agreement)
-- `entropy.py` - Token entropy and varentropy
+1. **Hook System** (`ag_sar/hooks.py`): Captures hidden states at 3 points per transformer layer
 
-**Model Interaction** (`modeling/`):
-- `hooks.py` - `ModelAdapter` extracts attention via forward hooks (monkey-patches attention modules)
-- `adapters.py` - Architecture-specific adapters for RoPE and GQA handling
-- Supports: GPT-2, Llama, Qwen, Mistral, Mixtral
+2. **Signal Extraction** (`ag_sar/signals/`): Computes per-token signals from hidden states
 
-**Low-Level Ops** (`ops/`):
-- `torch_functional.py` - PyTorch fallback implementations
-- `triton_*.py` - Triton GPU kernels (Linux only, auto-fallback on Mac/Windows)
-- Environment: `AG_SAR_USE_TORCH=1` forces PyTorch backend
+3. **Aggregation** (`ag_sar/aggregation/`): Prompt-anchored normalization + Noisy-OR fusion
 
-### Experiments Framework (`experiments/`)
+4. **Classification**: Token → Span → Response level risk scoring
 
-- `main.py` - Unified CLI entry point
-- `configs/` - YAML experiment configurations (organized by purpose: benchmarks/, ablations/, scaling/, etc.)
-- `configs/schema.py` - Pydantic config validation
-- `evaluation/` - Benchmark engine and determinism utilities
-- `methods/` - Baseline implementations (LogProb, SelfCheck, EigenScore, Semantic Entropy, etc.)
-- `data/` - Dataset loaders (HaluEval, RAGTruth, TruthfulQA, WikiText, FAVA)
+### Core Entry Points
 
-## Critical Dependencies
+- `ag_sar/engine.py`: **AGSAR class** - main entry point
+- `ag_sar/config.py`: DetectorConfig dataclass
+- `ag_sar/icml/`: ICML-ready ensemble implementations
 
-**Pinned versions that must not be changed without careful testing:**
-- `transformers>=4.40.0,<4.45.0` - **>=4.45 breaks attention hooks**
-- `numpy>=1.20.0,<2.0` - 2.x breaks pandas/scipy compatibility
-- `scipy>=1.10,<1.14` - 1.14+ breaks linesearch imports
+### Signal Categories (`ag_sar/signals/`)
 
-**Platform-specific:**
-- Triton kernels are Linux-only; Mac/Windows automatically use PyTorch fallback
-- `flash-attn` (H100 optimization) requires Linux + CUDA 12+
+- **Core**: `topk_jsd.py`, `lci.py`, `varlogp.py`, `uncertainty.py` (entropy, inv_margin)
+- **SOTA**: `semantic_entropy.py`, `inside.py` (EigenScore), `lsd.py`, `internal_se.py`
+- **Context**: `context_support.py`, `context_grounding.py` (flagship mechanistic approach)
 
-## Key Concepts
+### Aggregation (`ag_sar/aggregation/`)
 
-1. **Attention hooks are fragile** - Changes to `modeling/hooks.py` or `modeling/adapters.py` require testing across multiple architectures (GPT-2, Llama, Qwen, Mistral)
+- `prompt_anchored.py`: **PromptAnchoredAggregator** - ICML-ready with z-scores and Noisy-OR
+- `span_merger.py`: Merge adjacent high-risk tokens into spans
 
-2. **Adaptive calibration** - All thresholds are auto-tuned from prompt statistics via `calibrate_on_prompt()`. The `sigma_multiplier` config controls sensitivity.
+### Evaluation (`ag_sar/evaluation/`)
 
-3. **Hardware tiers:**
-   - H100: Full optimization (TF32 + Flash attention)
-   - Ampere+: BFloat16 + TF32
-   - Older/Mac/CPU: Float16 or Float32 fallback
+- `runner.py`: EvaluationRunner orchestrates evaluation
+- `modes.py`: ForcedDecodingEvaluator and GenerationEvaluator
+- `metrics.py`: AUROC, AUPRC, span F1, ECE, Brier, AURC metrics
+- `data/`: Dataset loaders (RAGTruth, HaluEval, TruthfulQA, FaithEval)
 
-4. **Config is minimal by design** - `AGSARConfig` exposes only essential tuning knobs (`semantic_layers`, `varentropy_lambda`, `sigma_multiplier`). Most behavior is auto-derived.
+### ICML Module (`ag_sar/icml/`)
 
-## Testing Conventions
+- `robust_ensemble.py`: **RobustEnsemble** - cross-task generalizable (recommended)
+- `grounding_detector.py`: **ICMLContextGrounding** - pure SVD-based context grounding
 
-- `tests/unit/` - Module-level tests (one file per module)
-- `tests/integration/` - Full pipeline and behavior tests
-- `tests/experiments/` - Data loader and metrics validation
-- All tests use pytest fixtures from `conftest.py` files
+## Configuration
+
+Config-driven via `DetectorConfig` in `ag_sar/config.py`:
+- `layer_subset`: `"last_third"` | `"last_quarter"` | `"all"` | `List[int]`
+- `candidate_topk`: Size of candidate set (default 128)
+- `prompt_anchored_signals`: Signals for aggregation
+- `eigenscore_enabled`, `semantic_entropy_enabled`, `ise_enabled`, `lsd_enabled`: SOTA toggles
+
+## Usage Example
+
+```python
+from ag_sar.engine import AGSAR
+from ag_sar.config import DetectorConfig
+
+config = DetectorConfig(
+    layer_subset="last_third",
+    candidate_topk=128,
+)
+detector = AGSAR(model, tokenizer, config)
+result = detector.generate("Your question", context="Optional context", max_new_tokens=100)
+# result.generated_text, result.token_risks, result.response_risk, result.risky_spans
+```
+
+### ICML Ensemble Usage
+
+```python
+from ag_sar.icml import RobustEnsemble
+
+ensemble = RobustEnsemble(model, tokenizer)
+result = ensemble.compute_risk(hidden_states, logits, prompt_len)
+# result.response_risk, result.token_risks
+```
+
+## Key Design Principles
+
+- **Polarity-stable**: All signals follow convention that higher values = higher risk
+- **Candidate-set approach**: Signals computed on top-k tokens for efficiency
+- **Prompt-anchored normalization**: Uses prompt statistics as baseline
+- **Zero-shot**: No training required
+- **Single-pass**: No multi-sample generation needed
+
+## Context Grounding (Flagship Mechanism)
+
+Located in `ag_sar/signals/context_grounding.py` and `ag_sar/icml/grounding_detector.py`.
+
+### Core Insight
+If a model is grounded in context, its output representations should be "explainable" by the context subspace. Hallucinations produce representations that diverge from the context.
+
+### Mathematical Foundation
+```
+Grounding Score = ||proj_context(h_t)|| / ||h_t||
+Hallucination Risk = 1 - Grounding Score
+```
+
+### Two Types of Hallucination
+
+1. **Contextual Hallucination** (AG-SAR excels): Output diverges from provided context
+2. **Parametric Hallucination** (Out of scope): Model generates false statements from pretrained knowledge

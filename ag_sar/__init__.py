@@ -1,67 +1,35 @@
 """
-AG-SAR: Attention-Graph Shifting Attention to Relevance.
+AG-SAR: Zero-Shot Hallucination Detection for LLaMA 3.1
 
-Single-pass hallucination detection by analyzing attention patterns.
+A zero-shot hallucination detector that computes internal signals during generation
+and aggregates them via Noisy-OR for polarity-stable risk scoring.
 
-Core equation:
-    Uncertainty(t) = 1 - Authority(t)
-    Authority(t) = Gate(t) × Flow(t) + (1 - Gate(t)) × Trust(t)
-
-Where:
-- Flow: Information provenance from prompt tokens
-- Gate: MLP-attention agreement (context reliance indicator)
-- Trust: 1 - Dispersion × (1 + λ × Varentropy)
+Deployment mode: Single-pass during generation (one forward per decoded token with KV-cache)
+Evaluation mode: Forced decoding for labeled datasets (stepwise with ground-truth tokens)
 """
 
-__version__ = "0.5.0"
+__version__ = "0.2.0"
 
-# Core API
-from .engine import AGSAR
-from .config import AGSARConfig
-from .modeling import ModelAdapter, AttentionCapture
-
-# Measures
-from .measures import (
-    compute_semantic_authority,
-    compute_token_entropy,
-    compute_varentropy,
-    compute_semantic_dispersion,
-)
-
-# Operations
-from .ops import (
-    compute_authority_flow_vectorized,
-    compute_mlp_divergence,
-    fused_stability_gate,
-)
-
-# Utilities
-from .utils import (
-    enable_tf32,
-    enable_h100_optimizations,
-    is_tf32_enabled,
-    get_optimal_dtype,
-    get_model_dtype,
-    get_model_device,
+from .config import DetectorConfig, SpanRisk, DetectionResult
+from .hooks import EphemeralHiddenBuffer, LayerHooks, PrefillContextHook, HookManager
+from .numerics import (
+    safe_softmax,
+    safe_jsd,
+    max_cosine_similarity,
 )
 
 __all__ = [
-    "__version__",
-    "AGSAR",
-    "AGSARConfig",
-    "ModelAdapter",
-    "AttentionCapture",
-    "compute_semantic_authority",
-    "compute_token_entropy",
-    "compute_varentropy",
-    "compute_semantic_dispersion",
-    "compute_authority_flow_vectorized",
-    "compute_mlp_divergence",
-    "fused_stability_gate",
-    "enable_tf32",
-    "enable_h100_optimizations",
-    "is_tf32_enabled",
-    "get_optimal_dtype",
-    "get_model_dtype",
-    "get_model_device",
+    # Config
+    "DetectorConfig",
+    "SpanRisk",
+    "DetectionResult",
+    # Hooks
+    "EphemeralHiddenBuffer",
+    "LayerHooks",
+    "PrefillContextHook",
+    "HookManager",
+    # Numerics
+    "safe_softmax",
+    "safe_jsd",
+    "max_cosine_similarity",
 ]

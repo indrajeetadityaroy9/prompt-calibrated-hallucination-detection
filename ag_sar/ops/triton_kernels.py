@@ -1,180 +1,119 @@
 """
-Triton GPU Kernels for Matrix-Free Centrality.
+Triton kernels for optimized AG-SAR operations.
 
-O(N) memory centrality computation optimized for H100 (Hopper).
-Requires Triton and NVIDIA CUDA GPU.
+Kernels:
+1. fused_rmsnorm_indexed_linear: Optimized for JSD signal (X @ W[indices].T)
 
-H100 Optimization Notes:
-    - Larger BLOCK sizes (256) utilize H100's massive L2/SRAM (50MB)
-    - Higher num_warps (8-16) for Hopper's increased warp occupancy
-    - num_stages=3-4 for optimal pipelining with TMA
-    - BFloat16 for stable numerics at high speed
+Triton 3.x Compatible Version.
 """
 
+import torch
 import triton
 import triton.language as tl
-import torch
+
+# Check Triton version for compatibility
+TRITON_VERSION = tuple(int(x) for x in triton.__version__.split('.')[:2])
+TRITON_3_PLUS = TRITON_VERSION[0] >= 3
 
 
-def _is_hopper() -> bool:
-    """Check if running on H100 (Hopper architecture)."""
-    if not torch.cuda.is_available():
-        return False
-    major, _ = torch.cuda.get_device_capability()
-    return major >= 9  # Hopper is compute capability 9.0
-
-
-def _get_autotune_configs():
-    """
-    H100/Hopper-optimized autotune configurations.
-
-    H100 has:
-        - 50MB L2 cache (vs 40MB on A100)
-        - 256KB shared memory per SM
-        - Higher register count (but still limited per thread)
-        - TMA (Tensor Memory Accelerator)
-
-    Note: Large block sizes can cause register spilling. We use moderate
-    block sizes with higher warp counts for better occupancy on H100.
-    """
-    # Conservative configs that work on all GPUs including H100
-    # Smaller blocks reduce register pressure while maintaining throughput
-    configs = [
-        # Small blocks - lowest register pressure, works everywhere
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 32}, num_warps=4, num_stages=2),
-        # Medium blocks - good balance
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_warps=8, num_stages=2),
-    ]
-
-    # H100-specific configs - use moderate blocks with more warps
-    if _is_hopper():
-        configs.extend([
-            # H100: moderate blocks, high warp count for occupancy
-            triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64}, num_warps=8, num_stages=3),
-            triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128}, num_warps=8, num_stages=2),
-            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_warps=8, num_stages=2),
-            # Slightly larger for high-memory cases
-            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=2),
-        ])
-    else:
-        # A100/older GPU configs
-        configs.extend([
-            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64}, num_warps=8, num_stages=3),
-            triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=2),
-        ])
-
-    return configs
-
-
-@triton.autotune(configs=_get_autotune_configs(), key=['D'])  # Only key on D, not S - avoids recompile per sequence
 @triton.jit
-def _centrality_kernel(
-    Q_ptr, K_ptr, v_ptr, Out_ptr,
-    stride_qb, stride_qh, stride_qs, stride_qd,
-    stride_kb, stride_kh, stride_ks, stride_kd,
-    stride_vb, stride_vs,
-    stride_ob, stride_oh, stride_os,
-    S: tl.constexpr, D: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_D: tl.constexpr,
+def fused_rmsnorm_indexed_linear_kernel_v3(
+    x_ptr,              # [Batch, Dim]
+    weight_ptr,         # [Vocab, Dim]
+    indices_ptr,        # [K]
+    out_ptr,            # [Batch, K]
+    stride_x_batch, stride_x_dim,
+    stride_w_vocab, stride_w_dim,
+    stride_out_batch, stride_out_k,
+    Dim: tl.constexpr,
+    K: tl.constexpr,
+    eps,
+    BLOCK_DIM: tl.constexpr,
 ):
     """
-    Triton kernel for matrix-free attention-weighted centrality.
+    Triton 3.x compatible version.
+    Computes: out = RMSNorm(x) @ Weight[indices].T
 
-    Computes: out[i] = sum_{j <= i} softmax(Q[i] @ K[j].T / sqrt(D)) * v[j]
-    Using Flash Attention-style online softmax for O(N) memory.
+    Grid: (Batch, K) - one program per output element
     """
-    pid_b = tl.program_id(0)
-    pid_h = tl.program_id(1)
-    pid_m = tl.program_id(2)
+    batch_pid = tl.program_id(0)
+    k_pid = tl.program_id(1)
 
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_d = tl.arange(0, BLOCK_D)
-    mask_m = offs_m < S
+    # -----------------------------------------------------------
+    # 1. Compute RMS of X row (FUSED)
+    # -----------------------------------------------------------
+    x_row_start = x_ptr + batch_pid * stride_x_batch
 
-    Q_base = Q_ptr + pid_b * stride_qb + pid_h * stride_qh
-    K_base = K_ptr + pid_b * stride_kb + pid_h * stride_kh
-    v_base = v_ptr + pid_b * stride_vb
+    sum_sq = tl.zeros([1], dtype=tl.float32)
+    for off in range(0, Dim, BLOCK_DIM):
+        cols = off + tl.arange(0, BLOCK_DIM)
+        mask = cols < Dim
+        val = tl.load(x_row_start + cols * stride_x_dim, mask=mask, other=0.0).to(tl.float32)
+        sum_sq += tl.sum(val * val)
 
-    q_ptrs = Q_base + offs_m[:, None] * stride_qs + offs_d[None, :] * stride_qd
-    q = tl.load(q_ptrs, mask=mask_m[:, None] & (offs_d[None, :] < D), other=0.0)
+    rms = tl.sqrt((sum_sq / Dim) + eps)
+    rms_inv = 1.0 / rms
 
-    scale = 1.0 / tl.sqrt(tl.cast(D, tl.float32))
+    # -----------------------------------------------------------
+    # 2. Load index for this K position
+    # -----------------------------------------------------------
+    w_idx = tl.load(indices_ptr + k_pid)
 
-    m_i = tl.full([BLOCK_M], float('-inf'), dtype=tl.float32)
-    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
-    acc_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    # -----------------------------------------------------------
+    # 3. Compute dot product: x_norm @ weight[w_idx]
+    # -----------------------------------------------------------
+    acc = tl.zeros([1], dtype=tl.float32)
 
-    for start_n in range(0, S, BLOCK_N):
-        offs_n = start_n + tl.arange(0, BLOCK_N)
-        mask_n = offs_n < S
+    for off in range(0, Dim, BLOCK_DIM):
+        cols = off + tl.arange(0, BLOCK_DIM)
+        mask_dim = cols < Dim
 
-        k_ptrs = K_base + offs_n[:, None] * stride_ks + offs_d[None, :] * stride_kd
-        k = tl.load(k_ptrs, mask=mask_n[:, None] & (offs_d[None, :] < D), other=0.0)
+        # Load X chunk and normalize
+        x_val = tl.load(x_row_start + cols * stride_x_dim, mask=mask_dim, other=0.0).to(tl.float32)
+        x_norm = x_val * rms_inv
 
-        v_ptrs = v_base + offs_n * stride_vs
-        v_block = tl.load(v_ptrs, mask=mask_n, other=0.0)
+        # Load Weight row
+        w_ptr = weight_ptr + w_idx * stride_w_vocab + cols * stride_w_dim
+        w_val = tl.load(w_ptr, mask=mask_dim, other=0.0).to(tl.float32)
 
-        scores = tl.dot(q.to(tl.float32), tl.trans(k.to(tl.float32))) * scale
+        # Accumulate dot product
+        acc += tl.sum(x_norm * w_val)
 
-        causal_mask = offs_n[None, :] <= offs_m[:, None]
-        scores = tl.where(causal_mask, scores, float('-inf'))
-        scores = tl.where(mask_n[None, :], scores, float('-inf'))
-
-        m_ij = tl.max(scores, axis=1)
-        m_new = tl.maximum(m_i, m_ij)
-        alpha = tl.exp(m_i - m_new)
-        beta = tl.exp(scores - m_new[:, None])
-        l_new = l_i * alpha + tl.sum(beta, axis=1)
-
-        acc_i = acc_i * alpha + tl.sum(beta * v_block[None, :], axis=1)
-        m_i = m_new
-        l_i = l_new
-
-    out = acc_i / l_i
-    Out_base = Out_ptr + pid_b * stride_ob + pid_h * stride_oh
-    out_ptrs = Out_base + offs_m * stride_os
-    tl.store(out_ptrs, out, mask=mask_m)
+    # Store result (extract scalar from 1-element tensor)
+    out_offset = batch_pid * stride_out_batch + k_pid * stride_out_k
+    tl.store(out_ptr + out_offset, tl.sum(acc))
 
 
-def centrality_kernel(
-    Q: torch.Tensor,
-    K: torch.Tensor,
-    v: torch.Tensor,
-) -> torch.Tensor:
+# -------------------------------------------------------------------------
+# Python Wrappers
+# -------------------------------------------------------------------------
+
+def fused_rmsnorm_linear_subset(x: torch.Tensor, weight: torch.Tensor, indices: torch.Tensor, eps=1e-6):
     """
-    Launch Triton centrality kernel.
+    x: [Batch, Dim] or [Dim]
+    weight: [Vocab, Dim]
+    indices: [K]
 
-    Args:
-        Q: (B, H, S, D) Query vectors
-        K: (B, H, S, D) Key vectors
-        v: (B, S) Value signal
-
-    Returns:
-        out: (B, H, S) Attention-weighted centrality
+    Returns: [Batch, K] logits for indexed vocabulary subset
     """
-    B, H, S, D = Q.shape
-    device = Q.device
+    if x.dim() == 1:
+        x = x.unsqueeze(0)
 
-    # Triton requires current CUDA device to match tensor device
-    with torch.cuda.device(device):
-        out = torch.empty((B, H, S), device=device, dtype=Q.dtype)
+    batch, dim = x.shape
+    k = indices.shape[0]
+    out = torch.empty((batch, k), device=x.device, dtype=x.dtype)
 
-        BLOCK_D = triton.next_power_of_2(D)
+    BLOCK_DIM = min(1024, triton.next_power_of_2(dim))
 
-        # Use minimum BLOCK_M (32) for safe grid sizing - kernel handles bounds internally
-        # This ensures grid covers all tokens regardless of which autotune config is selected
-        grid = (B, H, triton.cdiv(S, 32))
+    # Grid: one program per (batch, k) output
+    grid = (batch, k)
 
-        _centrality_kernel[grid](
-            Q, K, v, out,
-            Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3),
-            K.stride(0), K.stride(1), K.stride(2), K.stride(3),
-            v.stride(0), v.stride(1),
-            out.stride(0), out.stride(1), out.stride(2),
-            S=S, D=D, BLOCK_D=BLOCK_D,
-        )
-
+    fused_rmsnorm_indexed_linear_kernel_v3[grid](
+        x, weight, indices, out,
+        x.stride(0), x.stride(1),
+        weight.stride(0), weight.stride(1),
+        out.stride(0), out.stride(1),
+        dim, k, eps,
+        BLOCK_DIM=BLOCK_DIM,
+    )
     return out

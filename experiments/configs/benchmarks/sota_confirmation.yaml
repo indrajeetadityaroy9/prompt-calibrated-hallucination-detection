@@ -1,0 +1,74 @@
+experiment:
+  name: "sota_confirmation_v24_dual_scale"
+  seed: 42
+  description: "Pre-submission SOTA validation on 3B/8B models across all failure modes."
+
+# We will override 'model' in the execution script, 
+# but set a default here for schema validation.
+model:
+  name: "meta-llama/Meta-Llama-3-8B-Instruct"
+  dtype: "bfloat16"
+  device_map: "auto"
+  attn_implementation: "flash_attention_2"
+
+datasets:
+  # 1. EPISTEMIC CONFUSION - QA (Short/Burst)
+  # HaluEval qa_samples: explicit hallucination labels (EMNLP 2023)
+  - name: "pminervini/HaluEval"
+    split: "qa_samples"
+    limit: 500
+
+  # 2. EPISTEMIC/SEMANTIC MIX - Summarization (Long/Complex)
+  # HaluEval summarization_samples: explicit hallucination labels
+  - name: "pminervini/HaluEval"
+    split: "summarization_samples"
+    limit: 300
+
+  # 3. MECHANISTIC DECEPTION (RAG Override)
+  # RAGTruth: span-level hallucination labels (ACL 2024)
+  - name: "wandb/RAGTruth-processed"
+    split: "test"
+    limit: 500
+
+  # 4. FACTUALITY - TruthfulQA (Closed-book QA)
+  # 817 questions, balanced correct/incorrect pairs (ACL 2022)
+  - name: "truthfulqa/truthful_qa"
+    split: "validation"
+    limit: 500
+
+  # 5. FINE-GRAINED - FAVA-Bench
+  # Span-level with 6 hallucination types (arXiv 2024)
+  - name: "wandb/fava-data-processed"
+    split: "test"
+    limit: 100  # Small test set (92 examples)
+
+methods:
+  # The Candidate
+  agsar:
+    class: "AGSARMethod"
+    config:
+      # Valid DetectorConfig parameters
+      layer_subset: "last_third"
+      candidate_topk: 128
+      lci_topk: 10
+      eigenscore_enabled: false # Disable saturated signals
+      lsd_enabled: true
+      ise_enabled: true 
+      semantic_entropy_enabled: false
+
+# The Full Metric Suite for NeurIPS
+metrics:
+  - "auroc"
+  - "auprc"
+  - "f1"
+  - "accuracy"
+  - "ece"
+  - "brier"
+  - "aurc"
+  - "risk@coverage_90"
+  - "tpr_at_fpr_0.05"
+  - "spearman"
+
+output:
+  dir: "results/sota_confirmation"
+  save_per_sample: true

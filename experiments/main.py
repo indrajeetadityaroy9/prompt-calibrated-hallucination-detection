@@ -1,408 +1,591 @@
 #!/usr/bin/env python3
 """
-AG-SAR Experiments CLI - Single entry point for all experiments.
+Unified Benchmark Runner for ICML Submission.
 
-This is the unified interface for running hallucination detection experiments.
-It replaces the old scattered scripts (run.py, compare_baselines.py, etc.).
-
-Usage:
-    # Run a full experiment
-    python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml
-
-    # Dry run (print config and exit)
-    python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml --dry-run
-
-    # Override output directory
-    python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml --output-dir results/custom
-
-    # Reproducibility mode (deterministic, overridden seed)
-    python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml --seed 123 --deterministic
+Executes the evaluation matrix defined in the YAML config.
+Architectural maturity:
+- Config-driven execution
+- Unified interface for diverse datasets
+- Automated metric reporting
 """
 
 import argparse
+import yaml
 import sys
+import json
+import os
 from pathlib import Path
-from typing import Dict, Optional
-
-# Pre-flight installation check (must be first to ensure ag_sar is importable)
-from experiments.utils.preflight import check_installation
-check_installation()
-
+from typing import List, Dict, Any
+from tqdm import tqdm
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from datasets import load_dataset
+import numpy as np
 
-from ag_sar import enable_h100_optimizations, get_optimal_dtype
-from experiments.evaluation.determinism import set_global_seed, DEFAULT_SEED
+# Add project root to path
+sys.path.append(str(Path(__file__).parent.parent))
 
-# Note: Global seed is set in main() after parsing CLI args to support --seed override
-
-from experiments.configs.schema import ExperimentConfig
-from experiments.evaluation.engine import BenchmarkEngine
-from experiments.data.halueval import HaluEvalDataset
-from experiments.data.ragtruth import RAGTruthDataset
-from experiments.data.truthfulqa import TruthfulQADataset
-from experiments.data.wikitext import WikiTextDataset
-from experiments.data.fava import FAVADataset
-from experiments.methods.agsar_wrapper import AGSARMethod
-from experiments.methods.logprob import LogProbMethod
-from experiments.methods.entropy import PredictiveEntropyMethod
-from experiments.methods.selfcheck import SelfCheckNLIMethod
-from experiments.methods.eigenscore import EigenScoreMethod, SAPLMAMethod
-from experiments.methods.llm_check import (
-    LLMCheckAttentionMethod,
-    LLMCheckHiddenMethod,
-    LLMCheckLogitMethod,
-)
-from experiments.methods.semantic_entropy import SemanticEntropyMethod
+from ag_sar.engine import AGSAR
+from ag_sar.config import DetectorConfig
+from ag_sar.evaluation.modes import ForcedDecodingEvaluator
+from ag_sar.evaluation.metrics import compute_metrics, compute_span_metrics
 
 
-def load_model_and_tokenizer(config: ExperimentConfig, deterministic: bool = False):
-    """
-    Load model with H100 optimizations.
+def load_config(path: str) -> Dict[str, Any]:
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
 
-    Args:
-        config: Experiment configuration
-        deterministic: Enable deterministic mode for reproducibility
-
-    Returns:
-        Tuple of (model, tokenizer)
-    """
-    print(f"Loading model: {config.model.name}")
-
-    # Enable optimizations (with optional determinism)
-    enable_h100_optimizations(deterministic=deterministic)
-
-    # Determine dtype
-    dtype_map = {
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-        "float32": torch.float32,
-    }
-    dtype = dtype_map.get(config.model.dtype, get_optimal_dtype())
-
-    # Load model
-    model = AutoModelForCausalLM.from_pretrained(
-        config.model.name,
-        torch_dtype=dtype,
-        device_map=config.model.device_map,
-        attn_implementation=config.model.attn_implementation,
-        trust_remote_code=config.model.trust_remote_code,
-    )
-    model.eval()
-
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
-        config.model.name,
-        trust_remote_code=config.model.trust_remote_code,
-    )
+def load_model(model_name: str, device_map: str = "auto", torch_dtype: str = "float16"):
+    print(f"Loading model: {model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    print(f"  Device: {next(model.parameters()).device}")
-    print(f"  Dtype: {next(model.parameters()).dtype}")
-
+        
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        device_map=device_map,
+        torch_dtype=getattr(torch, torch_dtype),
+    )
+    model.eval()
     return model, tokenizer
 
-
-def build_datasets(config: ExperimentConfig) -> Dict:
+def load_ragtruth(config: Dict[str, Any]) -> List[Dict]:
     """
-    Build dataset instances from config.
+    Load RAGTruth dataset for span-level hallucination detection.
 
-    Args:
-        config: Experiment configuration
+    RAGTruth (ACL 2024) provides character-level span annotations for hallucinations
+    in RAG-generated responses. Labels include:
+    - Conflict: Contradicts retrieved context
+    - Baseless: Information not supported by context
 
-    Returns:
-        Dict of {dataset_name: EvaluationDataset}
+    Fields: id, context, query, output, hallucination_labels (JSON spans)
     """
-    datasets = {}
-    ds_config = config.dataset
+    path = config.get('path', config['name'])
+    split = config.get('split', 'test')
+    limit = config.get('limit', config.get('max_examples', float('inf')))
+    print(f"Loading RAGTruth from {path} ({split})...")
 
-    # Special case: Load ALL 4 required datasets
-    if ds_config.name == "ALL":
-        num_samples = ds_config.num_samples
-        seed = ds_config.seed
+    dataset = load_dataset(path, split=split)
 
-        datasets["halueval_qa"] = HaluEvalDataset(
-            variant="qa", num_samples=num_samples, seed=seed
-        )
-        datasets["ragtruth"] = RAGTruthDataset(
-            task_type="QA", num_samples=num_samples, seed=seed
-        )
-        datasets["halueval_summarization"] = HaluEvalDataset(
-            variant="summarization", num_samples=num_samples, seed=seed
-        )
-        datasets["fava"] = FAVADataset(
-            num_samples=num_samples, seed=seed
-        )
-        return datasets
+    examples = []
+    for ex in dataset:
+        if len(examples) >= limit:
+            break
 
-    # Single dataset loading (original logic)
-    if ds_config.name.startswith("halueval_"):
-        variant = ds_config.name.replace("halueval_", "")
-        datasets[ds_config.name] = HaluEvalDataset(
-            variant=variant,
-            num_samples=ds_config.num_samples,
-            seed=ds_config.seed,
-        )
+        if config.get('task_types') and ex['task_type'] not in config['task_types']:
+            continue
 
-    elif ds_config.name == "ragtruth":
-        datasets["ragtruth"] = RAGTruthDataset(
-            task_type=ds_config.task_type,
-            num_samples=ds_config.num_samples,
-            seed=ds_config.seed,
-        )
+        try:
+            labels = json.loads(ex['hallucination_labels']) if ex['hallucination_labels'] else []
+        except:
+            labels = []
 
-    elif ds_config.name == "truthfulqa":
-        datasets["truthfulqa"] = TruthfulQADataset(
-            num_samples=ds_config.num_samples,
-            seed=ds_config.seed,
-        )
+        # Parse labels into spans - only count actual hallucinations
+        spans = []
+        has_hallucination = False
+        for l in labels:
+            label_type = l.get('label_type', '')
+            is_implicit_true = l.get('implicit_true', False)
+            # Conflict and Baseless are hallucinations (excluding implicit_true)
+            if not is_implicit_true and ('Conflict' in label_type or 'Baseless' in label_type):
+                spans.append((l['start'], l['end']))
+                has_hallucination = True
 
-    elif ds_config.name == "wikitext":
-        datasets["wikitext"] = WikiTextDataset(
-            num_samples=ds_config.num_samples,
-            seed=ds_config.seed,
-        )
+        examples.append({
+            "id": str(ex['id']),
+            "context": ex['context'],
+            "question": ex['query'],
+            "response": ex['output'],
+            "spans": spans,
+            "label": 1 if has_hallucination else 0,
+            "task_type": ex.get('task_type', ''),
+        })
 
-    elif ds_config.name == "fava":
-        datasets["fava"] = FAVADataset(
-            num_samples=ds_config.num_samples,
-            seed=ds_config.seed,
-        )
+    n_pos = sum(1 for e in examples if e['label'] == 1)
+    n_neg = len(examples) - n_pos
+    n_spans = sum(len(e['spans']) for e in examples)
+    print(f"Loaded {len(examples)} RAGTruth examples (hallucinated={n_pos}, faithful={n_neg}, total_spans={n_spans})")
+    return examples
 
+def load_halueval(config: Dict[str, Any]) -> List[Dict]:
+    """
+    Load HaluEval dataset.
+
+    For ICML evaluation, use '_samples' splits (qa_samples, summarization_samples)
+    which have explicit hallucination labels for both positive and negative examples.
+
+    The non-samples splits (qa, summarization) have paired right/hallucinated responses
+    which are better suited for contrastive training, not evaluation.
+    """
+    path = config.get('path', config['name'])
+    split_name = config['split']
+    print(f"Loading HaluEval from {path} ({split_name})")
+
+    try:
+        dataset = load_dataset(path, split_name, split='data')
+    except:
+        # Fallback for some HF dataset structures
+        dataset = load_dataset(path, split=split_name)
+
+    examples = []
+    limit = config.get('limit', config.get('max_examples', float('inf')))
+
+    # Check if this is a _samples split (has explicit labels)
+    is_samples_split = '_samples' in split_name or 'samples' in split_name
+
+    for idx, ex in enumerate(dataset):
+        if len(examples) >= limit:
+            break
+
+        if is_samples_split:
+            # _samples splits have: answer/summary + hallucination label
+            # Handle different field names for qa_samples vs summarization_samples
+            if 'question' in ex:
+                # qa_samples format
+                response = ex.get('answer', '')
+                question = ex.get('question', '')
+                context = ex.get('knowledge', '')
+            else:
+                # summarization_samples format
+                response = ex.get('summary', '')
+                question = "Summarize the document."
+                context = ex.get('document', '')
+
+            # Parse hallucination label
+            label_raw = ex.get('hallucination', ex.get('label', ''))
+            if isinstance(label_raw, str):
+                label = 1 if label_raw.lower() in ['yes', 'true', '1'] else 0
+            else:
+                label = int(label_raw) if label_raw else 0
+
+            examples.append({
+                "id": str(ex.get('id', idx)),
+                "context": context,
+                "question": question,
+                "response": response,
+                "spans": [],
+                "label": label
+            })
+        else:
+            # Paired format (qa, summarization): create examples from BOTH responses
+            # This gives us balanced positive/negative examples
+            if 'question' in ex:
+                # qa format
+                context = ex.get('knowledge', '')
+                question = ex.get('question', '')
+                right_response = ex.get('right_answer', '')
+                hallucinated_response = ex.get('hallucinated_answer', '')
+            else:
+                # summarization format
+                context = ex.get('document', '')
+                question = "Summarize the document."
+                right_response = ex.get('right_summary', '')
+                hallucinated_response = ex.get('hallucinated_summary', '')
+
+            # Add right (non-hallucinated) example
+            if right_response:
+                examples.append({
+                    "id": f"{idx}_right",
+                    "context": context,
+                    "question": question,
+                    "response": right_response,
+                    "spans": [],
+                    "label": 0  # Not hallucinated
+                })
+
+            # Add hallucinated example
+            if hallucinated_response and len(examples) < limit:
+                examples.append({
+                    "id": f"{idx}_hallucinated",
+                    "context": context,
+                    "question": question,
+                    "response": hallucinated_response,
+                    "spans": [],
+                    "label": 1  # Hallucinated
+                })
+
+    # Log class balance
+    n_pos = sum(1 for e in examples if e['label'] == 1)
+    n_neg = len(examples) - n_pos
+    print(f"Loaded {len(examples)} HaluEval examples (hallucinated={n_pos}, faithful={n_neg})")
+    return examples
+
+def load_faitheval(config: Dict[str, Any]) -> List[Dict]:
+    """
+    DEPRECATED: FaithEval is NOT a hallucination detection dataset.
+
+    FaithEval is a faithfulness evaluation benchmark that tests model BEHAVIOR
+    (whether models follow context correctly), not pre-labeled hallucination responses.
+
+    Dataset formats:
+    - counterfactual: MC format (question, answer, answerKey, choices, context)
+    - unanswerable: QA with acceptable "I don't know" responses
+    - inconsistent: QA with (old, new) answer pairs
+
+    For hallucination DETECTION benchmarks, use:
+    - HaluEval (qa_samples, summarization_samples)
+    - RAGTruth (test split)
+    - FAVA (fava-uw/fava-data)
+    - TruthfulQA (validation split)
+
+    This loader is kept for backwards compatibility but will log a warning.
+    """
+    print(
+        "FaithEval is NOT a hallucination detection dataset. "
+        "It tests model faithfulness BEHAVIOR, not pre-labeled hallucination responses. "
+        "Consider using HaluEval, RAGTruth, FAVA, or TruthfulQA instead."
+    )
+
+    subset = config.get('subset', config.get('split', 'counterfactual'))
+    limit = config.get('limit', config.get('max_examples', float('inf')))
+
+    # Map subset to HuggingFace dataset names
+    FAITHEVAL_DATASETS = {
+        'counterfactual': 'Salesforce/FaithEval-counterfactual-v1.0',
+        'unanswerable': 'Salesforce/FaithEval-unanswerable-v1.0',
+        'inconsistent': 'Salesforce/FaithEval-inconsistent-v1.0',
+    }
+
+    # Determine which datasets to load
+    if subset == 'all':
+        datasets_to_load = list(FAITHEVAL_DATASETS.keys())
     else:
-        raise ValueError(f"Unknown dataset: {ds_config.name}")
+        datasets_to_load = [subset]
 
-    return datasets
+    examples = []
+    for subset_name in datasets_to_load:
+        ds_path = FAITHEVAL_DATASETS.get(subset_name)
+        if not ds_path:
+            print(f"Unknown FaithEval subset: {subset_name}")
+            continue
+
+        print(f"Loading FaithEval ({subset_name}) from {ds_path}...")
+        try:
+            dataset = load_dataset(ds_path, split='test')
+        except Exception as e:
+            print(f"Failed to load {ds_path}: {e}")
+            continue
+
+        for idx, ex in enumerate(dataset):
+            if len(examples) >= limit:
+                break
+
+            # FaithEval fields vary by subset
+            context = ex.get('context', ex.get('passage', ex.get('document', '')))
+            question = ex.get('question', ex.get('query', ex.get('prompt', '')))
+            response = ex.get('response', ex.get('answer', ex.get('output', '')))
+
+            # Label: For FaithEval, the provided responses are typically unfaithful
+            # counterfactual=1 (unfaithful), faithful=0
+            label_raw = ex.get('label', ex.get('is_hallucination', None))
+            if label_raw is not None:
+                if isinstance(label_raw, bool):
+                    label = 1 if label_raw else 0
+                elif isinstance(label_raw, int):
+                    label = 1 if label_raw > 0 else 0
+                elif isinstance(label_raw, str):
+                    label = 1 if label_raw.lower() in ['true', 'yes', '1', 'unfaithful'] else 0
+                else:
+                    label = 1
+            else:
+                # Default: counterfactual/unanswerable/inconsistent are unfaithful
+                label = 1
+
+            examples.append({
+                "id": f"{subset_name}_{idx}",
+                "context": context,
+                "question": question,
+                "response": response,
+                "spans": [],
+                "label": label,
+                "subset": subset_name,
+            })
+
+    n_pos = sum(1 for e in examples if e['label'] == 1)
+    n_neg = len(examples) - n_pos
+    print(f"Loaded {len(examples)} FaithEval examples (unfaithful={n_pos}, faithful={n_neg})")
+    return examples
 
 
-def build_methods(config: ExperimentConfig, model, tokenizer) -> Dict:
+def load_truthfulqa(config: Dict[str, Any]) -> List[Dict]:
     """
-    Build method instances from config.
+    Load TruthfulQA dataset from HuggingFace.
 
-    Args:
-        config: Experiment configuration
-        model: Loaded language model
-        tokenizer: Loaded tokenizer
+    TruthfulQA only has a 'validation' split with 817 questions.
+    Uses multiple_choice config for MC1 evaluation.
 
-    Returns:
-        Dict of {method_name: UncertaintyMethod}
+    Creates balanced pairs: one correct answer (label=0) and one incorrect (label=1)
+    per question, avoiding artificial dataset inflation.
     """
-    methods = {}
-    mc = config.methods
+    limit = config.get('limit', config.get('max_examples', float('inf')))
+    print("Loading TruthfulQA from HuggingFace...")
 
-    if mc.agsar:
-        methods["AG-SAR"] = AGSARMethod(model, tokenizer, config=mc.agsar)
-        print("  [+] AG-SAR enabled")
+    try:
+        dataset = load_dataset("truthfulqa/truthful_qa", "multiple_choice", split="validation")
+    except Exception as e:
+        print(f"Failed to load TruthfulQA: {e}")
+        return []
 
-    if mc.logprob:
-        methods["LogProb"] = LogProbMethod(model, tokenizer)
-        print("  [+] LogProb enabled")
+    examples = []
+    for idx, ex in enumerate(dataset):
+        if len(examples) >= limit:
+            break
 
-    if mc.entropy:
-        methods["Entropy"] = PredictiveEntropyMethod(model, tokenizer)
-        print("  [+] Entropy enabled")
+        question = ex.get('question', '')
+        mc1_targets = ex.get('mc1_targets', {})
+        choices = mc1_targets.get('choices', [])
+        labels = mc1_targets.get('labels', [])
 
-    if mc.selfcheck:
-        methods["SelfCheck"] = SelfCheckNLIMethod(model, tokenizer, config=mc.selfcheck)
-        print(f"  [+] SelfCheck-NLI enabled (samples={mc.selfcheck.num_samples})")
+        if not choices or not labels:
+            continue
 
-    if mc.eigenscore:
-        methods["EigenScore"] = EigenScoreMethod(
-            model,
-            tokenizer,
-            num_samples=mc.eigenscore.num_samples,
-            max_new_tokens=mc.eigenscore.max_new_tokens,
-            temperature=mc.eigenscore.temperature,
-        )
-        print(f"  [+] EigenScore enabled (samples={mc.eigenscore.num_samples})")
+        # Find correct and first incorrect answer
+        correct_idx = None
+        incorrect_idx = None
+        for i, label in enumerate(labels):
+            if label == 1 and correct_idx is None:
+                correct_idx = i
+            elif label == 0 and incorrect_idx is None:
+                incorrect_idx = i
+            if correct_idx is not None and incorrect_idx is not None:
+                break
 
-    if mc.semantic_entropy:
-        methods["SemanticEntropy"] = SemanticEntropyMethod(
-            model,
-            tokenizer,
-            num_samples=mc.semantic_entropy.num_samples,
-            similarity_threshold=mc.semantic_entropy.similarity_threshold,
-            embedding_model=mc.semantic_entropy.embedding_model,
-            max_new_tokens=mc.semantic_entropy.max_new_tokens,
-            temperature=mc.semantic_entropy.temperature,
-        )
-        print(f"  [+] SemanticEntropy enabled (samples={mc.semantic_entropy.num_samples})")
+        if correct_idx is None or incorrect_idx is None:
+            continue
 
-    if mc.saplma:
-        methods["SAPLMA"] = SAPLMAMethod(model, tokenizer)
-        print("  [+] SAPLMA enabled")
+        # Add correct answer (label=0, faithful/factual)
+        examples.append({
+            "id": f"tqa_{idx}_correct",
+            "context": "",  # TruthfulQA is closed-book
+            "question": question,
+            "response": choices[correct_idx],
+            "spans": [],
+            "label": 0,
+            "category": ex.get('category', ''),
+        })
 
-    # LLM-Check methods (NeurIPS 2024)
-    if mc.llmcheck_attn:
-        methods["LLMCheck-Attn"] = LLMCheckAttentionMethod(model, tokenizer)
-        print("  [+] LLMCheck-Attn enabled")
+        if len(examples) >= limit:
+            break
 
-    if mc.llmcheck_hidden:
-        methods["LLMCheck-Hidden"] = LLMCheckHiddenMethod(model, tokenizer)
-        print("  [+] LLMCheck-Hidden enabled")
+        # Add incorrect answer (label=1, hallucination/unfactual)
+        examples.append({
+            "id": f"tqa_{idx}_incorrect",
+            "context": "",
+            "question": question,
+            "response": choices[incorrect_idx],
+            "spans": [],
+            "label": 1,
+            "category": ex.get('category', ''),
+        })
 
-    if mc.llmcheck_logit:
-        methods["LLMCheck-Logit"] = LLMCheckLogitMethod(model, tokenizer)
-        print("  [+] LLMCheck-Logit enabled")
+    n_pos = sum(1 for e in examples if e['label'] == 1)
+    n_neg = len(examples) - n_pos
+    print(f"Loaded {len(examples)} TruthfulQA examples (incorrect={n_pos}, correct={n_neg})")
+    return examples
 
-    if not methods:
-        raise ValueError("No methods enabled in config. Enable at least one method.")
 
-    return methods
+def load_fava(config: Dict[str, Any]) -> List[Dict]:
+    """
+    Load FAVA dataset for fine-grained hallucination detection.
 
+    FAVA-Bench (arXiv 2024) provides span-level annotations with 6 hallucination types:
+    - Factual errors, Unverifiable claims, Subjective statements
+    - Invented information, Contradictory statements, Relationship errors
+
+    Uses the processed version (wandb/fava-data-processed) which has:
+    - query: The prompt given to the model
+    - output: The model's response
+    - is_hallucination: Binary label (0 or 1)
+    - annotated_text: Span-level hallucination markers
+
+    Reference: https://arxiv.org/abs/2401.06855
+    """
+    limit = config.get('limit', config.get('max_examples', float('inf')))
+    split = config.get('split', 'test')
+    print(f"Loading FAVA from HuggingFace (split={split})...")
+
+    try:
+        # Use processed version which has simpler format for evaluation
+        dataset = load_dataset("wandb/fava-data-processed", split=split)
+    except Exception as e:
+        print(f"Failed to load FAVA: {e}")
+        return []
+
+    examples = []
+    for idx, ex in enumerate(dataset):
+        if len(examples) >= limit:
+            break
+
+        # Extract fields from processed FAVA format
+        query = ex.get('query', ex.get('prompt', ''))
+        output = ex.get('output', ex.get('response', ''))
+
+        # Binary label - try multiple field names for compatibility
+        label = ex.get('is_hallucination', ex.get('has_hallucination', 0))
+        if isinstance(label, bool):
+            label = 1 if label else 0
+
+        # Annotated text contains span markers (for future span-level evaluation)
+        annotated = ex.get('annotated_text', '')
+
+        examples.append({
+            "id": f"fava_{idx}",
+            "context": ex.get('context', ''),  # Usually empty in FAVA
+            "question": query,
+            "response": output,
+            "spans": [],  # Could parse from annotated_text if needed
+            "label": int(label),
+            "annotated_text": annotated,
+            "model": ex.get('model', ''),
+            "subject": ex.get('subject', ''),
+        })
+
+    n_pos = sum(1 for e in examples if e['label'] == 1)
+    n_neg = len(examples) - n_pos
+    print(f"Loaded {len(examples)} FAVA examples (hallucinated={n_pos}, faithful={n_neg})")
+    return examples
+
+
+def run_evaluation(model, tokenizer, method_config: Dict, examples: List[Dict], output_dir: Path, dataset_name: str):
+    print(f"Running method: {method_config['name']}")
+    
+    # Configure Detector
+    # Merge defaults with method config
+    config_dict = method_config['config']
+    
+    # Handle specific flags that are not in DetectorConfig (if any)
+    # ...
+    
+    det_config = DetectorConfig(**config_dict)
+    
+    # Initialize Engine
+    engine = AGSAR(model, tokenizer, det_config)
+    
+    # Initialize Evaluator (Forced Decoding for consistency)
+    # Even for HaluEval, we can score the provided response
+    evaluator = ForcedDecodingEvaluator(
+        model=model,
+        tokenizer=tokenizer,
+        config=det_config,
+        signal_computer=engine.signal_computer,
+        candidate_manager=engine.candidate_manager
+    )
+    
+    results = []
+    all_scores = []
+    all_labels = []
+    
+    for ex in tqdm(examples, desc=f"Eval {method_config['name']}"):
+        try:
+            token_signals = evaluator.evaluate(
+                context=ex['context'],
+                question=ex['question'],
+                response=ex['response']
+            )
+            
+            # Simple aggregation for now (can use NoisyOR later)
+            token_risks = []
+            for ts in token_signals:
+                if ts.eigenscore is not None:
+                     # Combine EigenScore with local signals
+                     # Local = (JSD + LCI + InvMargin)/3
+                     local_risk = (ts.jsd_cand + ts.lci_cand + ts.inv_margin) / 3
+                     # Global = EigenScore (normalized)
+                     global_risk = min(1.0, ts.eigenscore / 10.0)
+                     risk = (local_risk + global_risk) / 2
+                else:
+                    risk = (ts.jsd_cand + ts.lci_cand + ts.inv_margin) / 3
+                token_risks.append(risk)
+            
+            response_risk = max(token_risks) if token_risks else 0.0
+            
+            results.append({
+                "id": ex['id'],
+                "response_risk": response_risk,
+                "label": ex['label'],
+                "token_risks": token_risks,
+                # "token_signals": [ts.as_dict() for ts in token_signals] # Too large for JSON usually
+            })
+            
+            all_scores.append(response_risk)
+            all_labels.append(ex['label'])
+            
+        except Exception as e:
+            print(f"Error evaluating example {ex['id']}: {e}")
+            continue
+
+    # Compute Metrics
+    metrics = compute_metrics(all_scores, all_labels)
+    print(f"Result {dataset_name} - {method_config['name']}: AUROC={metrics.auroc:.4f}")
+    
+    # Save Results
+    method_name = method_config['name']
+    out_file = output_dir / f"{dataset_name}_{method_name}.json"
+    with open(out_file, "w") as f:
+        json.dump({
+            "config": config_dict,
+            "metrics": {
+                "auroc": metrics.auroc,
+                "auprc": metrics.auprc,
+            },
+            "results": results
+        }, f, indent=2)
 
 def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="AG-SAR Experiments CLI",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml
-  python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml --dry-run
-  python -m experiments.main --config experiments/configs/benchmarks/main_sota.yaml --seed 123 --deterministic
-        """,
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to experiment config YAML file",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print config and exit without running",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=None,
-        help="Override output directory from config",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help=f"Override random seed (default: {DEFAULT_SEED})",
-    )
-    parser.add_argument(
-        "--deterministic",
-        action="store_true",
-        help="Enable deterministic mode for bit-exact reproducibility (may reduce performance)",
-    )
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config/icml_submission.yaml")
     args = parser.parse_args()
+    
+    config = load_config(args.config)
+    
+    # Setup Output
+    output_dir = Path(config['output']['dir'])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Load Model
+    model, tokenizer = load_model(config['model']['name'])
+    
+    # Run Matrix
+    for dataset_conf in config['datasets']:
+        # Match HF path or short name
+        ds_name = dataset_conf['name'].lower()
 
-    # Set global seed BEFORE any model/data loading
-    seed = args.seed if args.seed is not None else DEFAULT_SEED
-    set_global_seed(seed, deterministic=args.deterministic)
+        if 'ragtruth' in ds_name:
+            examples = load_ragtruth(dataset_conf)
+        elif 'halueval' in ds_name:
+            examples = load_halueval(dataset_conf)
+        elif 'fava' in ds_name:
+            examples = load_fava(dataset_conf)
+        elif 'truthful' in ds_name:
+            examples = load_truthfulqa(dataset_conf)
+        elif 'faitheval' in ds_name:
+            # Deprecated - will log warning
+            examples = load_faitheval(dataset_conf)
+        else:
+            print(f"Unknown dataset: {ds_name}")
+            continue
 
-    if args.deterministic:
-        print(f"[Deterministic mode enabled] Seed: {seed}")
-
-    # Load config
-    try:
-        config = ExperimentConfig.from_yaml(args.config)
-    except Exception as e:
-        print(f"Error loading config: {e}")
-        return 1
-
-    # Override output dir if specified
-    if args.output_dir:
-        config.output.output_dir = args.output_dir
-
-    # Dry run mode
-    if args.dry_run:
-        import yaml
-
-        print("=" * 60)
-        print("DRY RUN - Configuration:")
-        print("=" * 60)
-        print(yaml.dump(config.model_dump(), default_flow_style=False, sort_keys=False))
-        print("=" * 60)
-        print(f"Enabled methods: {config.get_enabled_methods()}")
-        print("=" * 60)
-        return 0
-
-    # Print header
-    print("=" * 60)
-    print("AG-SAR Experiment Runner")
-    print("=" * 60)
-    print(f"Experiment: {config.experiment.get('name', 'unnamed')}")
-    print(f"Description: {config.experiment.get('description', '')}")
-    print(f"Model: {config.model.name}")
-    print(f"Dataset: {config.dataset.name}")
-    print(f"Output: {config.output.output_dir}")
-    print("=" * 60)
-
-    # Load model
-    print("\n[1/4] Loading model...")
-    try:
-        model, tokenizer = load_model_and_tokenizer(config, deterministic=args.deterministic)
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        return 1
-
-    # Build datasets
-    print("\n[2/4] Preparing datasets...")
-    try:
-        datasets = build_datasets(config)
-        for name, ds in datasets.items():
-            ds.load()
-            stats = ds.get_statistics()
-            print(f"  {name}: {stats['total_samples']} samples")
-    except Exception as e:
-        print(f"Error loading datasets: {e}")
-        return 1
-
-    # Build methods
-    print("\n[3/4] Initializing methods...")
-    try:
-        methods = build_methods(config, model, tokenizer)
-    except Exception as e:
-        print(f"Error initializing methods: {e}")
-        return 1
-
-    # Run benchmark
-    print("\n[4/4] Running benchmark...")
-    print("-" * 60)
-
-    try:
-        engine = BenchmarkEngine(config, methods, datasets)
-        results = engine.run()
-
-        # Print summary table
-        print("\n" + "=" * 60)
-        print("RESULTS SUMMARY")
-        print("=" * 60)
-        print(engine.get_results_table())
-
-    except KeyboardInterrupt:
-        print("\nExperiment interrupted by user.")
-        return 1
-    except Exception as e:
-        print(f"Error during benchmark: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return 1
-    finally:
-        # Cleanup all methods
-        print("\nCleaning up...")
-        for method in methods.values():
-            try:
-                method.cleanup()
-            except Exception:
-                pass
-
-    print("\n" + "=" * 60)
-    print("EXPERIMENT COMPLETE")
-    print("=" * 60)
-
-    return 0
-
+        if not examples:
+            print(f"No examples loaded for {ds_name}, skipping...")
+            continue
+            
+        # Iterate over methods (dictionary or list)
+        methods_config = config['methods']
+        if isinstance(methods_config, dict):
+            # Format: methods: { method_name: { class: ..., config: ... } }
+            for method_name, method_details in methods_config.items():
+                # Add name to details for consistency
+                method_details_copy = method_details.copy()
+                method_details_copy['name'] = method_name
+                run_evaluation(
+                    model, tokenizer, method_details_copy, examples, output_dir, dataset_conf['name']
+                )
+        elif isinstance(methods_config, list):
+            # Format: methods: [ { name: ..., class: ..., config: ... } ]
+            for method_conf in methods_config:
+                run_evaluation(
+                    model, tokenizer, method_conf, examples, output_dir, dataset_conf['name']
+                )
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
