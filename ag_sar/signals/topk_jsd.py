@@ -12,15 +12,15 @@ unscaled features that degrade signal quality.
 Reference: "Logit Lens" technique requires matching the model's normalization.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Tuple
+import numpy as np
 import torch
 from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
 from ..hooks import LayerHiddenStates
-from ..numerics import safe_softmax, safe_jsd
-from ..ops.triton_kernels import fused_rmsnorm_linear_subset
+from ..numerics import safe_softmax, safe_jsd, EPS, otsu_threshold
 
 
 class CandidateJSDSignal:
@@ -34,33 +34,27 @@ class CandidateJSDSignal:
     - z_post = W_U · final_norm(h_resid_mlp)  # logits from post-MLP residual
     - p_*_cand = softmax(z_*[candidate_set])  # restricted to candidates
 
-    CRITICAL: Uses model's learned final_norm (with γ weights) instead of
-    parameter-free rms_norm. The lm_head was trained with final_norm applied,
-    so intermediate projections must use the same normalization for valid
-    logit space comparisons.
+    Uses model's learned final_norm (with γ weights) for proper Logit Lens.
+    The lm_head was trained with final_norm applied, so intermediate projections
+    must use the same normalization for valid logit space comparisons.
 
     This is an approximation to full-vocab JSD, trading accuracy for efficiency.
     Approximation quality is validated by topk_mass sanity metric.
     """
 
-    def __init__(self, lm_head: nn.Linear, final_norm: Optional[nn.Module] = None):
+    def __init__(self, lm_head: nn.Linear, final_norm: nn.Module):
         """
         Initialize JSD signal computer.
 
         Args:
             lm_head: The model's language model head (unembedding matrix)
             final_norm: The model's final LayerNorm (model.model.norm for LLaMA).
-                       If None, falls back to parameter-free rms_norm (not recommended).
         """
         self.lm_head = lm_head
         self.final_norm = final_norm
-
-        if final_norm is None:
-            print(
-                "JSD signal initialized without final_norm. Using parameter-free "
-                "rms_norm which may produce suboptimal results. Pass model.model.norm "
-                "for proper Logit Lens projection."
-            )
+        self._context_basis = None
+        self._prompt_jsd_mu = None
+        self._prompt_jsd_sigma = None
 
     def compute_layer_jsd(
         self,
@@ -92,48 +86,17 @@ class CandidateJSDSignal:
         h_resid_attn = h_resid_attn.to(dtype=lm_head_dtype, device=lm_head_device)
         h_resid_mlp = h_resid_mlp.to(dtype=lm_head_dtype, device=lm_head_device)
 
-        # Use Triton Kernel if on CUDA and contiguous AND no learned final_norm
-        # When final_norm is available, prefer PyTorch path for proper Logit Lens
-        # (Triton kernel uses parameter-free rms_norm internally)
-        use_triton = (
-            h_resid_attn.is_cuda
-            and candidate_set.is_cuda
-            and self.final_norm is None  # Disable Triton when using learned norm
-        )
+        # 1. Normalize using model's final_norm (with learned γ) for proper Logit Lens
+        with torch.no_grad():
+            h_pre_norm = self.final_norm(h_resid_attn)
+            h_post_norm = self.final_norm(h_resid_mlp)
 
-        if use_triton:
-            try:
-                z_pre_cand = fused_rmsnorm_linear_subset(
-                    h_resid_attn, self.lm_head.weight, candidate_set
-                )
-                z_post_cand = fused_rmsnorm_linear_subset(
-                    h_resid_mlp, self.lm_head.weight, candidate_set
-                )
-            except Exception as e:
-                print(f"JSD Triton kernel failed: {e}. Fallback to PyTorch.")
-                use_triton = False
-        
-        if not use_triton:
-            # PyTorch Fallback (Optimized)
-            # 1. Normalize using model's final_norm (with learned γ) if available
-            if self.final_norm is not None:
-                # Use model's learned normalization for proper Logit Lens
-                with torch.no_grad():
-                    h_pre_norm = self.final_norm(h_resid_attn)
-                    h_post_norm = self.final_norm(h_resid_mlp)
-            else:
-                # Fallback to parameter-free RMS norm (suboptimal)
-                def _rms_norm(x, eps=1e-6):
-                    return x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + eps)
-                h_pre_norm = _rms_norm(h_resid_attn)
-                h_post_norm = _rms_norm(h_resid_mlp)
+        # 2. Slice weights (copy overhead)
+        w_subset = self.lm_head.weight[candidate_set] # [K, Dim]
 
-            # 2. Slice weights (copy overhead)
-            w_subset = self.lm_head.weight[candidate_set] # [K, Dim]
-
-            # 3. Compute logits
-            z_pre_cand = F.linear(h_pre_norm, w_subset)
-            z_post_cand = F.linear(h_post_norm, w_subset)
+        # 3. Compute logits
+        z_pre_cand = F.linear(h_pre_norm, w_subset)
+        z_post_cand = F.linear(h_post_norm, w_subset)
 
         # Ensure float32 for softmax stability
         z_pre_cand = z_pre_cand.float()
@@ -205,3 +168,122 @@ class CandidateJSDSignal:
             return max(values)
         else:
             raise ValueError(f"Unknown aggregation: {aggregation}")
+
+    # --- POS (Parametric Override Score) methods for DSG ---
+
+    def set_context_basis(self, V_ctx: Tensor) -> None:
+        """Store context subspace basis for directional decomposition."""
+        self._context_basis = V_ctx
+
+    def set_prompt_jsd_stats(self, mu: float, sigma: float) -> None:
+        """Store prompt JSD statistics for active layer threshold."""
+        self._prompt_jsd_mu = mu
+        self._prompt_jsd_sigma = sigma
+
+    def compute_directional_override(
+        self,
+        h_resid_attn: Tensor,
+        h_resid_mlp: Tensor,
+    ) -> float:
+        """
+        Compute override ratio: how much LESS context-aligned is the MLP shift
+        compared to a random baseline.
+
+        delta = final_norm(h_post) - final_norm(h_pre)
+        context_ratio = ||proj_ctx(delta)|| / ||delta||
+        expected_ratio = sqrt(k/d)  (random baseline for k-dim subspace in d-dim space)
+        override = max(0, 1 - context_ratio / expected_ratio)
+
+        Returns 0 when MLP shift is context-aligned (no risk),
+        approaches 1 when MLP shift avoids context subspace (high risk).
+        """
+        if self._context_basis is None:
+            return 0.0
+
+        # Handle batch dimension
+        if h_resid_attn.dim() == 1:
+            h_resid_attn = h_resid_attn.unsqueeze(0)
+            h_resid_mlp = h_resid_mlp.unsqueeze(0)
+
+        lm_head_dtype = self.lm_head.weight.dtype
+        lm_head_device = self.lm_head.weight.device
+        h_resid_attn = h_resid_attn.to(dtype=lm_head_dtype, device=lm_head_device)
+        h_resid_mlp = h_resid_mlp.to(dtype=lm_head_dtype, device=lm_head_device)
+
+        with torch.no_grad():
+            h_pre = self.final_norm(h_resid_attn).float().squeeze(0)
+            h_post = self.final_norm(h_resid_mlp).float().squeeze(0)
+
+            delta = h_post - h_pre
+            delta_norm = torch.norm(delta)
+
+            if delta_norm < EPS:
+                return 0.0
+
+            V = self._context_basis.to(dtype=torch.float32, device=delta.device)
+            proj = V.T @ (V @ delta)
+            context_ratio = torch.norm(proj) / (delta_norm + EPS)
+
+            # Random baseline: expected context_ratio for a random unit vector
+            k = V.shape[0]  # context subspace rank
+            d = V.shape[1]  # hidden dim
+            expected_ratio = (k / d) ** 0.5
+
+            # Normalize: 0 when context-aligned, 1 when context-avoidant
+            override = 1.0 - context_ratio / (expected_ratio + EPS)
+
+        return float(override.clamp(0, 1).item())
+
+    def compute_pos(
+        self,
+        layer_states: Dict[int, LayerHiddenStates],
+        candidate_set: Tensor,
+    ) -> float:
+        """
+        Compute Parametric Override Score for a single token.
+
+        1. Compute per-layer JSD
+        2. Select active layers via Otsu bimodal threshold (zero parameters)
+        3. Compute directional override for active layers
+        4. Return mean override
+
+        Replaces mu+sigma threshold (assumes Gaussian on [0,1]-bounded JSD)
+        with Otsu's method — same principled approach used for copying heads.
+
+        Fallback: ceil(sqrt(n_layers)) — natural scale for subset selection.
+        """
+        if self._prompt_jsd_mu is None:
+            return 0.0
+
+        # Per-layer JSD
+        layer_jsds = self.compute_all_layers(layer_states, candidate_set)
+        if not layer_jsds:
+            return 0.0
+
+        # Otsu threshold on current-token JSD values (zero parameters)
+        jsd_values = np.array(list(layer_jsds.values()))
+        threshold = otsu_threshold(jsd_values)
+
+        # Active layers + directional override
+        overrides = []
+        for layer_idx, jsd_val in layer_jsds.items():
+            if jsd_val > threshold:
+                states = layer_states[layer_idx]
+                override = self.compute_directional_override(
+                    states.h_resid_attn, states.h_resid_mlp
+                )
+                overrides.append(override)
+
+        if not overrides:
+            # Fallback: ceil(sqrt(n_layers)) — natural scale
+            import math
+            k = max(1, int(math.ceil(math.sqrt(len(layer_jsds)))))
+            sorted_layers = sorted(layer_jsds.items(), key=lambda x: x[1], reverse=True)
+            for layer_idx, _ in sorted_layers[:k]:
+                states = layer_states[layer_idx]
+                override = self.compute_directional_override(
+                    states.h_resid_attn, states.h_resid_mlp
+                )
+                overrides.append(override)
+
+        return float(np.mean(overrides))

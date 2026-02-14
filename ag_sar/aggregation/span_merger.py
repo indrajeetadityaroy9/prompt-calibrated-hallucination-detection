@@ -4,8 +4,9 @@ Span merger for grouping high-risk tokens into contiguous spans.
 Identifies risky spans (potential hallucinations) from token-level risks.
 """
 
-from typing import List, Tuple, Optional, Union
+from typing import List, Tuple, Union
 from dataclasses import dataclass
+import numpy as np
 
 
 @dataclass
@@ -40,7 +41,7 @@ class SpanMerger:
         threshold: float,
         min_span_length: int = 1,
         max_gap: int = 1,
-        min_span_risk: Optional[float] = None,
+        min_span_risk: float = 0.0,
     ):
         """
         Initialize span merger.
@@ -49,17 +50,57 @@ class SpanMerger:
             threshold: Minimum risk to include token in span (REQUIRED - no default)
             min_span_length: Minimum number of tokens in a span
             max_gap: Maximum gap between high-risk tokens to merge
-            min_span_risk: Minimum mean risk to keep span (defaults to threshold)
+            min_span_risk: Minimum mean risk to keep span (0.0 = use threshold)
         """
         self.threshold = threshold
         self.min_span_length = min_span_length
         self.max_gap = max_gap
-        self.min_span_risk = min_span_risk if min_span_risk is not None else threshold
+        self.min_span_risk = min_span_risk if min_span_risk > 0 else threshold
+
+    @classmethod
+    def adaptive(cls, token_risks: List[float]) -> "SpanMerger":
+        """
+        Create a SpanMerger with data-driven parameters (no hardcoded floors).
+
+        Threshold: Q3 + 0.5 × IQR (mild Tukey fence).
+        Identifies tokens in the upper tail of the risk distribution.
+        Falls back to Q3 when IQR < 0.01 (near-uniform risks).
+
+        Reference: Tukey (1977) "Exploratory Data Analysis"
+
+        Args:
+            token_risks: Per-token risk scores
+
+        Returns:
+            SpanMerger with adaptive parameters
+        """
+        n = len(token_risks)
+        if n == 0:
+            return cls(threshold=0.5, min_span_length=1, max_gap=1)
+
+        risks = np.array(token_risks)
+        q1 = float(np.percentile(risks, 25))
+        q3 = float(np.percentile(risks, 75))
+        iqr = q3 - q1
+
+        if iqr < 0.01:
+            # Near-uniform risks: use Q3 directly
+            threshold = q3
+        else:
+            # Tukey fence (mild: 0.5×IQR instead of standard 1.5×IQR)
+            threshold = q3 + 0.5 * iqr
+        threshold = min(threshold, 0.95)  # Safety cap
+
+        return cls(
+            threshold=threshold,
+            min_span_length=max(1, n // 100),
+            max_gap=max(1, n // 50),
+        )
 
     def find_spans(
         self,
         token_risks: List[float],
-        token_texts: Optional[List[str]] = None,
+        token_texts: List[str] = None,
     ) -> List[RiskySpan]:
         """
         Find contiguous spans of high-risk tokens.

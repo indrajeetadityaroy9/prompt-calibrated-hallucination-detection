@@ -1,27 +1,23 @@
 """
 Prompt-Anchored Signal Aggregation for Hallucination Detection.
 
-Implements the Standard Model:
-    1. Signal Extraction → raw metrics (H, JSD, etc.)
-    2. Prompt-Relative Z-Scoring: Z_i(t) = (S_i(t) - μ_prompt) / (σ_prompt + ε)
-    3. Probabilistic Mapping: P_i(t) = sigmoid(Z_i(t))
-    4. Independence Assumption (Noisy-OR): P(Risk) = 1 - ∏(1 - P_i(t))
+Signal-specific normalization:
+    - Direct signals (CUS): Value IS the probability (no z-score).
+      CUS ∈ [0,1] with semantic meaning (0=grounded, 1=ungrounded).
+    - Z-scored signals (POS, DPS): Prompt-relative z-scoring + sigmoid.
+      Z_i(t) = (S_i(t) - μ_prompt) / σ_prompt → P_i(t) = sigmoid(Z_i(t))
 
-CRITICAL: Normalizes RESPONSE against PROMPT statistics (not self-normalization).
-This prevents the "Relativity Trap" where hallucinated responses normalize their
-own high entropy to appear normal.
+Fusion: Noisy-OR: P(Risk) = 1 - ∏(1 - P_i(t))
+Aggregation: Adaptive quantile q = 1 - 1/(n+1) (order statistics).
 
-No magic numbers, no learned weights - pure information-theoretic approach.
+No magic numbers, no learned weights, no hardcoded priors.
 """
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Set, Union
+from typing import Dict, List, Tuple, Set, Union
 
-
-
-# Numerical stability constant (the ONLY allowed constant)
-EPS = 1e-10
+from ..numerics import EPS
 
 
 @dataclass
@@ -46,33 +42,29 @@ class AggregationResult:
 
 class PromptAnchoredAggregator:
     """
-    Training-free signal aggregation with prompt-anchored normalization.
+    Training-free signal aggregation with signal-specific normalization.
 
-    The Standard Model Pipeline:
-    ════════════════════════════
-    1. Extract prompt statistics (μ_prompt, σ_prompt) during prefill
-    2. Compute anchored z-scores: z = (s - μ_prompt) / σ_prompt
-    3. Map to probabilities via standard sigmoid: p = 1/(1 + e^(-z))
-    4. Fuse signals via Noisy-OR: R = 1 - Π(1 - p_i)
-    5. Aggregate to response level (max of token risks)
+    Pipeline:
+    ═════════
+    1. Per-signal normalization (signal-specific):
+       - Direct signals (CUS): value = probability (no z-score)
+       - Z-scored signals (POS, DPS): z = (s - μ_prompt) / σ_prompt → sigmoid
+    2. Fuse via Noisy-OR: R(t) = 1 - Π(1 - p_i(t))
+    3. Aggregate via adaptive quantile: q = 1 - 1/(n+1)
 
     No magic numbers. No learned weights. No calibration data.
-    A z-score of 3 is always significant regardless of model/dataset.
     """
+
+    # Signals that use direct probability mapping (no z-score).
+    # CUS is in [0,1] with semantic meaning — z-scoring destroys this
+    # and causes saturation when prefill/generation distributions differ.
+    DIRECT_SIGNALS = {"cus"}
 
     def __init__(
         self,
-        active_signals: Optional[Set[str]] = None,
+        active_signals: Set[str] = None,
     ):
-        """
-        Initialize the aggregator.
-
-        Args:
-            active_signals: Set of signals to include. If None, uses all available.
-        """
-        self.active_signals = active_signals or {
-            "jsd", "entropy", "inv_margin", "lci", "var_logp"
-        }
+        self.active_signals = active_signals or {"cus", "pos", "dps"}
 
     def compute_risk(
         self,
@@ -116,42 +108,51 @@ class PromptAnchoredAggregator:
                 anchor_stats={},
             )
 
-        # Stage 1: Compute prompt-anchored z-scores
+        # Stage 1+2: Signal-specific normalization → probabilities
         z_scores = {}
+        probabilities = {}
         anchor_stats_used = {}
 
         for sig in available_signals:
             response_vals = np.asarray(response_signals[sig])
             stats = prompt_stats[sig]
 
-            mu_prompt = stats.get("mu", 0.0)
-            sigma_prompt = stats.get("sigma", 1.0)
+            if sig in self.DIRECT_SIGNALS or stats.get("mode") == "direct":
+                # Direct mode: value IS the probability (CUS ∈ [0,1])
+                probabilities[sig] = np.clip(response_vals, 0.0, 1.0)
+                z_scores[sig] = response_vals  # Raw values for diagnostics
+                anchor_stats_used[sig] = {"mode": "direct"}
+            else:
+                # Prompt-anchored z-score → sigmoid
+                mu_prompt = stats.get("mu", 0.0)
+                sigma_prompt = stats.get("sigma", 1.0)
+                sigma_prompt = max(sigma_prompt, EPS)
 
-            # Ensure numerical stability (sigma >= EPS)
-            sigma_prompt = max(sigma_prompt, EPS)
+                z = (response_vals - mu_prompt) / sigma_prompt
+                z_clipped = np.clip(z, -20, 20)
 
-            # Anchored z-score: how much does response deviate from prompt baseline?
-            z = (response_vals - mu_prompt) / sigma_prompt
-
-            z_scores[sig] = z
-            anchor_stats_used[sig] = {
-                "mu_prompt": mu_prompt,
-                "sigma_prompt": sigma_prompt,
-            }
-
-        # Stage 2: Sigmoid probability mapping (standard sigmoid, no parameters)
-        probabilities = {}
-        for sig in available_signals:
-            z = z_scores[sig]
-            # Clip for numerical stability
-            z_clipped = np.clip(z, -20, 20)
-            probabilities[sig] = 1.0 / (1.0 + np.exp(-z_clipped))
+                z_scores[sig] = z
+                probabilities[sig] = 1.0 / (1.0 + np.exp(-z_clipped))
+                anchor_stats_used[sig] = {
+                    "mu_prompt": mu_prompt,
+                    "sigma_prompt": sigma_prompt,
+                    "mode": "zscore",
+                }
 
         # Stage 3: Noisy-OR fusion (uniform, no weights)
         token_risks = self._noisy_or_fusion(probabilities, n_tokens)
 
-        # Stage 4: Response-level aggregation (max - no magic percentile)
-        risk = float(np.max(token_risks)) if len(token_risks) > 0 else 0.0
+        # Stage 4: Adaptive quantile aggregation
+        # q(n) = 1 - 1/(n+1): order-statistics approach that naturally
+        # adapts to response length. Short responses use lower quantile
+        # (avoid single-token noise), long responses focus on the tail.
+        # Reference: Blom (1958); David & Nagaraja (2003)
+        if len(token_risks) == 0:
+            risk = 0.0
+        else:
+            n = len(token_risks)
+            q = max(0.5, min(1.0 - 1.0 / (n + 1), 0.999))
+            risk = float(np.percentile(token_risks, 100 * q))
 
         return AggregationResult(
             risk=risk,
@@ -182,43 +183,3 @@ class PromptAnchoredAggregator:
 
         # Noisy-OR: P(at least one cause)
         return 1.0 - complement_product
-
-
-def compute_prompt_statistics(
-    signal_values: Dict[str, np.ndarray],
-    tail_fraction: float = 0.5,
-) -> Dict[str, Dict[str, float]]:
-    """
-    Compute statistics from prompt signal values.
-
-    Uses tail sampling: only the last `tail_fraction` of tokens are used.
-    This focuses on the tokens most relevant to the response.
-
-    Args:
-        signal_values: Dict mapping signal names to arrays of values
-        tail_fraction: Fraction of tokens to use (from end)
-
-    Returns:
-        Dict mapping signal names to {"mu": float, "sigma": float}
-    """
-    stats = {}
-
-    for sig, values in signal_values.items():
-        values = np.asarray(values)
-        n = len(values)
-
-        if n == 0:
-            continue
-
-        # Tail sampling
-        start_idx = max(0, int(n * (1 - tail_fraction)))
-        tail_values = values[start_idx:]
-
-        if len(tail_values) > 0:
-            stats[sig] = {
-                "mu": float(np.mean(tail_values)),
-                "sigma": float(np.std(tail_values)) if len(tail_values) > 1 else EPS,
-                "n_tokens": len(tail_values),
-            }
-
-    return stats

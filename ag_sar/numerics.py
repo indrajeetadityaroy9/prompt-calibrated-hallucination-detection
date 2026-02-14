@@ -2,10 +2,14 @@
 Numerical utilities for safe computation of softmax, JSD, and similarity.
 """
 
-from typing import Optional, Tuple
+from typing import Tuple
 import torch
 from torch import Tensor
 import math
+
+# Canonical numerical stability constant — single source of truth.
+# Import this in signal/aggregation modules instead of defining locally.
+EPS = 1e-10
 
 
 def safe_softmax(logits: Tensor, dim: int = -1, eps: float = 1e-10) -> Tensor:
@@ -96,6 +100,75 @@ def safe_jsd(p: Tensor, q: Tensor, eps: float = 1e-10) -> float:
     jsd_bits = max(0.0, min(1.0, jsd_bits))
 
     return jsd_bits
+
+
+def otsu_threshold(values) -> float:
+    """
+    Optimal bimodal threshold maximizing between-class variance.
+
+    sigma_b^2(t) = w0 * w1 * (mu0 - mu1)^2
+
+    Zero free parameters. Optimal for bimodal distributions.
+
+    Reference: Otsu (1979) "A Threshold Selection Method from
+    Gray-Level Histograms"
+
+    Args:
+        values: 1D array-like of values to threshold
+
+    Returns:
+        Optimal threshold value
+    """
+    import numpy as np
+    values = np.asarray(values, dtype=float)
+    if len(values) <= 1:
+        return float(values[0]) if len(values) == 1 else 0.0
+
+    sorted_vals = np.sort(values)
+    n = len(sorted_vals)
+
+    best_threshold = sorted_vals[0]
+    best_variance = -1.0
+
+    for i in range(1, n):
+        w0 = i / n
+        w1 = 1.0 - w0
+        mu0 = sorted_vals[:i].mean()
+        mu1 = sorted_vals[i:].mean()
+        variance = w0 * w1 * (mu0 - mu1) ** 2
+
+        if variance > best_variance:
+            best_variance = variance
+            best_threshold = 0.5 * (sorted_vals[i - 1] + sorted_vals[i])
+
+    return float(best_threshold)
+
+
+def mad_sigma(values) -> float:
+    """
+    Robust standard deviation estimate via Median Absolute Deviation.
+
+    sigma_MAD = 1.4826 * median(|x_i - median(x)|)
+
+    The constant 1.4826 makes this a consistent estimator of sigma
+    for Gaussian distributions, while being robust to outliers.
+
+    Reference: Rousseeuw & Croux (1993) "Alternatives to the Median
+    Absolute Deviation"
+
+    Args:
+        values: 1D array-like of values
+
+    Returns:
+        Robust sigma estimate (0.0 if fewer than 2 values)
+    """
+    import numpy as np
+    values = np.asarray(values, dtype=float)
+    if len(values) < 2:
+        return 0.0
+    med = np.median(values)
+    mad = np.median(np.abs(values - med))
+    return 1.4826 * float(mad)
 
 
 def max_cosine_similarity(query: Tensor, keys: Tensor, eps: float = 1e-8) -> float:

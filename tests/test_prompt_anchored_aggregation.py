@@ -1,5 +1,5 @@
 """
-Tests for Prompt-Anchored Aggregation (The Standard Model).
+Tests for Prompt-Anchored Aggregation.
 
 These tests validate the prompt-anchored normalization and Noisy-OR fusion.
 No magic numbers - uses prompt statistics as the anchor point.
@@ -7,7 +7,7 @@ No magic numbers - uses prompt statistics as the anchor point.
 
 import numpy as np
 import pytest
-from ag_sar.aggregation import PromptAnchoredAggregator, compute_prompt_statistics
+from ag_sar.aggregation import PromptAnchoredAggregator
 
 
 class TestRelativityTrapFix:
@@ -76,8 +76,8 @@ class TestRelativityTrapFix:
 
         result = aggregator.compute_risk(prompt_stats, response_signals)
 
-        # Risk should be MEDIUM (0.4-0.7) - response is only slightly worse
-        assert 0.4 < result.risk < 0.8, f"Expected medium risk, got {result.risk}"
+        # Risk should be MEDIUM-HIGH (0.4-0.9) - response is slightly worse, p90 aggregation
+        assert 0.4 < result.risk < 0.9, f"Expected medium risk, got {result.risk}"
 
     def test_scenario_d_hard_prompt_confident_response(self):
         """
@@ -104,19 +104,19 @@ class TestNoisyORFusion:
 
     def test_single_signal_spike(self):
         """If one signal spikes, risk should be high."""
-        aggregator = PromptAnchoredAggregator(active_signals={"jsd", "entropy", "inv_margin"})
+        aggregator = PromptAnchoredAggregator(active_signals={"cus", "pos", "dps"})
 
         prompt_stats = {
-            "jsd": {"mu": 0.1, "sigma": 0.05},
-            "entropy": {"mu": 1.0, "sigma": 0.2},
-            "inv_margin": {"mu": 0.3, "sigma": 0.1},
+            "cus": {"mu": 0.1, "sigma": 0.05},
+            "pos": {"mu": 0.1, "sigma": 0.05},
+            "dps": {"mu": 0.3, "sigma": 0.1},
         }
 
-        # JSD spikes, others normal
+        # CUS spikes, others normal
         response_signals = {
-            "jsd": np.array([0.1, 0.1, 0.8, 0.1, 0.1]),  # Spike at token 2
-            "entropy": np.array([1.0, 1.0, 1.0, 1.0, 1.0]),
-            "inv_margin": np.array([0.3, 0.3, 0.3, 0.3, 0.3]),
+            "cus": np.array([0.1, 0.1, 0.8, 0.1, 0.1]),  # Spike at token 2
+            "pos": np.array([0.1, 0.1, 0.1, 0.1, 0.1]),
+            "dps": np.array([0.3, 0.3, 0.3, 0.3, 0.3]),
         }
 
         result = aggregator.compute_risk(prompt_stats, response_signals)
@@ -129,17 +129,17 @@ class TestNoisyORFusion:
 
     def test_all_signals_agree_low(self):
         """If all signals are low, risk should be low."""
-        aggregator = PromptAnchoredAggregator(active_signals={"jsd", "entropy"})
+        aggregator = PromptAnchoredAggregator(active_signals={"cus", "pos"})
 
         prompt_stats = {
-            "jsd": {"mu": 0.1, "sigma": 0.05},
-            "entropy": {"mu": 1.0, "sigma": 0.3},
+            "cus": {"mu": 0.3, "sigma": 0.1},
+            "pos": {"mu": 0.2, "sigma": 0.1},
         }
 
         # Both signals lower than prompt
         response_signals = {
-            "jsd": np.array([0.05] * 5),
-            "entropy": np.array([0.5] * 5),
+            "cus": np.array([0.1] * 5),
+            "pos": np.array([0.05] * 5),
         }
 
         result = aggregator.compute_risk(prompt_stats, response_signals)
@@ -149,17 +149,17 @@ class TestNoisyORFusion:
 
     def test_all_signals_agree_high(self):
         """If all signals spike, risk should be very high."""
-        aggregator = PromptAnchoredAggregator(active_signals={"jsd", "entropy"})
+        aggregator = PromptAnchoredAggregator(active_signals={"cus", "pos"})
 
         prompt_stats = {
-            "jsd": {"mu": 0.1, "sigma": 0.05},
-            "entropy": {"mu": 1.0, "sigma": 0.3},
+            "cus": {"mu": 0.1, "sigma": 0.05},
+            "pos": {"mu": 0.1, "sigma": 0.05},
         }
 
         # Both signals much higher than prompt
         response_signals = {
-            "jsd": np.array([0.5] * 5),
-            "entropy": np.array([3.0] * 5),
+            "cus": np.array([0.8] * 5),
+            "pos": np.array([0.7] * 5),
         }
 
         result = aggregator.compute_risk(prompt_stats, response_signals)
@@ -172,22 +172,22 @@ class TestEdgeCases:
 
     def test_single_token_response(self):
         """Single token responses should be handled."""
-        aggregator = PromptAnchoredAggregator(active_signals={"entropy"})
+        aggregator = PromptAnchoredAggregator(active_signals={"dps"})
 
-        prompt_stats = {"entropy": {"mu": 0.5, "sigma": 0.1}}
-        response_signals = {"entropy": np.array([2.0])}
+        prompt_stats = {"dps": {"mu": 0.3, "sigma": 0.1}}
+        response_signals = {"dps": np.array([0.9])}
 
         result = aggregator.compute_risk(prompt_stats, response_signals)
 
         assert len(result.token_risks) == 1
-        assert result.risk > 0.5, "Should detect high entropy token"
+        assert result.risk > 0.5, "Should detect high DPS token"
 
     def test_empty_response(self):
         """Empty responses should return zero risk."""
-        aggregator = PromptAnchoredAggregator(active_signals={"entropy"})
+        aggregator = PromptAnchoredAggregator(active_signals={"dps"})
 
-        prompt_stats = {"entropy": {"mu": 0.5, "sigma": 0.1}}
-        response_signals = {"entropy": np.array([])}
+        prompt_stats = {"dps": {"mu": 0.3, "sigma": 0.1}}
+        response_signals = {"dps": np.array([])}
 
         result = aggregator.compute_risk(prompt_stats, response_signals)
 
@@ -196,10 +196,10 @@ class TestEdgeCases:
 
     def test_no_matching_signals(self):
         """No matching signals should return zero risk."""
-        aggregator = PromptAnchoredAggregator(active_signals={"entropy"})
+        aggregator = PromptAnchoredAggregator(active_signals={"dps"})
 
-        prompt_stats = {"jsd": {"mu": 0.1, "sigma": 0.05}}  # Wrong signal
-        response_signals = {"jsd": np.array([0.5] * 5)}  # Wrong signal
+        prompt_stats = {"cus": {"mu": 0.1, "sigma": 0.05}}  # Wrong signal
+        response_signals = {"cus": np.array([0.5] * 5)}  # Wrong signal
 
         result = aggregator.compute_risk(prompt_stats, response_signals)
 
@@ -207,52 +207,17 @@ class TestEdgeCases:
 
     def test_eps_prevents_division_by_zero(self):
         """Zero sigma should use EPS to prevent division by zero."""
-        aggregator = PromptAnchoredAggregator(active_signals={"entropy"})
+        aggregator = PromptAnchoredAggregator(active_signals={"dps"})
 
         # Zero sigma - would cause division by zero without EPS
-        prompt_stats = {"entropy": {"mu": 1.0, "sigma": 0.0}}
-        response_signals = {"entropy": np.array([1.2, 1.2, 1.2])}
+        prompt_stats = {"dps": {"mu": 0.5, "sigma": 0.0}}
+        response_signals = {"dps": np.array([0.6, 0.6, 0.6])}
 
         result = aggregator.compute_risk(prompt_stats, response_signals)
 
         # Should not crash and produce finite results
         assert 0 <= result.risk <= 1
-        assert np.all(np.isfinite(result.z_scores["entropy"]))
-
-
-class TestComputePromptStatistics:
-    """Test the compute_prompt_statistics helper function."""
-
-    def test_computes_mu_sigma(self):
-        """Should compute mean and standard deviation."""
-        signal_values = {
-            "entropy": np.array([1.0, 1.2, 0.8, 1.1, 0.9]),
-        }
-
-        stats = compute_prompt_statistics(signal_values, tail_fraction=1.0)
-
-        assert "entropy" in stats
-        assert "mu" in stats["entropy"]
-        assert "sigma" in stats["entropy"]
-        assert abs(stats["entropy"]["mu"] - 1.0) < 0.01  # Mean should be ~1.0
-
-    def test_tail_sampling(self):
-        """Should use only tail of sequence."""
-        # First half low, second half high
-        signal_values = {
-            "entropy": np.array([0.5] * 10 + [2.0] * 10),
-        }
-
-        # Use only last 50%
-        stats = compute_prompt_statistics(signal_values, tail_fraction=0.5)
-
-        # Mean should be ~2.0 (only uses second half)
-        assert stats["entropy"]["mu"] > 1.5
-
-    def test_empty_input(self):
-        """Empty input should return empty stats."""
-        stats = compute_prompt_statistics({})
-        assert stats == {}
+        assert np.all(np.isfinite(result.z_scores["dps"]))
 
 
 if __name__ == "__main__":

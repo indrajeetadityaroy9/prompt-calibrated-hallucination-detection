@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "ag-sar"
+version = "0.1.0"
+description = "Aggregated Signal Architecture for Risk — zero-shot hallucination detection for LLaMA 3.1"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.5.1",
+    "transformers>=4.57.0",
+    "accelerate>=1.12.0",
+    "numpy>=1.26.0,<2.0.0",
+    "scipy>=1.11.0",
+    "scikit-learn>=1.4.0",
+    "datasets>=4.0.0",
+    "tqdm>=4.65.0",
+    "triton>=3.1.0",
+    "coloredlogs>=15.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["ag_sar*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

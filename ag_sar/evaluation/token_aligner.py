@@ -5,7 +5,7 @@ Critical for RAGTruth evaluation where labels are at character level
 but signals are computed at token level.
 """
 
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Dict
 from dataclasses import dataclass
 
 

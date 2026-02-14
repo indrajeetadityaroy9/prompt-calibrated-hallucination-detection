@@ -4,15 +4,17 @@ Evaluation runner for RAGTruth and HaluEval benchmarks.
 Orchestrates evaluation, collects results, and computes metrics.
 """
 
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
 from tqdm import tqdm
 
+import numpy as np
+
 from .modes import EvaluationMode, ForcedDecodingEvaluator, GenerationEvaluator
 from .metrics import compute_metrics, compute_span_metrics, MetricsResult
-from ..config import TokenSignals, DetectorConfig
-
+from ..config import DSGConfig, DSGTokenSignals
+from ..aggregation.prompt_anchored import PromptAnchoredAggregator
 
 
 @dataclass
@@ -23,19 +25,19 @@ class EvaluationExample:
     question: str
     response: str
     labels: List[Tuple[int, int, int]]  # List of (start, end, label) tuples
-    response_label: Optional[int] = None  # Response-level label for HaluEval
+    response_label: int = 0  # Response-level label for HaluEval
 
 
 @dataclass
 class EvaluationResult:
     """Result for a single example."""
     example_id: str
-    token_signals: List[TokenSignals]
+    token_signals: List[DSGTokenSignals]
     token_risks: List[float]
     predicted_spans: List[Tuple[int, int]]
     response_risk: float
     response_predicted: int  # Binary prediction
-    ground_truth_label: Optional[int] = None
+    ground_truth_label: int = 0
 
 
 @dataclass
@@ -45,15 +47,37 @@ class EvaluationSummary:
     num_examples: int
     token_metrics: MetricsResult
     response_metrics: MetricsResult
-    span_metrics: Optional[Dict[str, float]] = None
-
-    # Aggregated statistics
-    mean_topk_mass: float = 0.0
-    min_topk_mass: float = 1.0
-    topk_mass_warning_count: int = 0
+    span_metrics: Dict[str, float] = None
 
     # Per-example results (optional)
     example_results: List[EvaluationResult] = field(default_factory=list)
+
+    def print_summary(self) -> None:
+        """Print formatted summary of key metrics including selective prediction."""
+        r = self.response_metrics
+        t = self.token_metrics
+        print(f"\n{'='*60}")
+        print(f"  DSG Evaluation Summary ({self.mode.value}, n={self.num_examples})")
+        print(f"{'='*60}")
+        print(f"  Response-level:")
+        print(f"    AUROC:       {r.auroc:.4f}")
+        print(f"    AUPRC:       {r.auprc:.4f}")
+        print(f"    TPR@5%FPR:   {r.tpr_at_5_fpr:.4f}")
+        print(f"    F1:          {r.f1:.4f}")
+        print(f"  Token-level:")
+        print(f"    AUROC:       {t.auroc:.4f}")
+        print(f"    AUPRC:       {t.auprc:.4f}")
+        print(f"  Selective Prediction:")
+        print(f"    AURC:        {r.aurc:.4f}")
+        print(f"    E-AURC:      {r.e_aurc:.4f}")
+        print(f"    Risk@90:     {r.risk_at_90_coverage:.4f}")
+        print(f"  Calibration:")
+        print(f"    ECE:         {r.expected_calibration_error:.4f}")
+        print(f"    Brier:       {r.brier_score:.4f}")
+        if self.span_metrics:
+            print(f"  Span-level:")
+            print(f"    F1:          {self.span_metrics.get('span_f1', 0):.4f}")
+        print(f"{'='*60}\n")
 
 
 class EvaluationRunner:
@@ -74,7 +98,7 @@ class EvaluationRunner:
         Initialize evaluation runner.
 
         Args:
-            detector: HallucinationDetector instance
+            detector: DSGDetector instance
             mode: Evaluation mode
             risk_threshold: Threshold for span/response flagging
         """
@@ -88,8 +112,6 @@ class EvaluationRunner:
                 model=detector.model,
                 tokenizer=detector.tokenizer,
                 config=detector.config,
-                signal_computer=detector.jsd_signal,
-                candidate_manager=detector.candidate_manager,
             )
         else:
             self.evaluator = GenerationEvaluator(detector=detector)
@@ -126,8 +148,6 @@ class EvaluationRunner:
         all_gold_spans = []
         example_results = []
 
-        topk_masses = []
-
         for example in tqdm(examples, desc="Evaluating RAGTruth"):
             # Run forced decoding
             token_signals = self.evaluator.evaluate(
@@ -136,7 +156,7 @@ class EvaluationRunner:
                 response=example.response,
             )
 
-            # Compute token risks using Noisy-OR or simple average
+            # Compute token risks using Noisy-OR over DSG signals
             token_risks = self._compute_token_risks(token_signals)
 
             # Collect token-level scores and labels
@@ -160,11 +180,6 @@ class EvaluationRunner:
             gold_spans = [(s, e) for s, e, l in example.labels if l == 1]
             all_gold_spans.extend(gold_spans)
 
-            # Collect topk_mass
-            for ts in token_signals:
-                if ts.topk_mass is not None:
-                    topk_masses.append(ts.topk_mass)
-
             # Store result
             example_results.append(EvaluationResult(
                 example_id=example.id,
@@ -186,23 +201,12 @@ class EvaluationRunner:
                 all_predicted_spans, all_gold_spans
             )
 
-        # Compute topk_mass statistics
-        mean_topk_mass = sum(topk_masses) / len(topk_masses) if topk_masses else 0.0
-        min_topk_mass = min(topk_masses) if topk_masses else 1.0
-        warning_count = sum(
-            1 for m in topk_masses
-            if m < self.detector.config.min_topk_mass_warning
-        )
-
         return EvaluationSummary(
             mode=self.mode,
             num_examples=len(examples),
             token_metrics=token_metrics,
             response_metrics=response_metrics,
             span_metrics=span_metrics_result,
-            mean_topk_mass=mean_topk_mass,
-            min_topk_mass=min_topk_mass,
-            topk_mass_warning_count=warning_count,
             example_results=example_results,
         )
 
@@ -226,8 +230,6 @@ class EvaluationRunner:
         all_response_labels = []
         example_results = []
 
-        topk_masses = []
-
         for example in tqdm(examples, desc="Evaluating HaluEval"):
             if self.mode == EvaluationMode.GENERATION:
                 # Generate and evaluate
@@ -249,12 +251,7 @@ class EvaluationRunner:
                 response_risk = max(token_risks) if token_risks else 0.0
 
             all_response_scores.append(response_risk)
-            all_response_labels.append(example.response_label or 0)
-
-            # Collect topk_mass
-            for ts in token_signals:
-                if ts.topk_mass is not None:
-                    topk_masses.append(ts.topk_mass)
+            all_response_labels.append(example.response_label)
 
             # Store result
             example_results.append(EvaluationResult(
@@ -278,35 +275,43 @@ class EvaluationRunner:
             true_negatives=0, false_negatives=0,
         )
 
-        mean_topk_mass = sum(topk_masses) / len(topk_masses) if topk_masses else 0.0
-        min_topk_mass = min(topk_masses) if topk_masses else 1.0
-        warning_count = sum(
-            1 for m in topk_masses
-            if m < self.detector.config.min_topk_mass_warning
-        )
-
         return EvaluationSummary(
             mode=self.mode,
             num_examples=len(examples),
             token_metrics=token_metrics,
             response_metrics=response_metrics,
-            mean_topk_mass=mean_topk_mass,
-            min_topk_mass=min_topk_mass,
-            topk_mass_warning_count=warning_count,
             example_results=example_results,
         )
 
     def _compute_token_risks(
         self,
-        token_signals: List[TokenSignals],
+        token_signals: List[DSGTokenSignals],
     ) -> List[float]:
-        """Compute token risks from signals (simple average for now)."""
-        risks = []
-        for signals in token_signals:
-            # TODO: Update for DSG signals (cus, pos, dps)
-            risk = signals.jsd_cand
-            risks.append(min(1.0, max(0.0, risk)))
-        return risks
+        """
+        Compute token risks from DSG signals using prompt-anchored z-score + Noisy-OR.
+
+        Uses PromptAnchoredAggregator with prompt_stats from the detector
+        for proper calibration (prevents Relativity Trap).
+        """
+        if not token_signals:
+            return []
+
+        response_signals = {
+            "cus": np.array([s.cus for s in token_signals]),
+            "pos": np.array([s.pos for s in token_signals]),
+            "dps": np.array([s.dps for s in token_signals]),
+        }
+
+        # Prefer evaluator's prompt stats (fresh from this input's prefill),
+        # fall back to detector's stats (from a previous detect() call).
+        prompt_stats = (
+            getattr(self.evaluator, '_prompt_stats', None)
+            or getattr(self.detector, '_prompt_stats', None)
+            or {}
+        )
+        aggregator = PromptAnchoredAggregator(active_signals={"cus", "pos", "dps"})
+        result = aggregator.compute_risk(prompt_stats, response_signals)
+        return result.token_risks.tolist()
 
     def _align_labels_to_tokens(
         self,

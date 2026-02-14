@@ -1,278 +1,207 @@
 """
-Context Grounding Score - Mechanistic Hallucination Detection.
+Dual-Subspace Projection Score (DPS) for DSG hallucination detection.
 
-Core Insight:
-    If the model is grounded in context, its output representations should be
-    "explainable" by the context representations. Hallucinations produce
-    representations that diverge from the context subspace.
+Projects output hidden states onto two orthogonal reference subspaces:
+- Context subspace V_ctx: SVD of context hidden states (input-dependent)
+- Reasoning subspace V_rsn: Bottom singular vectors of lm_head (model-dependent)
 
-Mathematical Foundation:
-    For each output token hidden state h_t:
-    1. Project h_t onto the context subspace (spanned by context hidden states)
-    2. Measure the residual (component orthogonal to context)
-    3. High residual = output is not well-explained by context = hallucination
+DPS(t) = s_rsn / (s_ctx + s_rsn + eps), range [0,1], higher = riskier.
 
-    Grounding Score = ||proj_context(h_t)|| / ||h_t||
-    Hallucination Risk = 1 - Grounding Score
-
-Key Properties:
-    1. Zero-shot: No training required
-    2. Single-pass: Works with forced decoding
-    3. No external knowledge: Derived purely from model internals
-    4. Task-agnostic: Based on fundamental principle of grounding
-
-This is inspired by:
-    - Transformer-circuits research on information flow
-    - Linear representation hypothesis
-    - Causal tracing methods
+References:
+    - "Mind the Gap: Spectral Analysis of Rank Collapse" (ICLR 2025)
+    - "Retrieval Head Mechanistically Explains Long-Context Factuality" (2024)
+    - HARP: reasoning subspace via SVD of unembedding (arXiv:2509.11536)
 """
+
+import math
 
 import torch
 import numpy as np
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from typing import Dict
+from torch import Tensor
+
+from ..numerics import EPS
 
 
-EPS = 1e-10
-
-
-@dataclass
-class GroundingResult:
-    """Result of context grounding analysis."""
-    # Per-token grounding scores [0, 1] - higher = more grounded
-    grounding_scores: np.ndarray
-
-    # Per-token hallucination risk [0, 1] - higher = riskier
-    hallucination_risk: np.ndarray
-
-    # Response-level aggregated risk
-    response_risk: float
-
-    # Diagnostics
-    context_rank: int  # Effective rank of context subspace
-    avg_projection_ratio: float  # Average ||proj|| / ||h||
-    avg_residual_ratio: float  # Average ||residual|| / ||h||
-
-
-class ContextGroundingSignal:
+def _find_spectral_gap_rank(
+    S: Tensor,
+    remove_top: int = 1,
+    n_samples: int = None,
+    n_features: int = None,
+) -> int:
     """
-    Compute context grounding scores from hidden states.
+    Rank via Marchenko-Pastur boundary (primary) or ratio gap (fallback).
 
-    The key idea: Output tokens that are grounded in context should have
-    hidden representations that can be explained by the context subspace.
-    Hallucinations produce "out-of-distribution" representations.
+    Primary (when n_samples, n_features provided):
+        Estimate noise variance from bottom-half singular values, compute
+        MP upper edge λ+ = σ²(1 + √(d/n))², count SVs exceeding it.
+
+    Fallback:
+        k = argmax_i (S[i] / S[i+1]) + 1
+        Threshold: e ≈ 2.718 (1 nat in log-space — information-theoretic
+        justification). Falls back to len(S) if spectrum is flat.
+
+    Args:
+        S: Singular values (descending order).
+        remove_top: Skip top-N singular values before gap detection.
+        n_samples: Number of data points (rows of data matrix).
+        n_features: Dimensionality (columns of data matrix).
+
+    Reference: Marchenko & Pastur (1967); Bai & Silverstein (2010).
+    """
+    if len(S) <= 1:
+        return len(S)
+    S_trimmed = S[remove_top:]
+    if len(S_trimmed) <= 1:
+        return len(S)
+
+    # Primary: Marchenko-Pastur boundary
+    if n_samples is not None and n_features is not None and n_samples > 1:
+        gamma = n_features / n_samples
+        # Estimate noise variance from bottom half of spectrum
+        noise_svs = S_trimmed[len(S_trimmed) // 2:]
+        if len(noise_svs) > 0:
+            sigma2 = (noise_svs ** 2).mean().item() / n_features
+            if sigma2 > 0:
+                mp_upper = sigma2 * (1 + math.sqrt(gamma)) ** 2
+                k = int((S_trimmed ** 2 / n_features > mp_upper).sum().item())
+                if k >= 1:
+                    return k + remove_top
+
+    # Fallback: ratio gap with e threshold (1 nat in log-space)
+    ratios = S_trimmed[:-1] / (S_trimmed[1:] + EPS)
+    if ratios.max().item() < math.e:
+        return len(S)
+    return max(1, int(ratios.argmax().item()) + 1 + remove_top)
+
+
+class DualSubspaceGrounding:
+    """
+    Dual-Subspace Projection Score (DPS) for DSG.
+
+    Measures where output representations sit relative to two subspaces:
+    - Context subspace V_ctx (SVD of context hidden states, spectral gap rank)
+    - Reasoning subspace V_rsn (bottom spectral gap of lm_head.weight SVD)
+
+    DPS(t) = s_rsn / (s_ctx + s_rsn + eps)
+    Range [0,1], higher = more reasoning-driven = riskier.
     """
 
     def __init__(
         self,
-        use_layers: str = "middle",  # "middle", "last", "all"
-        projection_method: str = "svd",  # "svd", "direct"
-        min_context_tokens: int = 5,
+        lm_head_weight: Tensor,
     ):
+        # One-time reasoning subspace SVD (cached per model load)
+        self._reasoning_basis = self._compute_reasoning_basis(lm_head_weight)
+
+        # Per-input context subspace (set via set_context_basis)
+        # These are left uninitialized; callers must call set_context_basis before use.
+        self._context_basis: Tensor
+        self._context_center: Tensor
+        self._context_rank: int = 0
+
+    def _compute_reasoning_basis(self, lm_head_weight: Tensor) -> Tensor:
         """
-        Initialize context grounding signal.
+        SVD of lm_head.weight, keep bottom singular vectors via spectral gap.
 
-        Args:
-            use_layers: Which layers to analyze
-            projection_method: How to compute projection onto context subspace
-            min_context_tokens: Minimum context tokens for valid analysis
+        Scans reversed singular values for the largest relative gap from the bottom.
+        Cap at len(S) // 2 to avoid taking too many.
         """
-        self.use_layers = use_layers
-        self.projection_method = projection_method
-        self.min_context_tokens = min_context_tokens
+        with torch.no_grad():
+            w = lm_head_weight.float()
+            _, S, Vh = torch.linalg.svd(w, full_matrices=False)
 
-    def _get_layer_indices(self, n_layers: int) -> List[int]:
-        """Get layer indices to use based on configuration."""
-        if self.use_layers == "middle":
-            # Middle third of layers (most informative per RAGLens)
-            start = n_layers // 3
-            end = 2 * n_layers // 3
-            return list(range(start, end))
-        elif self.use_layers == "last":
-            return [n_layers - 1]
-        else:  # "all"
-            return list(range(n_layers))
+            # Bottom spectral gap: scan reversed singular values
+            # No outlier removal for bottom SVs of lm_head (no mean-direction artifact)
+            S_rev = S.flip(0)
+            k_r = _find_spectral_gap_rank(S_rev, remove_top=0)
+            k_r = min(k_r, len(S) // 2)
+            k_r = max(1, k_r)
 
-    def _compute_context_basis(
-        self,
-        context_hidden: torch.Tensor,
-    ) -> Tuple[torch.Tensor, int]:
-        """
-        Compute orthonormal basis for context subspace using SVD.
+            # Bottom k_r singular vectors (least contribution to next-token prediction)
+            V_rsn = Vh[-k_r:]  # [k_r, hidden_dim]
 
-        Args:
-            context_hidden: [n_context, hidden_dim] context hidden states
+        return V_rsn.to(lm_head_weight.device)
 
-        Returns:
-            Tuple of (basis vectors [k, hidden_dim], center [1, hidden_dim], effective rank k)
-        """
-        # Center the context representations
+    def set_context_basis(self, context_hidden: Tensor) -> None:
+        """Compute context subspace from prefill hidden states. Call once per input."""
+        context_hidden = context_hidden.float()
         context_mean = context_hidden.mean(dim=0, keepdim=True)
         context_centered = context_hidden - context_mean
 
-        # SVD to get principal components
-        try:
-            U, S, Vh = torch.linalg.svd(context_centered, full_matrices=False)
-        except RuntimeError:
-            # Fallback for numerical issues
-            return context_hidden.T, context_hidden.mean(dim=0, keepdim=True), context_hidden.shape[0]
+        U, S, Vh = torch.linalg.svd(context_centered, full_matrices=False)
 
-        # Determine effective rank (singular values > threshold)
-        total_var = (S ** 2).sum()
-        cumvar = (S ** 2).cumsum(dim=0) / (total_var + EPS)
-
-        # Keep components explaining 95% of variance
-        k = int((cumvar < 0.95).sum()) + 1
-        k = min(k, len(S), context_hidden.shape[0])
-
-        # Return top-k right singular vectors (basis for context subspace)
-        basis = Vh[:k]  # [k, hidden_dim]
-
-        return basis, context_mean, k
-
-    def _project_onto_subspace(
-        self,
-        vectors: torch.Tensor,
-        basis: torch.Tensor,
-        center: torch.Tensor,
-        short_context: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Project vectors onto subspace defined by basis.
-
-        Args:
-            vectors: [n, hidden_dim] vectors to project
-            basis: [k, hidden_dim] orthonormal basis vectors (or normalized context vectors for short contexts)
-            center: [1, hidden_dim] center of subspace
-            short_context: If True, use max cosine similarity instead of orthogonal projection
-
-        Returns:
-            Tuple of (projections [n, hidden_dim], residuals [n, hidden_dim])
-        """
-        if short_context:
-            # For short contexts, basis contains normalized context vectors
-            # Compute max cosine similarity to any context token
-            vectors_normalized = vectors / (torch.norm(vectors, dim=-1, keepdim=True) + EPS)
-            # similarity: [n_vectors, n_context]
-            similarity = vectors_normalized @ basis.T
-            # Max similarity for each output token
-            max_sim, _ = similarity.max(dim=-1, keepdim=True)  # [n, 1]
-            # Create "projection" that represents grounded component
-            # Scale by max similarity - if similar to context, projection is large
-            projection = max_sim * vectors_normalized
-            residual = vectors_normalized - projection
-            return projection, residual
-
-        # Center vectors
-        vectors_centered = vectors - center
-
-        # Project: proj = V @ V^T @ x (where V is basis)
-        # coefficients = vectors @ basis^T  -> [n, k]
-        # projection = coefficients @ basis -> [n, hidden_dim]
-        coefficients = vectors_centered @ basis.T
-        projection = coefficients @ basis
-
-        # Residual is the orthogonal component
-        residual = vectors_centered - projection
-
-        return projection, residual
-
-    def compute_grounding_scores(
-        self,
-        hidden_states: List[torch.Tensor],
-        prompt_len: int,
-    ) -> GroundingResult:
-        """
-        Compute per-token grounding scores.
-
-        Args:
-            hidden_states: List of hidden states per layer [batch, seq, dim]
-            prompt_len: Number of prompt/context tokens
-
-        Returns:
-            GroundingResult with grounding scores and diagnostics
-        """
-        n_layers = len(hidden_states)
-        layer_indices = self._get_layer_indices(n_layers)
-
-        seq_len = hidden_states[0].shape[1]
-        response_len = seq_len - prompt_len
-
-        if response_len < 1 or prompt_len < self.min_context_tokens:
-            return GroundingResult(
-                grounding_scores=np.array([0.5]),
-                hallucination_risk=np.array([0.5]),
-                response_risk=0.5,
-                context_rank=0,
-                avg_projection_ratio=0.5,
-                avg_residual_ratio=0.5,
-            )
-
-        all_grounding_scores = []
-        all_projection_ratios = []
-        all_residual_ratios = []
-        context_ranks = []
-
-        for layer_idx in layer_indices:
-            hidden = hidden_states[layer_idx][0].float()  # [seq, dim]
-
-            context_hidden = hidden[:prompt_len]
-            response_hidden = hidden[prompt_len:]
-
-            # Compute context subspace basis via SVD
-            basis, center, rank = self._compute_context_basis(context_hidden)
-            context_ranks.append(rank)
-
-            # For low-rank contexts (like QA), SVD projection loses information
-            # Use direct max cosine similarity instead
-            low_rank = (rank < 10)
-
-            if low_rank:
-                # Direct similarity approach: check if output is similar to ANY context token
-                context_normalized = context_hidden / (torch.norm(context_hidden, dim=-1, keepdim=True) + EPS)
-                response_normalized = response_hidden / (torch.norm(response_hidden, dim=-1, keepdim=True) + EPS)
-                # similarity: [n_response, n_context]
-                similarity = response_normalized @ context_normalized.T
-                # Max similarity for each output token = grounding score
-                max_sim, _ = similarity.max(dim=-1)  # [n_response]
-                grounding = max_sim.clamp(0, 1)
-                # For diagnostics
-                projection_norms = max_sim
-                residual_norms = 1 - max_sim
-                response_norms = torch.ones_like(max_sim)
-            else:
-                # SVD projection approach for high-rank contexts
-                projection, residual = self._project_onto_subspace(
-                    response_hidden, basis, center, short_context=False
-                )
-                response_norms = torch.norm(response_hidden - center, dim=-1)
-                projection_norms = torch.norm(projection, dim=-1)
-                residual_norms = torch.norm(residual, dim=-1)
-                grounding = projection_norms / (response_norms + EPS)
-                grounding = torch.clamp(grounding, 0, 1)
-
-            all_grounding_scores.append(grounding.cpu().numpy())
-            all_projection_ratios.append(
-                (projection_norms / (response_norms + EPS)).mean().item()
-            )
-            all_residual_ratios.append(
-                (residual_norms / (response_norms + EPS)).mean().item()
-            )
-
-        # Average across layers
-        grounding_scores = np.mean(all_grounding_scores, axis=0)
-
-        # Hallucination risk = 1 - grounding
-        hallucination_risk = 1 - grounding_scores
-
-        # Response-level aggregation: use 90th percentile of risk
-        response_risk = float(np.percentile(hallucination_risk, 90))
-
-        return GroundingResult(
-            grounding_scores=grounding_scores,
-            hallucination_risk=hallucination_risk,
-            response_risk=response_risk,
-            context_rank=int(np.mean(context_ranks)),
-            avg_projection_ratio=float(np.mean(all_projection_ratios)),
-            avg_residual_ratio=float(np.mean(all_residual_ratios)),
+        # Spectral gap rank with Marchenko-Pastur and rank floor
+        n_context = context_hidden.shape[0]
+        hidden_dim = context_hidden.shape[1]
+        k = _find_spectral_gap_rank(
+            S, remove_top=1,
+            n_samples=n_context,
+            n_features=hidden_dim,
         )
+        k = max(k, max(3, int(math.ceil(math.sqrt(n_context)))))
+        k = min(k, len(S), n_context)
+
+        self._context_basis = Vh[:k]  # [k, hidden_dim]
+        self._context_center = context_mean
+        self._context_rank = k
+
+    def compute_dps(
+        self,
+        layer_hidden_states: Dict[int, Tensor],
+        n_layers: int,
+        active_layers: list = None,
+    ) -> float:
+        """
+        Compute DPS for a single token.
+
+        Args:
+            layer_hidden_states: Hidden states per layer.
+            n_layers: Total number of layers.
+            active_layers: If provided, use these layers (from JSD-variance
+                Otsu selection). Falls back to middle-third if None.
+        """
+        if active_layers is not None:
+            target_layers = [i for i in layer_hidden_states if i in active_layers]
+        else:
+            # Fallback: middle third
+            start = n_layers // 3
+            end = 2 * n_layers // 3
+            target_layers = [i for i in layer_hidden_states if start <= i < end]
+
+        if not target_layers:
+            return 0.5
+
+        V_ctx = self._context_basis.to(dtype=torch.float32)
+        V_rsn = self._reasoning_basis.to(dtype=torch.float32)
+        mu = self._context_center.squeeze(0).to(dtype=torch.float32)
+
+        dps_values = []
+        for layer_idx in target_layers:
+            h = layer_hidden_states[layer_idx].float().squeeze()
+            h_centered = h - mu
+
+            h_norm = torch.norm(h_centered) + EPS
+
+            # Context projection
+            proj_ctx = V_ctx.T @ (V_ctx @ h_centered)
+            s_ctx = torch.norm(proj_ctx) / h_norm
+
+            # Reasoning projection
+            proj_rsn = V_rsn.T @ (V_rsn @ h_centered)
+            s_rsn = torch.norm(proj_rsn) / h_norm
+
+            dps_layer = s_rsn / (s_ctx + s_rsn + EPS)
+            dps_values.append(dps_layer.item())
+
+        return float(np.mean(dps_values))
+
+    @property
+    def context_basis(self) -> Tensor:
+        """V_ctx for use by POS signal."""
+        return self._context_basis
+
+    @property
+    def context_center(self) -> Tensor:
+        """mu_context for use by POS signal."""
+        return self._context_center

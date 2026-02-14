@@ -12,7 +12,7 @@ Signal semantics:
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, TYPE_CHECKING
 import torch
 from torch import Tensor
 if TYPE_CHECKING:
@@ -102,8 +102,8 @@ class LayerHooks:
         """
         self.layer_idx = layer_idx
         self.buffer = buffer
-        self._h_resid_attn: Optional[Tensor] = None
-        self._h_mlp_in: Optional[Tensor] = None
+        self._h_resid_attn: Tensor = None  # type: ignore[assignment]
+        self._h_mlp_in: Tensor = None  # type: ignore[assignment]
         self._handles: List = []
 
     def install(self, layer: "LlamaDecoderLayer"):
@@ -146,17 +146,16 @@ class LayerHooks:
         h_resid_mlp = output[0] if isinstance(output, tuple) else output
 
         # Store all 3 points to buffer
-        if self._h_resid_attn is not None and self._h_mlp_in is not None:
-            self.buffer.store(
-                self.layer_idx,
-                self._h_resid_attn,
-                self._h_mlp_in,
-                h_resid_mlp,
-            )
+        self.buffer.store(
+            self.layer_idx,
+            self._h_resid_attn,
+            self._h_mlp_in,
+            h_resid_mlp,
+        )
 
         # Clear temporary references
-        self._h_resid_attn = None
-        self._h_mlp_in = None
+        self._h_resid_attn = None  # type: ignore[assignment]
+        self._h_mlp_in = None  # type: ignore[assignment]
 
     def remove(self):
         """Remove all installed hooks."""
@@ -194,7 +193,7 @@ class PrefillContextHook:
         self.context_start = context_start
         self.context_end = context_end
         self.buffer_ref = buffer_ref
-        self._handle: Optional = None
+        self._handle = None
 
     def install(self, layer):
         """Install hook on the specified layer."""
@@ -210,9 +209,8 @@ class PrefillContextHook:
 
     def remove(self):
         """Remove the hook."""
-        if self._handle is not None:
-            self._handle.remove()
-            self._handle = None
+        self._handle.remove()
+        self._handle = None
 
 
 @dataclass
@@ -235,8 +233,9 @@ class PrefillStatisticsHook:
     Key design decisions:
     1. Only processes last `window_size` tokens (default 64) for efficiency
     2. Captures full sequence in prefill (not just last token)
-    3. Computes JSD, entropy, inv_margin statistics
+    3. Computes candidate-restricted JSD statistics
     4. Memory-efficient: stores only statistics, not per-token values
+    5. Uses adaptive top-k based on distribution concentration (95% cumulative mass)
 
     This implements the "Tail Sampling" strategy that provides a robust
     baseline for the "local thermodynamic temperature" right before generation.
@@ -247,7 +246,6 @@ class PrefillStatisticsHook:
         lm_head: torch.nn.Module,
         final_norm: torch.nn.Module,
         window_size: int = 64,
-        signals: tuple = ("jsd_cand", "entropy", "inv_margin"),
     ):
         """
         Initialize prefill statistics hook.
@@ -256,19 +254,16 @@ class PrefillStatisticsHook:
             lm_head: Model's language model head for logit projection
             final_norm: Model's final layer norm for proper Logit Lens
             window_size: Number of tail tokens to sample (default 64)
-            signals: Which signals to compute statistics for
         """
         self.lm_head = lm_head
         self.final_norm = final_norm
         self.window_size = window_size
-        self.signals = signals
 
         # Captured states during prefill
-        self._captured_hidden: Optional[Tensor] = None
-        self._captured_logits: Optional[Tensor] = None
-        self._pre_mlp_hidden: Optional[Tensor] = None
-        self._handle: Optional = None
-        self._pre_handle: Optional = None
+        self._captured_hidden: Tensor = None  # type: ignore[assignment]
+        self._pre_mlp_hidden: Tensor = None  # type: ignore[assignment]
+        self._handle = None
+        self._pre_handle = None
 
     def install(self, layer):
         """Install hooks to capture both pre-MLP and post-MLP states."""
@@ -295,31 +290,26 @@ class PrefillStatisticsHook:
 
     def remove(self):
         """Remove installed hooks."""
-        if self._handle is not None:
-            self._handle.remove()
-            self._handle = None
-        if self._pre_handle is not None:
-            self._pre_handle.remove()
-            self._pre_handle = None
+        self._handle.remove()
+        self._handle = None
+        self._pre_handle.remove()
+        self._pre_handle = None
 
     def compute_statistics(self, prompt_length: int) -> PrefillStatistics:
         """
         Compute prompt statistics from captured hidden states.
 
         Uses tail sampling: only the last `window_size` tokens of the prompt.
+        Computes candidate-restricted JSD with adaptive top-k per position.
 
         Args:
             prompt_length: Total number of prompt tokens
 
         Returns:
-            PrefillStatistics with μ and σ for each signal
+            PrefillStatistics with mu and sigma for pos (JSD)
         """
         import torch.nn.functional as F
         import numpy as np
-
-        if self._captured_hidden is None:
-            print("No hidden states captured during prefill")
-            return PrefillStatistics(mu={}, sigma={}, n_tokens=0, signals=self.signals)
 
         # Determine tail window
         tail_start = max(0, prompt_length - self.window_size)
@@ -346,70 +336,54 @@ class PrefillStatisticsHook:
             tail_hidden_moved = tail_hidden.to(device=lm_head_device, dtype=lm_head_dtype)
             normalized = self.final_norm(tail_hidden_moved)
             tail_logits = self.lm_head(normalized)  # [1, window_size, vocab_size]
-            # Convert to float32 for stable softmax computation
-            probs = F.softmax(tail_logits.float(), dim=-1)
 
-        # Compute statistics for each signal
-        mu = {}
-        sigma = {}
+        # Also project pre-MLP states for JSD computation
+        pre_mlp_tail = self._pre_mlp_hidden[:, tail_start:tail_end, :]
 
-        for sig in self.signals:
-            if sig == "entropy":
-                # Entropy: H = -sum(p * log(p))
-                log_probs = torch.log(probs + 1e-10)
-                entropy = -(probs * log_probs).sum(dim=-1)  # [1, window_size]
-                values = entropy.squeeze(0).cpu().numpy()
+        with torch.no_grad():
+            pre_mlp_moved = pre_mlp_tail.to(device=lm_head_device, dtype=lm_head_dtype)
+            pre_normalized = self.final_norm(pre_mlp_moved)
+            pre_logits = self.lm_head(pre_normalized).float()
 
-            elif sig == "inv_margin":
-                # Inverse margin: sigmoid(-(top1 - top2))
-                top2_probs, _ = torch.topk(probs, 2, dim=-1)  # [1, window_size, 2]
-                margin = top2_probs[:, :, 0] - top2_probs[:, :, 1]  # [1, window_size]
-                inv_margin = torch.sigmoid(-margin)
-                values = inv_margin.squeeze(0).cpu().numpy()
+        # Candidate-restricted JSD per position with adaptive top-k
+        jsd_values = []
+        for pos in range(tail_logits.shape[1]):
+            post_logits_pos = tail_logits[0, pos].float()  # [vocab]
+            pre_logits_pos = pre_logits[0, pos]             # [vocab]
 
-            elif sig in ("jsd_cand", "jsd"):
-                # JSD: Jensen-Shannon Divergence between pre-MLP and post-MLP
-                # Pre-MLP = residual stream before normalization (h_resid_attn)
-                # Post-MLP = layer output (h_resid_mlp)
-                if self._pre_mlp_hidden is not None:
-                    pre_mlp_tail = self._pre_mlp_hidden[:, tail_start:tail_end, :]
+            # Compute adaptive top-k from distribution concentration
+            post_probs_full = F.softmax(post_logits_pos, dim=-1)
+            sorted_probs, sorted_indices = torch.sort(post_probs_full, descending=True)
+            cumsum = torch.cumsum(sorted_probs, dim=0)
+            k = min(256, max(32, int((cumsum < 0.95).sum().item()) + 1))
 
-                    # Project pre-MLP to logits (with proper device placement)
-                    with torch.no_grad():
-                        pre_mlp_moved = pre_mlp_tail.to(device=lm_head_device, dtype=lm_head_dtype)
-                        pre_normalized = self.final_norm(pre_mlp_moved)
-                        pre_logits = self.lm_head(pre_normalized)
-                        # Convert to float32 for stable softmax computation
-                        pre_probs = F.softmax(pre_logits.float(), dim=-1)
+            # Get top-k candidates from post-MLP logits
+            topk_indices = sorted_indices[:k]
 
-                    # Compute JSD for each position
-                    # JSD = 0.5 * KL(P||M) + 0.5 * KL(Q||M) where M = 0.5*(P+Q)
-                    M = 0.5 * (pre_probs + probs)
-                    kl_pre = (pre_probs * (torch.log(pre_probs + 1e-10) - torch.log(M + 1e-10))).sum(dim=-1)
-                    kl_post = (probs * (torch.log(probs + 1e-10) - torch.log(M + 1e-10))).sum(dim=-1)
-                    jsd = 0.5 * (kl_pre + kl_post)  # [1, window_size]
-                    values = jsd.squeeze(0).cpu().numpy()
-                else:
-                    # Fallback if pre-MLP not captured
-                    print("Pre-MLP hidden states not captured for JSD")
-                    values = np.zeros(n_tokens)
-            else:
-                print(f"Unknown signal: {sig}")
-                continue
+            # Restrict to candidates and re-normalize
+            post_cand = F.softmax(post_logits_pos[topk_indices], dim=-1)
+            pre_cand = F.softmax(pre_logits_pos[topk_indices], dim=-1)
 
-            mu[sig] = float(np.mean(values))
-            sigma[sig] = float(np.std(values))
+            # JSD
+            m = 0.5 * (pre_cand + post_cand)
+            kl_pre = (pre_cand * (torch.log(pre_cand + 1e-10) - torch.log(m + 1e-10))).sum()
+            kl_post = (post_cand * (torch.log(post_cand + 1e-10) - torch.log(m + 1e-10))).sum()
+            jsd_val = 0.5 * (kl_pre + kl_post)
+            jsd_values.append(jsd_val.item())
+
+        values = np.array(jsd_values)
+        mu = {"pos": float(np.mean(values))}
+        sigma = {"pos": float(np.std(values))}
 
         # Clear captured states to free memory
-        self._captured_hidden = None
-        self._captured_logits = None
-        self._pre_mlp_hidden = None
+        self._captured_hidden = None  # type: ignore[assignment]
+        self._pre_mlp_hidden = None  # type: ignore[assignment]
 
         return PrefillStatistics(
             mu=mu,
             sigma=sigma,
             n_tokens=n_tokens,
-            signals=self.signals,
+            signals=("pos",),
         )
 
 
@@ -436,10 +410,6 @@ class HookManager:
 
     def install(self):
         """Install hooks on all specified layers."""
-        if self._installed:
-            print("Hooks already installed")
-            return
-
         for layer_idx in self.layer_indices:
             layer = self.model.model.layers[layer_idx]
             hook = LayerHooks(layer_idx, self.buffer)

@@ -1,35 +1,30 @@
 """
-AG-SAR: Zero-Shot Hallucination Detection for LLaMA 3.1
+AG-SAR: Zero-Shot Hallucination Detection via Decoupled Spectral Grounding.
 
-A zero-shot hallucination detector that computes internal signals during generation
-and aggregates them via Noisy-OR for polarity-stable risk scoring.
-
-Deployment mode: Single-pass during generation (one forward per decoded token with KV-cache)
-Evaluation mode: Forced decoding for labeled datasets (stepwise with ground-truth tokens)
+DSG decomposes hallucination risk along the causal chain:
+  Context Utilization (attention) → Parametric Override (FFN) → Dual-Subspace Projection (representation)
+fused via prompt-anchored Noisy-OR for polarity-stable risk scoring.
 """
 
-__version__ = "0.2.0"
+__version__ = "1.0.0"
 
-from .config import DetectorConfig, SpanRisk, DetectionResult
-from .hooks import EphemeralHiddenBuffer, LayerHooks, PrefillContextHook, HookManager
-from .numerics import (
-    safe_softmax,
-    safe_jsd,
-    max_cosine_similarity,
-)
+from .config import DSGConfig, DSGTokenSignals, SpanRisk, DetectionResult
+from .hooks import EphemeralHiddenBuffer, LayerHooks, PrefillContextHook
+from .numerics import safe_softmax, safe_jsd, max_cosine_similarity, EPS
 
 __all__ = [
     # Config
-    "DetectorConfig",
+    "DSGConfig",
+    "DSGTokenSignals",
     "SpanRisk",
     "DetectionResult",
     # Hooks
     "EphemeralHiddenBuffer",
     "LayerHooks",
     "PrefillContextHook",
-    "HookManager",
     # Numerics
     "safe_softmax",
     "safe_jsd",
     "max_cosine_similarity",
+    "EPS",
 ]

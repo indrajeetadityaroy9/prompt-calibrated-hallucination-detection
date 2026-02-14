@@ -4,10 +4,17 @@ Evaluation metrics for hallucination detection.
 Computes AUROC, AUPRC, TPR@FPR, Calibration (ECE/Brier), and Correlations.
 """
 
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
+from typing import List, Dict, Tuple
+from dataclasses import dataclass, field
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
+from sklearn.metrics import (
+    roc_auc_score,
+    average_precision_score,
+    roc_curve,
+    brier_score_loss,
+    precision_recall_curve,
+)
 
 
 @dataclass
@@ -30,74 +37,49 @@ class MetricsResult:
     true_negatives: int
     false_negatives: int
 
-    # Calibration (Optional)
-    expected_calibration_error: Optional[float] = None
-    brier_score: Optional[float] = None
+    # Calibration
+    expected_calibration_error: float = 0.0
+    brier_score: float = 0.0
 
-    # Correlation with ground truth (0/1) (Optional)
-    pearson: Optional[float] = None
-    spearman: Optional[float] = None
+    # Correlation with ground truth (0/1)
+    pearson: float = 0.0
+    spearman: float = 0.0
 
-    # Selective prediction / Risk-Coverage (Optional)
-    aurc: Optional[float] = None
-    e_aurc: Optional[float] = None
-    risk_at_90_coverage: Optional[float] = None
+    # Selective prediction / Risk-Coverage
+    aurc: float = 0.0
+    e_aurc: float = 0.0
+    risk_at_90_coverage: float = 0.0
 
 
 def compute_auroc(scores: List[float], labels: List[int]) -> float:
     """Compute Area Under ROC Curve (Trapezoidal)."""
-    if not scores or not labels: return 0.5
-    from sklearn.metrics import roc_auc_score
-    try:
-        return float(roc_auc_score(labels, scores))
-    except ValueError:
-        return 0.5
+    return float(roc_auc_score(labels, scores))
 
 def compute_auprc(scores: List[float], labels: List[int]) -> float:
     """Compute Area Under Precision-Recall Curve."""
-    if not scores or not labels: return 0.0
-    from sklearn.metrics import average_precision_score
-    try:
-        return float(average_precision_score(labels, scores))
-    except ValueError:
-        return 0.0
+    return float(average_precision_score(labels, scores))
 
 def compute_tpr_at_fpr(scores: List[float], labels: List[int], target_fpr: float = 0.05) -> float:
     """
     Compute TPR at a specific FPR threshold.
     Crucial for 'Safety' (how many hallucinations do we catch if we accept 5% false alarms?).
     """
-    if not scores or not labels: return 0.0
-    
     scores = np.array(scores)
     labels = np.array(labels)
-    
-    # Sort descending
-    sorted_indices = np.argsort(scores)[::-1]
-    scores = scores[sorted_indices]
-    labels = labels[sorted_indices]
-    
+
     n_neg = np.sum(labels == 0)
     n_pos = np.sum(labels == 1)
-    
+
     if n_neg == 0 or n_pos == 0: return 0.0
-    
-    # Find threshold where FPR <= target_fpr
-    fp_count = 0
-    tp_count = 0
-    max_tpr = 0.0
-    
-    # Vectorized check is faster but iterative is clearer for implementation
-    # Let's use sklearn's curve if available to handle ties correctly
-    from sklearn.metrics import roc_curve
+
     fpr, tpr, thresholds = roc_curve(labels, scores)
-    
+
     # Find index where FPR <= target_fpr
     # fpr is increasing. We want max tpr s.t. fpr <= target
     valid_indices = np.where(fpr <= target_fpr)[0]
     if len(valid_indices) == 0:
         return 0.0
-    
+
     idx = valid_indices[-1]
     return float(tpr[idx])
 
@@ -106,12 +88,7 @@ def compute_brier_score(scores: List[float], labels: List[int]) -> float:
     Compute Brier Score (Mean Squared Error of probabilities).
     Lower is better.
     """
-    if not scores: return 0.0
-    from sklearn.metrics import brier_score_loss
-    try:
-        return float(brier_score_loss(labels, scores))
-    except ValueError:
-        return 0.0
+    return float(brier_score_loss(labels, scores))
 
 def compute_calibration_error(scores: List[float], labels: List[int], n_bins: int = 10) -> float:
     """
@@ -121,9 +98,6 @@ def compute_calibration_error(scores: List[float], labels: List[int], n_bins: in
 
     where B_b is the set of samples in bin b, acc is accuracy, conf is mean confidence.
     """
-    if not scores or len(scores) == 0:
-        return 0.0
-
     scores = np.array(scores)
     labels = np.array(labels)
     n = len(scores)
@@ -153,23 +127,21 @@ def compute_calibration_error(scores: List[float], labels: List[int], n_bins: in
 
 def compute_correlation(scores: List[float], labels: List[int]) -> Tuple[float, float]:
     """Compute Pearson and Spearman correlation with labels."""
-    if not scores or len(set(labels)) < 2: return (0.0, 0.0)
-    
+    if len(set(labels)) < 2: return (0.0, 0.0)
+
     p_corr, _ = pearsonr(scores, labels)
     s_corr, _ = spearmanr(scores, labels)
-    
+
     # Handle NaN
     if np.isnan(p_corr): p_corr = 0.0
     if np.isnan(s_corr): s_corr = 0.0
-    
+
     return float(p_corr), float(s_corr)
 
 def find_optimal_threshold(scores: List[float], labels: List[int], metric: str = "f1") -> float:
     """Find threshold that maximizes F1."""
-    if not scores: return 0.5
-    from sklearn.metrics import precision_recall_curve
     precision, recall, thresholds = precision_recall_curve(labels, scores)
-    
+
     f1_scores = 2 * recall * precision / (recall + precision + 1e-10)
     best_idx = np.argmax(f1_scores)
     if best_idx < len(thresholds):
@@ -179,7 +151,7 @@ def find_optimal_threshold(scores: List[float], labels: List[int], metric: str =
 def compute_metrics(
     scores: List[float],
     labels: List[int],
-    threshold: Optional[float] = None,
+    threshold: float = 0.5,
     include_selective: bool = True,
 ) -> MetricsResult:
     """
@@ -188,19 +160,12 @@ def compute_metrics(
     Args:
         scores: Predicted risk/confidence scores (higher = more likely hallucination)
         labels: Ground truth labels (1 = hallucination, 0 = faithful)
-        threshold: Classification threshold. If None, uses optimal F1 threshold.
+        threshold: Classification threshold (default 0.5)
         include_selective: Whether to compute AURC/E-AURC/Risk@90 (slower)
 
     Returns:
         MetricsResult with all computed metrics
     """
-    if not scores or not labels:
-        return MetricsResult(
-            auroc=0.5, auprc=0.0, precision=0.0, recall=0.0, f1=0.0,
-            accuracy=0.0, threshold=0.5, tpr_at_5_fpr=0.0,
-            true_positives=0, false_positives=0, true_negatives=0, false_negatives=0
-        )
-
     # Basic ranking metrics
     auroc = compute_auroc(scores, labels)
     auprc = compute_auprc(scores, labels)
@@ -216,18 +181,15 @@ def compute_metrics(
     pearson, spearman = compute_correlation(scores, labels)
 
     # Selective prediction metrics (AURC, E-AURC, Risk@90)
-    aurc_val = None
-    e_aurc_val = None
-    risk_90 = None
+    aurc_val = 0.0
+    e_aurc_val = 0.0
+    risk_90 = 0.0
     if include_selective:
         aurc_val = compute_aurc(scores, labels)
         e_aurc_val = compute_e_aurc(scores, labels)
         risk_90 = compute_risk_at_coverage(scores, labels, 0.9)
 
     # Classification metrics at threshold
-    if threshold is None:
-        threshold = find_optimal_threshold(scores, labels)
-
     preds = [1 if s >= threshold else 0 for s in scores]
     tp = sum(1 for p, l in zip(preds, labels) if p == 1 and l == 1)
     fp = sum(1 for p, l in zip(preds, labels) if p == 1 and l == 0)
@@ -329,9 +291,6 @@ def compute_risk_coverage(
     Returns:
         List of dicts with 'coverage' and 'risk' keys
     """
-    if not scores or not labels:
-        return []
-
     scores = np.array(scores)
     labels = np.array(labels)
     n = len(scores)
@@ -379,9 +338,6 @@ def compute_aurc(scores: List[float], labels: List[int]) -> float:
     scores = np.array(scores)
     labels = np.array(labels)
 
-    if len(scores) == 0 or len(labels) == 0:
-        return 1.0
-
     n = len(scores)
 
     # Sort by score ascending (lower score = more confident)
@@ -421,9 +377,6 @@ def compute_e_aurc(scores: List[float], labels: List[int]) -> float:
     """
     scores = np.array(scores)
     labels = np.array(labels)
-
-    if len(scores) == 0 or len(labels) == 0:
-        return 1.0
 
     n = len(labels)
     n_errors = np.sum(labels)
@@ -480,9 +433,6 @@ def compute_risk_at_coverage(
     Returns:
         Risk (error rate) at the target coverage
     """
-    if not scores or not labels:
-        return 1.0
-
     scores = np.array(scores)
     labels = np.array(labels)
     n = len(scores)
@@ -525,7 +475,7 @@ def bootstrap_auroc_ci(
     Returns:
         Tuple of (lower_bound, upper_bound)
     """
-    if not scores or not labels or len(set(labels)) < 2:
+    if len(set(labels)) < 2:
         return (0.0, 1.0)
 
     scores = np.array(scores)

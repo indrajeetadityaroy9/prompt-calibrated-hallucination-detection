@@ -1,136 +1,99 @@
 """
-Configuration for the hallucination detector.
+Unified configuration for DSG hallucination detector.
+
+All detection thresholds are adaptive — derived from input statistics
+and model architecture. The only user-facing parameters are architectural
+choices and operating points.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Union, Optional
+from typing import List, Union
 
 
 @dataclass
-class DetectorConfig:
+class DSGConfig:
     """
-    Configuration for HallucinationDetector.
+    Zero-configuration DSG detector.
 
-    Attributes:
-        layer_subset: Which layers to hook for signal computation.
-            Options: "last_third", "last_quarter", "all", or List[int] for explicit indices.
-        candidate_topk: Number of top tokens to include in candidate set for JSD.
-        include_prev_topk: Whether to include previous step's top-k in candidate set.
-        token_flag_threshold: Threshold for flagging individual tokens as high-risk.
-        span_build_threshold: Threshold for including tokens in risk spans.
-        response_flag_threshold: Threshold for flagging entire response as high-risk.
-        multi_gpu_mode: How to handle 70B models with device_map='auto'.
-            Options: "compatible_only" (only hook layers on lm_head device),
-                     "allow_transfer" (allow cross-device tensor transfer).
-        default_eval_mode: Default evaluation mode.
-            Options: "forced_decoding" (stepwise with ground truth),
-                     "generation" (argmax decoding).
-        min_topk_mass_warning: Warn if topk_mass falls below this threshold.
-        compute_topk_mass_every_n: Compute topk_mass every N tokens (for performance).
+    All signal thresholds, calibration, and aggregation parameters are
+    self-derived from input statistics. User-facing knobs:
+    - layer_subset: architectural choice for which layers to hook
+    - conformal_alpha: miscoverage rate for conformal prediction (0.10 = 90% coverage)
+    - response_flag_threshold: deprecated fallback operating point
     """
 
-    # Layer selection
-    layer_subset: Union[str, List[int]] = "last_third"
+    # Layer selection: "all", "last_third", "last_quarter", or List[int]
+    layer_subset: Union[str, List[int]] = "all"
 
-    # Candidate set (for JSD)
-    candidate_topk: int = 128
-    include_prev_topk: bool = True
+    # Conformal miscoverage rate — the recommended path for binary decisions
+    conformal_alpha: float = 0.10
 
-    # Thresholds (None = dynamic from distribution, set explicitly for fixed thresholds)
-    token_flag_threshold: Optional[float] = None
-    span_build_threshold: Optional[float] = None
-    response_flag_threshold: Optional[float] = None
-
-    # 70B multi-GPU
-    multi_gpu_mode: str = "compatible_only"
-
-    # Evaluation
-    default_eval_mode: str = "forced_decoding"
-
-    # Sanity thresholds
-    min_topk_mass_warning: float = 0.8
-
-    # Performance tuning
-    compute_topk_mass_every_n: int = 1
-
-    # Prompt-Anchored Aggregation
-    # If True, uses prompt-anchored normalization + Noisy-OR fusion
-    use_prompt_anchored: bool = True
-    # Signals to include in aggregation
-    # TODO: Update for DSG signals (cus, pos, dps)
-    prompt_anchored_signals: tuple = ("jsd",)
-
+    # Deprecated: kept for backward compat when conformal is not calibrated
+    response_flag_threshold: float = 0.5
 
     def __post_init__(self):
-        """Validate configuration after initialization."""
-        # Validate layer_subset
         if isinstance(self.layer_subset, str):
-            valid_subsets = {"last_third", "last_quarter", "all"}
-            if self.layer_subset not in valid_subsets:
+            valid = {"all", "last_third", "last_quarter"}
+            if self.layer_subset not in valid:
                 raise ValueError(
-                    f"layer_subset must be one of {valid_subsets} or a list of ints, "
+                    f"layer_subset must be one of {valid} or List[int], "
                     f"got '{self.layer_subset}'"
                 )
-
-        # Validate multi_gpu_mode
-        valid_modes = {"compatible_only", "allow_transfer"}
-        if self.multi_gpu_mode not in valid_modes:
+        if not 0 <= self.response_flag_threshold <= 1:
             raise ValueError(
-                f"multi_gpu_mode must be one of {valid_modes}, "
-                f"got '{self.multi_gpu_mode}'"
+                f"response_flag_threshold must be in [0, 1], "
+                f"got {self.response_flag_threshold}"
             )
-
-        # Validate eval_mode
-        valid_eval_modes = {"forced_decoding", "generation"}
-        if self.default_eval_mode not in valid_eval_modes:
+        if not 0 < self.conformal_alpha < 1:
             raise ValueError(
-                f"default_eval_mode must be one of {valid_eval_modes}, "
-                f"got '{self.default_eval_mode}'"
+                f"conformal_alpha must be in (0, 1), "
+                f"got {self.conformal_alpha}"
             )
-
-        # Validate thresholds if explicitly set (None = dynamic)
-        for name in ["token_flag_threshold", "span_build_threshold", "response_flag_threshold"]:
-            value = getattr(self, name)
-            if value is not None and not 0 <= value <= 1:
-                raise ValueError(f"{name} must be in [0, 1], got {value}")
 
 
 @dataclass
-class TokenSignals:
+class PrefillCalibration:
     """
-    Per-token signals.
+    Self-calibrated parameters derived from prefill pass. Not user-facing.
 
-    TODO: Replace with DSGTokenSignals (cus, pos, dps) during DSG implementation.
-    Currently only jsd_cand is populated.
+    All values are computed from the actual input — no hardcoded priors.
+    Signal normalization strategy:
+    - CUS: direct mode (value IS the probability, no z-score)
+    - POS/DPS: prompt-anchored z-score with MAD-based robust sigma
     """
+    dps_mu: float = 0.0
+    dps_sigma: float = 0.0
+    dps_sigma_floor: float = 0.0
+    pos_mu: float = 0.0
+    pos_sigma: float = 0.0
+    pos_sigma_floor: float = 0.0
+    # CUS uses direct mode (no z-score) — see prompt_anchored.py
+    cus_mode: str = "direct"
+    # Adaptive layer sets (computed from JSD variance via Otsu)
+    dps_layers: List[int] = field(default_factory=list)
+    # Number of tokens used for calibration
+    n_calibration_tokens: int = 0
 
-    # Core signal (retained for POS foundation)
-    jsd_cand: float = 0.0  # MLP-induced shift (candidate-set JSD)
 
-    # Sanity checks for candidate approximation validity
-    candidate_size: int = 0
-    emitted_in_candidate: bool = True
-    topk_mass: Optional[float] = None  # sum(probs[candidate_set])
+@dataclass
+class DSGTokenSignals:
+    """Per-token signals for DSG detector."""
+    cus: float = 0.0  # Context Utilization Score (attention)
+    pos: float = 0.0  # Parametric Override Score (FFN)
+    dps: float = 0.0  # Dual-Subspace Projection Score (representation)
 
     def as_dict(self) -> dict:
-        """Convert to dictionary for serialization."""
-        return {
-            "jsd_cand": self.jsd_cand,
-            "candidate_size": self.candidate_size,
-            "emitted_in_candidate": self.emitted_in_candidate,
-            "topk_mass": self.topk_mass,
-        }
+        return {"cus": self.cus, "pos": self.pos, "dps": self.dps}
 
 
 @dataclass
 class SpanRisk:
     """Risk information for a contiguous span of tokens."""
-
-    start_token: int  # Start position in generated sequence
-    end_token: int  # End position (exclusive)
-    text: str  # Decoded text of the span
-    risk_score: float  # Aggregated risk for the span
-    token_risks: List[float]  # Individual token risks within span
+    start_token: int
+    end_token: int
+    text: str
+    risk_score: float
+    token_risks: List[float]
 
 
 @dataclass
@@ -141,8 +104,8 @@ class DetectionResult:
     generated_text: str
 
     # Token-level results
-    token_signals: List[TokenSignals]
-    token_risks: List[float]  # Aggregated per-token risk scores
+    token_signals: List[DSGTokenSignals]
+    token_risks: List[float]
 
     # Span-level results
     risky_spans: List[SpanRisk]
@@ -153,9 +116,7 @@ class DetectionResult:
 
     # Metadata
     num_tokens: int
-    num_claim_tokens: int
     prompt_length: int
 
-    # Sanity metrics
-    mean_topk_mass: Optional[float] = None
-    min_topk_mass: Optional[float] = None
+    # Conformal calibration (None if not calibrated)
+    conformal_threshold: float = None

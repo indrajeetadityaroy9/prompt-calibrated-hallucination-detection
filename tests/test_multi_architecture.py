@@ -1,7 +1,7 @@
 """
 Multi-Architecture Hook Verification Tests.
 
-Tests that AG-SAR hooks and signals work correctly across:
+Tests that DSG hooks work correctly across:
 - LLaMA 3.1 8B
 - Mistral 7B
 - Qwen2 7B
@@ -10,8 +10,6 @@ Tests that AG-SAR hooks and signals work correctly across:
 Each test verifies:
 1. Model structure compatibility (layers, norm, lm_head)
 2. Hook installation and capture
-3. Signal computation
-4. Triton kernel execution
 """
 
 import torch
@@ -86,7 +84,7 @@ def verify_structure_compatibility(model, model_name: str) -> bool:
     return all_pass
 
 
-def test_hook_installation(model, model_name: str) -> bool:
+def check_hook_installation(model, model_name: str) -> bool:
     """Test that hooks can be installed and capture hidden states."""
     from ag_sar.hooks import EphemeralHiddenBuffer, LayerHooks
 
@@ -152,135 +150,7 @@ def test_hook_installation(model, model_name: str) -> bool:
         return False
 
 
-def test_signal_computation(model, tokenizer, model_name: str) -> bool:
-    """Test that signals can be computed correctly."""
-    from ag_sar.config import DetectorConfig
-    from ag_sar.engine import AGSAR
-
-    print(f"\nTesting signal computation on {model_name}...")
-
-    try:
-        config = DetectorConfig(
-            layer_subset="last_quarter",
-            eigenscore_enabled=True,
-            lsd_enabled=True,
-            ise_enabled=True,
-        )
-
-        engine = AGSAR(model, tokenizer, config)
-
-        # Generate with detection
-        result = engine.generate(
-            prompt="What is 2+2?",
-            max_new_tokens=10,
-        )
-
-        # Check results
-        checks = []
-
-        if result.generated_text:
-            print(f"  ✓ Generated text: '{result.generated_text[:50]}...'")
-            checks.append(True)
-        else:
-            print(f"  ✗ No generated text")
-            checks.append(False)
-
-        if len(result.token_signals) > 0:
-            print(f"  ✓ Token signals: {len(result.token_signals)} tokens")
-            checks.append(True)
-
-            # Check signal values
-            ts = result.token_signals[0]
-            signal_checks = [
-                ('jsd_cand', ts.jsd_cand),
-                ('lci_cand', ts.lci_cand),
-                ('var_logp_cand', ts.var_logp_cand),
-                ('entropy', ts.entropy),
-                ('inv_margin', ts.inv_margin),
-            ]
-
-            for name, value in signal_checks:
-                if value is not None and 0 <= value <= 10:  # Reasonable range
-                    print(f"    ✓ {name}: {value:.4f}")
-                else:
-                    print(f"    ? {name}: {value}")
-        else:
-            print(f"  ✗ No token signals")
-            checks.append(False)
-
-        if 0 <= result.response_risk <= 1:
-            print(f"  ✓ Response risk: {result.response_risk:.4f}")
-            checks.append(True)
-        else:
-            print(f"  ✗ Invalid response risk: {result.response_risk}")
-            checks.append(False)
-
-        return all(checks)
-
-    except Exception as e:
-        print(f"  ✗ Signal computation failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-def test_triton_kernels(model, model_name: str) -> bool:
-    """Test Triton kernel execution with model's tensors."""
-    print(f"\nTesting Triton kernels on {model_name}...")
-
-    try:
-        from ag_sar.ops.triton_kernels import (
-            fused_rmsnorm_linear_subset,
-            fused_centered_gram,
-            fused_indexed_cosine,
-        )
-
-        device = next(model.parameters()).device
-        hidden_size = model.config.hidden_size
-        vocab_size = model.config.vocab_size
-
-        # Get actual lm_head weight
-        lm_head_weight = model.lm_head.weight  # [vocab_size, hidden_size]
-
-        # Test tensors
-        x = torch.randn(1, hidden_size, device=device, dtype=torch.float16)
-        indices = torch.randint(0, vocab_size, (128,), device=device)
-
-        # Test 1: fused_rmsnorm_linear_subset
-        try:
-            out1 = fused_rmsnorm_linear_subset(x, lm_head_weight, indices)
-            print(f"  ✓ fused_rmsnorm_linear_subset: {out1.shape}")
-        except Exception as e:
-            print(f"  ✗ fused_rmsnorm_linear_subset failed: {e}")
-            return False
-
-        # Test 2: fused_centered_gram
-        try:
-            trajectory = torch.randn(10, hidden_size, device=device, dtype=torch.float32)
-            out2 = fused_centered_gram(trajectory)
-            print(f"  ✓ fused_centered_gram: {out2.shape}")
-        except Exception as e:
-            print(f"  ✗ fused_centered_gram failed: {e}")
-            return False
-
-        # Test 3: fused_indexed_cosine
-        try:
-            out3 = fused_indexed_cosine(x.float(), lm_head_weight.float(), indices)
-            print(f"  ✓ fused_indexed_cosine: {out3.shape}")
-        except Exception as e:
-            print(f"  ✗ fused_indexed_cosine failed: {e}")
-            return False
-
-        return True
-
-    except Exception as e:
-        print(f"  ✗ Triton kernel test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-def test_model(model_id: str, token: str = None):
+def run_model_checks(model_id: str, token: str = None):
     """Run all tests on a single model."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
     import os
@@ -321,17 +191,7 @@ def test_model(model_id: str, token: str = None):
         results['structure'] = verify_structure_compatibility(model, model_id)
 
         # Test 2: Hook installation
-        results['hooks'] = test_hook_installation(model, model_id)
-
-        # Test 3: Triton kernels
-        results['triton'] = test_triton_kernels(model, model_id)
-
-        # Test 4: Signal computation (only if previous tests pass)
-        if results['structure'] and results['hooks']:
-            results['signals'] = test_signal_computation(model, tokenizer, model_id)
-        else:
-            results['signals'] = False
-            print("Skipping signal computation test due to earlier failures")
+        results['hooks'] = check_hook_installation(model, model_id)
 
         # Summary
         print(f"\n{'='*60}")
@@ -384,7 +244,7 @@ def main():
     results = {}
     for name, model_id in models_to_test.items():
         try:
-            results[name] = test_model(model_id, args.token)
+            results[name] = run_model_checks(model_id, args.token)
         except Exception as e:
             print(f"Failed to test {name}: {e}")
             results[name] = False

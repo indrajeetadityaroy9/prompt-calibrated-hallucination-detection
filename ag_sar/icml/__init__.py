@@ -1,7 +1,12 @@
 """
 ICML-Ready Hallucination Detection Module.
 
-DSG (Decoupled Spectral Grounding) detector will be added here.
+DSG (Decoupled Spectral Grounding) detector.
 """
 
-__all__ = []
+from .dsg_detector import DSGDetector, CandidateSetManager
+
+__all__ = [
+    "DSGDetector",
+    "CandidateSetManager",
+]
