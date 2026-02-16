@@ -2,12 +2,14 @@
 """
 DSG (Decoupled Spectral Grounding) Evaluation on Llama 3.1.
 
-Runs the full DSG hallucination detection pipeline on QA benchmarks:
+Runs the full DSG hallucination detection pipeline (5 signals, entropy-gated fusion)
+on QA benchmarks:
   - TriviaQA (trivia with Wikipedia context)
   - SQuAD v2 (extractive QA)
 
 For each sample:
   1. DSGDetector.detect() generates an answer with full signal computation
+     (CUS, POS, DPS, DoLa, CGD)
   2. F1 matching against ground truth determines hallucination label
   3. DSG response_risk is the detector's score
 
@@ -175,6 +177,8 @@ class DSGSampleResult:
     mean_cus: float
     mean_pos: float
     mean_dps: float
+    mean_dola: float
+    mean_cgd: float
     n_tokens: int
     is_flagged: bool
 
@@ -217,6 +221,8 @@ def run_dsg_evaluation(
             cus_vals = [s.cus for s in result.token_signals]
             pos_vals = [s.pos for s in result.token_signals]
             dps_vals = [s.dps for s in result.token_signals]
+            dola_vals = [s.dola for s in result.token_signals]
+            cgd_vals = [s.cgd for s in result.token_signals]
 
             results.append(DSGSampleResult(
                 question=sample["question"],
@@ -228,6 +234,8 @@ def run_dsg_evaluation(
                 mean_cus=float(np.mean(cus_vals)) if cus_vals else 0.0,
                 mean_pos=float(np.mean(pos_vals)) if pos_vals else 0.0,
                 mean_dps=float(np.mean(dps_vals)) if dps_vals else 0.0,
+                mean_dola=float(np.mean(dola_vals)) if dola_vals else 0.0,
+                mean_cgd=float(np.mean(cgd_vals)) if cgd_vals else 0.0,
                 n_tokens=result.num_tokens,
                 is_flagged=result.is_flagged,
             ))
@@ -271,7 +279,7 @@ def run_dsg_evaluation(
     # Per-signal AUROCs
     from sklearn.metrics import roc_auc_score
     signal_aurocs = {}
-    for sig_name in ["mean_cus", "mean_pos", "mean_dps", "response_risk"]:
+    for sig_name in ["mean_cus", "mean_pos", "mean_dps", "mean_dola", "mean_cgd", "response_risk"]:
         vals = [getattr(r, sig_name) for r in results]
         try:
             signal_aurocs[sig_name] = float(roc_auc_score(labels, vals))

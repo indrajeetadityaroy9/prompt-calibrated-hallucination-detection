@@ -4,11 +4,16 @@ Prompt-Anchored Signal Aggregation for Hallucination Detection.
 Signal-specific normalization:
     - Direct signals (CUS): Value IS the probability (no z-score).
       CUS ∈ [0,1] with semantic meaning (0=grounded, 1=ungrounded).
-    - Z-scored signals (POS, DPS): Prompt-relative z-scoring + sigmoid.
+    - Z-scored signals (POS, DPS, DoLa, CGD): Prompt-relative z-scoring + sigmoid.
       Z_i(t) = (S_i(t) - μ_prompt) / σ_prompt → P_i(t) = sigmoid(Z_i(t))
 
-Fusion: Noisy-OR: P(Risk) = 1 - ∏(1 - P_i(t))
-Aggregation: Adaptive quantile q = 1 - 1/(n+1) (order statistics).
+Fusion: Entropy-gated weighted mean.
+    w_i(t) = (1 - H_i(t))^κ where H_i = binary entropy of p_i.
+    R(t) = Σ w_i·p_i / Σ w_i. Signals at p=0.5 (uninformative) get weight 0.
+
+Token-level: Entropy-gated fusion for per-token risk (span detection).
+Response-level: Signal-first aggregation — mean of per-signal response
+    probabilities. Captures diffuse mean shifts that entropy gating kills.
 
 No magic numbers, no learned weights, no hardcoded priors.
 """
@@ -18,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Set, Union
 
 from ..numerics import EPS
+from ..config import SIGNAL_REGISTRY, NormMode
 
 
 @dataclass
@@ -39,6 +45,9 @@ class AggregationResult:
     # Anchor statistics used (for transparency)
     anchor_stats: Dict[str, Dict[str, float]]
 
+    # Per-signal response-level probabilities (for diagnostics)
+    signal_response_probs: Dict[str, float] = field(default_factory=dict)
+
 
 class PromptAnchoredAggregator:
     """
@@ -48,23 +57,28 @@ class PromptAnchoredAggregator:
     ═════════
     1. Per-signal normalization (signal-specific):
        - Direct signals (CUS): value = probability (no z-score)
-       - Z-scored signals (POS, DPS): z = (s - μ_prompt) / σ_prompt → sigmoid
-    2. Fuse via Noisy-OR: R(t) = 1 - Π(1 - p_i(t))
-    3. Aggregate via adaptive quantile: q = 1 - 1/(n+1)
+       - Z-scored signals (POS, DPS, DoLa, CGD): z = (s - μ_prompt) / σ_prompt → sigmoid
+    2. Token-level: entropy-gated weighted mean for per-token risk (span detection)
+       w_i = (1 - H_i)^κ, R(t) = Σ w_i·p_i / Σ w_i
+    3. Response-level: mean of per-signal response probabilities (signal-first)
+       Captures diffuse mean shifts that entropy gating kills at per-token level.
 
     No magic numbers. No learned weights. No calibration data.
     """
 
-    # Signals that use direct probability mapping (no z-score).
-    # CUS is in [0,1] with semantic meaning — z-scoring destroys this
-    # and causes saturation when prefill/generation distributions differ.
-    DIRECT_SIGNALS = {"cus"}
+    @staticmethod
+    def _is_direct(sig: str, stats: Dict) -> bool:
+        """Check if signal should use direct probability mapping."""
+        if stats.get("mode") == "direct":
+            return True
+        meta = SIGNAL_REGISTRY.get(sig)
+        return meta is not None and meta.norm_mode == NormMode.DIRECT
 
     def __init__(
         self,
         active_signals: Set[str] = None,
     ):
-        self.active_signals = active_signals or {"cus", "pos", "dps"}
+        self.active_signals = active_signals or {"cus", "pos", "dps", "dola", "cgd"}
 
     def compute_risk(
         self,
@@ -117,7 +131,7 @@ class PromptAnchoredAggregator:
             response_vals = np.asarray(response_signals[sig])
             stats = prompt_stats[sig]
 
-            if sig in self.DIRECT_SIGNALS or stats.get("mode") == "direct":
+            if self._is_direct(sig, stats):
                 # Direct mode: value IS the probability (CUS ∈ [0,1])
                 probabilities[sig] = np.clip(response_vals, 0.0, 1.0)
                 z_scores[sig] = response_vals  # Raw values for diagnostics
@@ -139,20 +153,14 @@ class PromptAnchoredAggregator:
                     "mode": "zscore",
                 }
 
-        # Stage 3: Noisy-OR fusion (uniform, no weights)
-        token_risks = self._noisy_or_fusion(probabilities, n_tokens)
+        # Stage 3: Entropy-gated fusion (per-token, for span detection)
+        token_risks = self._entropy_gated_fusion(probabilities, n_tokens)
 
-        # Stage 4: Adaptive quantile aggregation
-        # q(n) = 1 - 1/(n+1): order-statistics approach that naturally
-        # adapts to response length. Short responses use lower quantile
-        # (avoid single-token noise), long responses focus on the tail.
-        # Reference: Blom (1958); David & Nagaraja (2003)
-        if len(token_risks) == 0:
-            risk = 0.0
-        else:
-            n = len(token_risks)
-            q = max(0.5, min(1.0 - 1.0 / (n + 1), 0.999))
-            risk = float(np.percentile(token_risks, 100 * q))
+        # Stage 4: Response-level risk via signal-first aggregation
+        # (replaces adaptive quantile which captures outlier tokens in ALL responses)
+        risk, signal_probs = self._response_level_risk(
+            response_signals, prompt_stats, available_signals,
+        )
 
         return AggregationResult(
             risk=risk,
@@ -160,26 +168,91 @@ class PromptAnchoredAggregator:
             z_scores=z_scores,
             probabilities=probabilities,
             anchor_stats=anchor_stats_used,
+            signal_response_probs=signal_probs,
         )
 
-    def _noisy_or_fusion(
+    def _entropy_gated_fusion(
         self,
         probabilities: Dict[str, np.ndarray],
         n_tokens: int,
     ) -> np.ndarray:
         """
-        Fuse signals via uniform Noisy-OR.
+        Entropy-gated fusion: suppress uninformative signals.
 
-        R(t) = 1 - Π_s (1 - p_s(t))
+        w_i(t) = (1 - H_i(t))^κ  where H_i = binary entropy of p_i
+        R(t) = Σ w_i·p_i / Σ w_i  (weighted mean)
 
-        Interpretation: probability that at least one signal indicates risk.
-        No weights - all signals contribute equally (independence assumption).
+        When p_i = 0.5: H_i = 1.0, w_i = 0 → signal completely suppressed.
+        When p_i ≈ 0 or ≈ 1: H_i ≈ 0, w_i ≈ 1 → signal contributes fully.
+
+        If ALL signals are uninformative, R(t) defaults to 0 (no evidence of risk).
+
+        Reference: AGFN (arXiv:2510.01677), AECF (arXiv:2505.15417).
+        Adapted for training-free detection with κ=2 (quadratic suppression).
         """
-        # Start with "no risk" (all signals say OK)
-        complement_product = np.ones(n_tokens)
+        kappa = 2  # Quadratic suppression: principled, no tuning needed
+
+        weighted_sum = np.zeros(n_tokens)
+        weight_sum = np.zeros(n_tokens)
 
         for sig, p in probabilities.items():
-            complement_product *= (1.0 - p)
+            # Binary entropy: H = -p·log₂(p) - (1-p)·log₂(1-p)
+            p_clipped = np.clip(p, EPS, 1 - EPS)
+            H = -(p_clipped * np.log2(p_clipped) + (1 - p_clipped) * np.log2(1 - p_clipped))
 
-        # Noisy-OR: P(at least one cause)
-        return 1.0 - complement_product
+            # Gate: 0 at H=1 (p=0.5), 1 at H=0 (p=0 or 1)
+            w = (1.0 - H) ** kappa
+
+            weighted_sum += w * p
+            weight_sum += w
+
+        # When all signals uninformative, default to 0 (no evidence of risk)
+        # Use safe division to avoid RuntimeWarning
+        safe_denom = np.where(weight_sum > EPS, weight_sum, 1.0)
+        return np.where(weight_sum > EPS, weighted_sum / safe_denom, 0.0)
+
+    def _response_level_risk(
+        self,
+        response_signals: Dict[str, np.ndarray],
+        prompt_stats: Dict[str, Dict[str, float]],
+        available_signals: Set[str],
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        Response-level risk via signal-first aggregation.
+
+        For each signal:
+          1. Compute mean of raw values across all response tokens
+          2. Normalize: direct signals clip to [0,1],
+             z-scored signals use (mean - mu_prompt) / sigma_prompt -> sigmoid
+
+        Fuse via simple (unweighted) mean of per-signal response probabilities.
+
+        Rationale: Discriminative signals (POS, DPS) exhibit a diffuse mean
+        shift across tokens, not per-token spikes. Entropy gating destroys
+        this because per-token probabilities hover near 0.5 and kappa=2
+        suppresses them to near-zero weight. Simple mean preserves rank
+        ordering: signals at p=0.5 contribute neutrally, while discriminative
+        signals shift the mean. This is zero-parameter.
+        """
+        signal_probs = {}
+
+        for sig in available_signals:
+            raw_vals = np.asarray(response_signals[sig])
+            if len(raw_vals) == 0:
+                continue
+            stats = prompt_stats.get(sig, {})
+            mean_val = float(np.mean(raw_vals))
+
+            if self._is_direct(sig, stats):
+                signal_probs[sig] = np.clip(mean_val, 0.0, 1.0)
+            else:
+                mu = stats.get("mu", 0.0)
+                sigma = max(stats.get("sigma", 1.0), EPS)
+                z = np.clip((mean_val - mu) / sigma, -20, 20)
+                signal_probs[sig] = float(1.0 / (1.0 + np.exp(-z)))
+
+        if not signal_probs:
+            return 0.0, {}
+
+        risk = float(np.mean(list(signal_probs.values())))
+        return risk, signal_probs

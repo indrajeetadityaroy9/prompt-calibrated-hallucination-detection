@@ -64,7 +64,6 @@ class TestDSGAggregationIntegration:
         """Test DSGConfig has correct defaults."""
         config = DSGConfig()
         assert config.layer_subset == "all"
-        assert config.response_flag_threshold == 0.5
 
     def test_hallucination_vs_confident_response(self):
         """
@@ -100,6 +99,97 @@ class TestDSGAggregationIntegration:
         assert hall_result.risk > conf_result.risk
         assert hall_result.risk > 0.7
         assert conf_result.risk < 0.5
+
+
+class TestResponseLevelMeanShift:
+    """
+    Test that response-level aggregation captures diffuse mean shifts.
+
+    This is the key regression test: real hallucination signal is a slight
+    elevation of POS/DPS across ALL tokens, not per-token spikes. The old
+    adaptive quantile approach missed this (AUROC=0.50). The new signal-first
+    aggregation should capture it.
+    """
+
+    def test_diffuse_pos_shift_detected(self):
+        """POS with diffuse mean shift should produce different response risks."""
+        aggregator = PromptAnchoredAggregator(
+            active_signals={"cus", "pos", "dps", "dola", "cgd"}
+        )
+        prompt_stats = {
+            "cus": {"mode": "direct"},
+            "pos": {"mu": 0.3, "sigma": 0.1},
+            "dps": {"mu": 0.5, "sigma": 0.2},
+            "dola": {"mu": 5.0, "sigma": 2.0},
+            "cgd": {"mu": 0.5, "sigma": 0.2},
+        }
+
+        n = 30
+        # Hallucinated: POS and DPS slightly elevated across ALL tokens
+        hall_signals = {
+            "cus": np.full(n, 0.5),
+            "pos": np.full(n, 0.36),   # slightly above mu=0.3
+            "dps": np.full(n, 0.55),   # slightly above mu=0.5
+            "dola": np.full(n, 5.0),
+            "cgd": np.full(n, 0.5),
+        }
+        # Non-hallucinated: POS and DPS slightly below
+        good_signals = {
+            "cus": np.full(n, 0.5),
+            "pos": np.full(n, 0.24),   # slightly below mu=0.3
+            "dps": np.full(n, 0.45),   # slightly below mu=0.5
+            "dola": np.full(n, 5.0),
+            "cgd": np.full(n, 0.5),
+        }
+
+        hall_result = aggregator.compute_risk(prompt_stats, hall_signals)
+        good_result = aggregator.compute_risk(prompt_stats, good_signals)
+
+        assert hall_result.risk > good_result.risk, (
+            f"Hallucinated risk {hall_result.risk:.4f} should exceed "
+            f"non-hallucinated {good_result.risk:.4f}"
+        )
+
+    def test_uninformative_signals_neutral(self):
+        """Signals at their prompt mean should produce neutral response risk."""
+        aggregator = PromptAnchoredAggregator(
+            active_signals={"pos", "dps"}
+        )
+        prompt_stats = {
+            "pos": {"mu": 0.3, "sigma": 0.1},
+            "dps": {"mu": 0.5, "sigma": 0.2},
+        }
+
+        # All signals at their prompt means
+        neutral = {
+            "pos": np.full(10, 0.3),
+            "dps": np.full(10, 0.5),
+        }
+        result = aggregator.compute_risk(prompt_stats, neutral)
+
+        # Risk should be near 0.5 (neutral)
+        assert 0.45 <= result.risk <= 0.55, f"Expected near 0.5, got {result.risk}"
+
+    def test_signal_response_probs_populated(self):
+        """AggregationResult should contain per-signal response probabilities."""
+        aggregator = PromptAnchoredAggregator(active_signals={"pos", "dps"})
+        prompt_stats = {
+            "pos": {"mu": 0.3, "sigma": 0.1},
+            "dps": {"mu": 0.5, "sigma": 0.2},
+        }
+        response_signals = {
+            "pos": np.full(5, 0.4),
+            "dps": np.full(5, 0.6),
+        }
+
+        result = aggregator.compute_risk(prompt_stats, response_signals)
+
+        assert "pos" in result.signal_response_probs
+        assert "dps" in result.signal_response_probs
+        # POS mean=0.4, z=(0.4-0.3)/0.1=1.0, sigmoid(1.0)≈0.731
+        assert result.signal_response_probs["pos"] > 0.5
+        # DPS mean=0.6, z=(0.6-0.5)/0.2=0.5, sigmoid(0.5)≈0.622
+        assert result.signal_response_probs["dps"] > 0.5
 
 
 if __name__ == "__main__":

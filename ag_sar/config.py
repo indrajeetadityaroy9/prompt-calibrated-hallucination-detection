@@ -6,8 +6,50 @@ and model architecture. The only user-facing parameters are architectural
 choices and operating points.
 """
 
-from dataclasses import dataclass, field
-from typing import List, Union
+from dataclasses import dataclass
+from enum import Enum
+from typing import List, TYPE_CHECKING, Union
+
+if TYPE_CHECKING:
+    from .aggregation.span_merger import RiskySpan
+
+
+class NormMode(Enum):
+    """Signal normalization mode."""
+    DIRECT = "direct"    # Value IS the probability (CUS ∈ [0,1])
+    ZSCORE = "zscore"    # Prompt-anchored z-score → sigmoid
+
+
+@dataclass
+class SignalMetadata:
+    """Signal properties — single source of truth for normalization and fallbacks."""
+    name: str
+    norm_mode: NormMode
+    bounded: bool           # True if signal is in [0,1]
+    neutral: float          # Value when signal is uninformative
+    higher_is_riskier: bool
+
+    def sigma_floor(self, sigma_from_data: float) -> float:
+        """Data-derived sigma floor: 10% of observed sigma, minimum EPS."""
+        from .numerics import EPS
+        return max(0.1 * sigma_from_data, EPS) if sigma_from_data > 0 else 0.01
+
+    def fallback_stats(self) -> dict:
+        """Fallback when calibration fails — no model-specific constants."""
+        if self.bounded:
+            # Bounded [0,1] signals can safely use direct mode as fallback
+            return {"mode": "direct"}
+        # Unbounded: use neutral value with wide sigma (uninformative)
+        return {"mu": self.neutral, "sigma": 1.0}
+
+
+SIGNAL_REGISTRY = {
+    "cus": SignalMetadata("cus", NormMode.DIRECT,  bounded=True,  neutral=0.5, higher_is_riskier=True),
+    "pos": SignalMetadata("pos", NormMode.ZSCORE,  bounded=True,  neutral=0.0, higher_is_riskier=True),
+    "dps": SignalMetadata("dps", NormMode.ZSCORE,  bounded=True,  neutral=0.5, higher_is_riskier=True),
+    "dola": SignalMetadata("dola", NormMode.ZSCORE, bounded=False, neutral=0.0, higher_is_riskier=True),
+    "cgd": SignalMetadata("cgd", NormMode.ZSCORE,  bounded=True,  neutral=0.5, higher_is_riskier=True),
+}
 
 
 @dataclass
@@ -18,18 +60,10 @@ class DSGConfig:
     All signal thresholds, calibration, and aggregation parameters are
     self-derived from input statistics. User-facing knobs:
     - layer_subset: architectural choice for which layers to hook
-    - conformal_alpha: miscoverage rate for conformal prediction (0.10 = 90% coverage)
-    - response_flag_threshold: deprecated fallback operating point
     """
 
     # Layer selection: "all", "last_third", "last_quarter", or List[int]
     layer_subset: Union[str, List[int]] = "all"
-
-    # Conformal miscoverage rate — the recommended path for binary decisions
-    conformal_alpha: float = 0.10
-
-    # Deprecated: kept for backward compat when conformal is not calibrated
-    response_flag_threshold: float = 0.5
 
     def __post_init__(self):
         if isinstance(self.layer_subset, str):
@@ -39,61 +73,22 @@ class DSGConfig:
                     f"layer_subset must be one of {valid} or List[int], "
                     f"got '{self.layer_subset}'"
                 )
-        if not 0 <= self.response_flag_threshold <= 1:
-            raise ValueError(
-                f"response_flag_threshold must be in [0, 1], "
-                f"got {self.response_flag_threshold}"
-            )
-        if not 0 < self.conformal_alpha < 1:
-            raise ValueError(
-                f"conformal_alpha must be in (0, 1), "
-                f"got {self.conformal_alpha}"
-            )
-
-
-@dataclass
-class PrefillCalibration:
-    """
-    Self-calibrated parameters derived from prefill pass. Not user-facing.
-
-    All values are computed from the actual input — no hardcoded priors.
-    Signal normalization strategy:
-    - CUS: direct mode (value IS the probability, no z-score)
-    - POS/DPS: prompt-anchored z-score with MAD-based robust sigma
-    """
-    dps_mu: float = 0.0
-    dps_sigma: float = 0.0
-    dps_sigma_floor: float = 0.0
-    pos_mu: float = 0.0
-    pos_sigma: float = 0.0
-    pos_sigma_floor: float = 0.0
-    # CUS uses direct mode (no z-score) — see prompt_anchored.py
-    cus_mode: str = "direct"
-    # Adaptive layer sets (computed from JSD variance via Otsu)
-    dps_layers: List[int] = field(default_factory=list)
-    # Number of tokens used for calibration
-    n_calibration_tokens: int = 0
 
 
 @dataclass
 class DSGTokenSignals:
     """Per-token signals for DSG detector."""
-    cus: float = 0.0  # Context Utilization Score (attention)
-    pos: float = 0.0  # Parametric Override Score (FFN)
-    dps: float = 0.0  # Dual-Subspace Projection Score (representation)
+    cus: float = 0.0   # Context Utilization Score (lookback ratio bimodality)
+    pos: float = 0.0   # Parametric Override Score (FFN)
+    dps: float = 0.0   # Dual-Subspace Projection Score (representation)
+    dola: float = 0.0  # DoLa layer-contrast score (factuality)
+    cgd: float = 0.0   # Context-Grounding Direction score (activation steering)
 
     def as_dict(self) -> dict:
-        return {"cus": self.cus, "pos": self.pos, "dps": self.dps}
-
-
-@dataclass
-class SpanRisk:
-    """Risk information for a contiguous span of tokens."""
-    start_token: int
-    end_token: int
-    text: str
-    risk_score: float
-    token_risks: List[float]
+        return {
+            "cus": self.cus, "pos": self.pos, "dps": self.dps,
+            "dola": self.dola, "cgd": self.cgd,
+        }
 
 
 @dataclass
@@ -108,7 +103,7 @@ class DetectionResult:
     token_risks: List[float]
 
     # Span-level results
-    risky_spans: List[SpanRisk]
+    risky_spans: List["RiskySpan"]
 
     # Response-level results
     response_risk: float
@@ -117,6 +112,3 @@ class DetectionResult:
     # Metadata
     num_tokens: int
     prompt_length: int
-
-    # Conformal calibration (None if not calibrated)
-    conformal_threshold: float = None

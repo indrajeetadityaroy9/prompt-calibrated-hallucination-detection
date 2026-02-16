@@ -1,16 +1,22 @@
 """
-Dual-Subspace Projection Score (DPS) for DSG hallucination detection.
+Dual-Subspace Projection Score (DPS) and Context-Grounding Direction (CGD)
+for DSG hallucination detection.
 
-Projects output hidden states onto two orthogonal reference subspaces:
+DPS projects output hidden states onto two orthogonal reference subspaces:
 - Context subspace V_ctx: SVD of context hidden states (input-dependent)
 - Reasoning subspace V_rsn: Bottom singular vectors of lm_head (model-dependent)
 
 DPS(t) = s_rsn / (s_ctx + s_rsn + eps), range [0,1], higher = riskier.
+Magnitude-gated: DPS blends toward 0.5 when ||h_centered|| is small.
+
+CGD measures whether generation moves toward or away from context representation:
+d_ctx = context_center - prompt_center
+CGD(t) = (1 - cos(h_gen - prompt_center, d_ctx)) / 2, range [0,1], higher = riskier.
 
 References:
     - "Mind the Gap: Spectral Analysis of Rank Collapse" (ICLR 2025)
-    - "Retrieval Head Mechanistically Explains Long-Context Factuality" (2024)
     - HARP: reasoning subspace via SVD of unembedding (arXiv:2509.11536)
+    - ContextFocus: Activation Steering Directions (arXiv:2601.04131)
 """
 
 import math
@@ -34,18 +40,11 @@ def _find_spectral_gap_rank(
 
     Primary (when n_samples, n_features provided):
         Estimate noise variance from bottom-half singular values, compute
-        MP upper edge λ+ = σ²(1 + √(d/n))², count SVs exceeding it.
+        MP upper edge lambda+ = sigma^2(1 + sqrt(d/n))^2, count SVs exceeding it.
 
     Fallback:
         k = argmax_i (S[i] / S[i+1]) + 1
-        Threshold: e ≈ 2.718 (1 nat in log-space — information-theoretic
-        justification). Falls back to len(S) if spectrum is flat.
-
-    Args:
-        S: Singular values (descending order).
-        remove_top: Skip top-N singular values before gap detection.
-        n_samples: Number of data points (rows of data matrix).
-        n_features: Dimensionality (columns of data matrix).
+        Threshold: e ~ 2.718 (1 nat in log-space).
 
     Reference: Marchenko & Pastur (1967); Bai & Silverstein (2010).
     """
@@ -58,7 +57,6 @@ def _find_spectral_gap_rank(
     # Primary: Marchenko-Pastur boundary
     if n_samples is not None and n_features is not None and n_samples > 1:
         gamma = n_features / n_samples
-        # Estimate noise variance from bottom half of spectrum
         noise_svs = S_trimmed[len(S_trimmed) // 2:]
         if len(noise_svs) > 0:
             sigma2 = (noise_svs ** 2).mean().item() / n_features
@@ -68,7 +66,7 @@ def _find_spectral_gap_rank(
                 if k >= 1:
                     return k + remove_top
 
-    # Fallback: ratio gap with e threshold (1 nat in log-space)
+    # Fallback: ratio gap with e threshold
     ratios = S_trimmed[:-1] / (S_trimmed[1:] + EPS)
     if ratios.max().item() < math.e:
         return len(S)
@@ -77,14 +75,10 @@ def _find_spectral_gap_rank(
 
 class DualSubspaceGrounding:
     """
-    Dual-Subspace Projection Score (DPS) for DSG.
+    DPS + CGD signals for DSG.
 
-    Measures where output representations sit relative to two subspaces:
-    - Context subspace V_ctx (SVD of context hidden states, spectral gap rank)
-    - Reasoning subspace V_rsn (bottom spectral gap of lm_head.weight SVD)
-
-    DPS(t) = s_rsn / (s_ctx + s_rsn + eps)
-    Range [0,1], higher = more reasoning-driven = riskier.
+    DPS: Measures where output representations sit relative to two subspaces.
+    CGD: Measures cosine alignment of generation with context direction.
     """
 
     def __init__(
@@ -94,31 +88,24 @@ class DualSubspaceGrounding:
         # One-time reasoning subspace SVD (cached per model load)
         self._reasoning_basis = self._compute_reasoning_basis(lm_head_weight)
 
-        # Per-input context subspace (set via set_context_basis)
-        # These are left uninitialized; callers must call set_context_basis before use.
-        self._context_basis: Tensor
-        self._context_center: Tensor
+        # Per-input state (set via set_context_basis / set_prompt_center)
+        self._context_basis: Tensor = None  # type: ignore[assignment]
+        self._context_center: Tensor = None  # type: ignore[assignment]
         self._context_rank: int = 0
+        self._prompt_center: Tensor = None  # type: ignore[assignment]
+        self._tau: float = None  # type: ignore[assignment]
 
     def _compute_reasoning_basis(self, lm_head_weight: Tensor) -> Tensor:
-        """
-        SVD of lm_head.weight, keep bottom singular vectors via spectral gap.
-
-        Scans reversed singular values for the largest relative gap from the bottom.
-        Cap at len(S) // 2 to avoid taking too many.
-        """
+        """SVD of lm_head.weight, keep bottom singular vectors via spectral gap."""
         with torch.no_grad():
             w = lm_head_weight.float()
             _, S, Vh = torch.linalg.svd(w, full_matrices=False)
 
-            # Bottom spectral gap: scan reversed singular values
-            # No outlier removal for bottom SVs of lm_head (no mean-direction artifact)
             S_rev = S.flip(0)
             k_r = _find_spectral_gap_rank(S_rev, remove_top=0)
             k_r = min(k_r, len(S) // 2)
             k_r = max(1, k_r)
 
-            # Bottom k_r singular vectors (least contribution to next-token prediction)
             V_rsn = Vh[-k_r:]  # [k_r, hidden_dim]
 
         return V_rsn.to(lm_head_weight.device)
@@ -131,7 +118,6 @@ class DualSubspaceGrounding:
 
         U, S, Vh = torch.linalg.svd(context_centered, full_matrices=False)
 
-        # Spectral gap rank with Marchenko-Pastur and rank floor
         n_context = context_hidden.shape[0]
         hidden_dim = context_hidden.shape[1]
         k = _find_spectral_gap_rank(
@@ -139,35 +125,48 @@ class DualSubspaceGrounding:
             n_samples=n_context,
             n_features=hidden_dim,
         )
-        k = max(k, max(3, int(math.ceil(math.sqrt(n_context)))))
+        k = max(k, int(math.ceil(math.sqrt(n_context))))
         k = min(k, len(S), n_context)
 
         self._context_basis = Vh[:k]  # [k, hidden_dim]
         self._context_center = context_mean
         self._context_rank = k
 
+    def set_prompt_center(self, prompt_hidden: Tensor) -> None:
+        """
+        Set prompt center from non-context prompt tokens.
+
+        Used by CGD signal to compute context-grounding direction.
+        """
+        self._prompt_center = prompt_hidden.float().mean(dim=0)
+
+    def set_magnitude_tau(self, prefill_hidden: Tensor, context_center: Tensor) -> None:
+        """
+        Derive tau from median ||h_centered|| of prefill hidden states.
+
+        Used by DPS magnitude gate to suppress unreliable DPS ratios
+        when the hidden state is close to the context centroid.
+        """
+        h_centered = prefill_hidden.float() - context_center.squeeze(0).float()
+        norms = torch.norm(h_centered, dim=-1)
+        self._tau = float(norms.median().item())
+
     def compute_dps(
         self,
         layer_hidden_states: Dict[int, Tensor],
         n_layers: int,
-        active_layers: list = None,
     ) -> float:
         """
-        Compute DPS for a single token.
+        Compute DPS for a single token, with magnitude gating.
 
         Args:
             layer_hidden_states: Hidden states per layer.
             n_layers: Total number of layers.
-            active_layers: If provided, use these layers (from JSD-variance
-                Otsu selection). Falls back to middle-third if None.
         """
-        if active_layers is not None:
-            target_layers = [i for i in layer_hidden_states if i in active_layers]
-        else:
-            # Fallback: middle third
-            start = n_layers // 3
-            end = 2 * n_layers // 3
-            target_layers = [i for i in layer_hidden_states if start <= i < end]
+        # Middle third of layers
+        start = n_layers // 3
+        end = 2 * n_layers // 3
+        target_layers = [i for i in layer_hidden_states if start <= i < end]
 
         if not target_layers:
             return 0.5
@@ -191,10 +190,55 @@ class DualSubspaceGrounding:
             proj_rsn = V_rsn.T @ (V_rsn @ h_centered)
             s_rsn = torch.norm(proj_rsn) / h_norm
 
-            dps_layer = s_rsn / (s_ctx + s_rsn + EPS)
-            dps_values.append(dps_layer.item())
+            dps_layer = (s_rsn / (s_ctx + s_rsn + EPS)).item()
+
+            # Magnitude gate: suppress DPS when ||h_centered|| is small
+            # (ratio is unreliable near the centroid)
+            if self._tau is not None and self._tau > EPS:
+                mag = torch.norm(h_centered).item()
+                gate = 1.0 - math.exp(-(mag ** 2) / (self._tau ** 2))
+                # Blend toward 0.5 (uninformative) when gate is low
+                dps_layer = 0.5 + (dps_layer - 0.5) * gate
+
+            dps_values.append(dps_layer)
 
         return float(np.mean(dps_values))
+
+    def compute_grounding_direction(self, h_gen: Tensor) -> float:
+        """
+        Context-Grounding Direction (CGD) score.
+
+        Cosine between (h_gen - prompt_center) and (context_center - prompt_center).
+        Measures whether generation moves toward context or away from it.
+
+        Returns (1 - cos_sim) / 2 in [0,1]. Higher = away from context = riskier.
+
+        Reference: ContextFocus (arXiv:2601.04131) — adapted for training-free
+        detection using prefill-derived directions.
+        """
+        if self._prompt_center is None or self._context_center is None:
+            return 0.5
+
+        with torch.no_grad():
+            prompt_center = self._prompt_center.float()
+            context_center = self._context_center.squeeze(0).float()
+
+            d_ctx = context_center - prompt_center
+            d_ctx_norm = torch.norm(d_ctx)
+            if d_ctx_norm < EPS:
+                return 0.5
+
+            h = h_gen.float().squeeze()
+            h_relative = h - prompt_center
+            h_norm = torch.norm(h_relative)
+            if h_norm < EPS:
+                return 0.5
+
+            cos_sim = (h_relative @ d_ctx) / (h_norm * d_ctx_norm)
+            cos_sim = cos_sim.clamp(-1.0, 1.0)
+
+        # Map: cos_sim = 1 (toward context) → 0 risk, cos_sim = -1 (away) → 1 risk
+        return float((1.0 - cos_sim.item()) / 2.0)
 
     @property
     def context_basis(self) -> Tensor:

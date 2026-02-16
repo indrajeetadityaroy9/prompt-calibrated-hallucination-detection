@@ -8,6 +8,8 @@ from typing import List, Tuple, Union
 from dataclasses import dataclass
 import numpy as np
 
+from ..numerics import EPS
+
 
 @dataclass
 class RiskySpan:
@@ -83,13 +85,15 @@ class SpanMerger:
         q3 = float(np.percentile(risks, 75))
         iqr = q3 - q1
 
-        if iqr < 0.01:
+        if iqr < EPS:
             # Near-uniform risks: use Q3 directly
             threshold = q3
         else:
-            # Tukey fence (mild: 0.5×IQR instead of standard 1.5×IQR)
+            # Mild Tukey fence (0.5×IQR, not standard 1.5×IQR):
+            # Standard 1.5× is designed for Gaussian outlier detection.
+            # We use 0.5× for higher sensitivity — hallucination spans
+            # are moderate elevations, not extreme outliers.
             threshold = q3 + 0.5 * iqr
-        threshold = min(threshold, 0.95)  # Safety cap
 
         return cls(
             threshold=threshold,

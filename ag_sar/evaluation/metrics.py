@@ -5,7 +5,7 @@ Computes AUROC, AUPRC, TPR@FPR, Calibration (ECE/Brier), and Correlations.
 """
 
 from typing import List, Dict, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import (
@@ -13,7 +13,6 @@ from sklearn.metrics import (
     average_precision_score,
     roc_curve,
     brier_score_loss,
-    precision_recall_curve,
 )
 
 
@@ -138,16 +137,6 @@ def compute_correlation(scores: List[float], labels: List[int]) -> Tuple[float, 
 
     return float(p_corr), float(s_corr)
 
-def find_optimal_threshold(scores: List[float], labels: List[int], metric: str = "f1") -> float:
-    """Find threshold that maximizes F1."""
-    precision, recall, thresholds = precision_recall_curve(labels, scores)
-
-    f1_scores = 2 * recall * precision / (recall + precision + 1e-10)
-    best_idx = np.argmax(f1_scores)
-    if best_idx < len(thresholds):
-        return float(thresholds[best_idx])
-    return 0.5
-
 def compute_metrics(
     scores: List[float],
     labels: List[int],
@@ -268,56 +257,6 @@ def compute_span_metrics(
 # =============================================================================
 # Risk-Coverage Metrics (Selective Prediction)
 # =============================================================================
-
-def compute_risk_coverage(
-    scores: List[float],
-    labels: List[int],
-    n_points: int = 100,
-) -> List[Dict[str, float]]:
-    """
-    Compute Risk-Coverage curve data.
-
-    Risk-Coverage evaluates selective prediction: as we increase the coverage
-    (fraction of samples we choose to predict on), how does the risk (error rate) change?
-
-    Lower scores = more confident = predict first.
-    Risk = error rate on predicted samples.
-
-    Args:
-        scores: Confidence/risk scores (lower = more confident for abstention)
-        labels: Ground truth labels (1 = positive/hallucination)
-        n_points: Number of coverage points to compute
-
-    Returns:
-        List of dicts with 'coverage' and 'risk' keys
-    """
-    scores = np.array(scores)
-    labels = np.array(labels)
-    n = len(scores)
-
-    # Sort by score ascending (lower score = more confident = predict first)
-    sorted_indices = np.argsort(scores)
-    sorted_labels = labels[sorted_indices]
-
-    # Compute cumulative error (assuming prediction=0, error when label=1)
-    # For hallucination detection: score predicts "is hallucination"
-    # Risk = fraction of hallucinations among covered samples
-    cumulative_positives = np.cumsum(sorted_labels)
-
-    results = []
-    coverages = np.linspace(0, 1, n_points + 1)[1:]  # Skip 0
-
-    for cov in coverages:
-        k = max(1, int(cov * n))
-        risk = cumulative_positives[k - 1] / k if k > 0 else 0.0
-        results.append({
-            "coverage": float(cov),
-            "risk": float(risk),
-            "n_samples": k,
-        })
-
-    return results
-
 
 def compute_aurc(scores: List[float], labels: List[int]) -> float:
     """

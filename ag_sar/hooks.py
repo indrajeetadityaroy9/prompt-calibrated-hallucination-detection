@@ -310,6 +310,7 @@ class PrefillStatisticsHook:
         """
         import torch.nn.functional as F
         import numpy as np
+        from .numerics import safe_jsd
 
         # Determine tail window
         tail_start = max(0, prompt_length - self.window_size)
@@ -317,15 +318,10 @@ class PrefillStatisticsHook:
         n_tokens = tail_end - tail_start
 
         if n_tokens < 5:
-            print(f"Very short prompt ({n_tokens} tokens), using all tokens")
             tail_start = 0
 
         # Extract tail hidden states [1, window_size, hidden_dim]
         tail_hidden = self._captured_hidden[:, tail_start:tail_end, :]
-
-        # Validate batch size
-        if tail_hidden.shape[0] != 1:
-            print(f"Expected batch size 1, got {tail_hidden.shape[0]}")
 
         # Get device and dtype from lm_head for proper placement
         lm_head_device = next(self.lm_head.parameters()).device
@@ -351,11 +347,12 @@ class PrefillStatisticsHook:
             post_logits_pos = tail_logits[0, pos].float()  # [vocab]
             pre_logits_pos = pre_logits[0, pos]             # [vocab]
 
-            # Compute adaptive top-k from distribution concentration
+            # Adaptive top-k via 95% cumulative probability mass
             post_probs_full = F.softmax(post_logits_pos, dim=-1)
             sorted_probs, sorted_indices = torch.sort(post_probs_full, descending=True)
             cumsum = torch.cumsum(sorted_probs, dim=0)
-            k = min(256, max(32, int((cumsum < 0.95).sum().item()) + 1))
+            k = int((cumsum < 0.95).sum().item()) + 1
+            k = max(2, k)
 
             # Get top-k candidates from post-MLP logits
             topk_indices = sorted_indices[:k]
@@ -364,12 +361,7 @@ class PrefillStatisticsHook:
             post_cand = F.softmax(post_logits_pos[topk_indices], dim=-1)
             pre_cand = F.softmax(pre_logits_pos[topk_indices], dim=-1)
 
-            # JSD
-            m = 0.5 * (pre_cand + post_cand)
-            kl_pre = (pre_cand * (torch.log(pre_cand + 1e-10) - torch.log(m + 1e-10))).sum()
-            kl_post = (post_cand * (torch.log(post_cand + 1e-10) - torch.log(m + 1e-10))).sum()
-            jsd_val = 0.5 * (kl_pre + kl_post)
-            jsd_values.append(jsd_val.item())
+            jsd_values.append(safe_jsd(pre_cand, post_cand))
 
         values = np.array(jsd_values)
         mu = {"pos": float(np.mean(values))}
@@ -387,56 +379,3 @@ class PrefillStatisticsHook:
         )
 
 
-class HookManager:
-    """
-    Manages installation and removal of all hooks.
-
-    Provides context manager interface for safe hook lifecycle.
-    """
-
-    def __init__(self, model, layer_indices: List[int]):
-        """
-        Initialize hook manager.
-
-        Args:
-            model: The LLaMA model
-            layer_indices: Indices of layers to hook
-        """
-        self.model = model
-        self.layer_indices = layer_indices
-        self.buffer = EphemeralHiddenBuffer()
-        self._hooks: List[LayerHooks] = []
-        self._installed = False
-
-    def install(self):
-        """Install hooks on all specified layers."""
-        for layer_idx in self.layer_indices:
-            layer = self.model.model.layers[layer_idx]
-            hook = LayerHooks(layer_idx, self.buffer)
-            hook.install(layer)
-            self._hooks.append(hook)
-
-        self._installed = True
-        print(f"Installed hooks on {len(self._hooks)} layers")
-
-    def remove(self):
-        """Remove all installed hooks."""
-        for hook in self._hooks:
-            hook.remove()
-        self._hooks.clear()
-        self._installed = False
-        print("Removed all hooks")
-
-    def clear_buffer(self):
-        """Clear the hidden state buffer."""
-        self.buffer.clear()
-
-    def __enter__(self):
-        """Context manager entry - install hooks."""
-        self.install()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit - remove hooks."""
-        self.remove()
-        return False

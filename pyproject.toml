@@ -1,12 +1,12 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "ag-sar"
 version = "0.1.0"
 description = "Aggregated Signal Architecture for Risk — zero-shot hallucination detection for LLaMA 3.1"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "torch>=2.5.1",
     "transformers>=4.57.0",

@@ -1,8 +1,15 @@
 """
-Context Utilization Score (CUS) — Attention-based hallucination signal for DSG.
+Context Utilization Score (CUS) — Lookback Ratio Bimodality signal for DSG.
 
-Identifies copying heads during prefill and tracks their context attention
-during generation. Higher CUS = less context utilization = riskier.
+Measures bimodality of per-head lookback ratios across all attention heads.
+Bimodal LR distribution (some heads attend to context, others don't) indicates
+grounded generation. Unimodal distribution indicates hallucination.
+
+CUS = 1 - Otsu coefficient of LR vector.
+Range [0,1], higher = more unimodal = riskier.
+
+Reference: Chuang et al. (EMNLP 2024) "Lookback Lens for Detecting and
+Mitigating Contextual Hallucinations"
 """
 
 import numpy as np
@@ -67,7 +74,7 @@ def identify_copying_heads(
     Returns:
         Tuple of:
         - List of (layer_idx, head_idx) tuples for copying heads
-        - Dict mapping (layer_idx, head_idx) -> affinity score (for weighting)
+        - Dict mapping (layer_idx, head_idx) -> affinity score
     """
     all_vals = []
     all_keys = []
@@ -87,17 +94,17 @@ def identify_copying_heads(
 
 class ContextUtilizationSignal:
     """
-    Compute CUS per generation token using identified copying heads.
+    Lookback Ratio Bimodality as context utilization signal.
 
-    CUS(t) = 1 - weighted_avg_{copying_heads} sum_{s < prompt_len} attn[l,h][t, s]
-    Range [0,1], higher = less context utilization = riskier.
+    For each generation token, computes the lookback ratio (fraction of
+    attention on context) for ALL attention heads, then measures bimodality
+    of the LR distribution via the Otsu coefficient.
 
-    Weighting: Uses copying affinity scores from head identification (data-driven)
-    instead of linear layer-depth heuristic. Heads with higher copying affinity
-    are better indicators of context utilization.
+    Bimodal = healthy: copying heads attend to context (high LR), non-copying
+    heads don't (low LR). Unimodal = hallucinating: all heads similar.
 
-    Reference: Wu et al. (2024) "Retrieval Head Mechanistically Explains
-    Long-Context Factuality"
+    CUS(t) = 1 - (Otsu inter-class variance / total variance)
+    Range [0,1], higher = more unimodal = riskier.
     """
 
     def __init__(
@@ -105,47 +112,58 @@ class ContextUtilizationSignal:
         copying_heads: List[Tuple[int, int]],
         prompt_len: int,
         n_layers: int,
-        head_affinities: Dict[Tuple[int, int], float] = None,
     ):
         self.copying_heads = copying_heads
         self.prompt_len = prompt_len
         self.n_layers = n_layers
-        self._head_affinities = head_affinities or {}
 
-    def compute_cus(self, attention_slices: Dict[int, Tensor]) -> float:
+    def compute_lookback_ratio_signal(
+        self, attention_slices: Dict[int, Tensor], prompt_len: int
+    ) -> float:
         """
-        Compute CUS for a single generation token.
+        Compute lookback ratio bimodality across ALL heads.
 
-        Uses affinity-based weighting: heads with higher copying affinity
-        (measured during identification) contribute more to the score.
-        This is data-driven — no arbitrary layer-position assumptions.
+        LR(l,h) = sum_{s<prompt_len} attn[l,h,s] for each head.
+        Signal = 1 - Otsu coefficient of LR vector.
 
         Args:
-            attention_slices: layer_idx -> [num_heads, kv_len] attention for last position
+            attention_slices: layer_idx -> [num_heads, kv_len] attention
+                for the last generated position
+            prompt_len: Number of prompt tokens (context attention target)
 
         Returns:
-            CUS value in [0, 1]
+            CUS value in [0, 1]. Higher = unimodal = riskier.
         """
-        if not self.copying_heads:
-            return 0.5  # Neutral if no copying heads
+        lr_values = []
+        for layer_idx, attn in attention_slices.items():
+            # attn shape: [num_heads, kv_len]
+            n_heads = attn.shape[0]
+            for h in range(n_heads):
+                context_mass = attn[h, :prompt_len].float().sum().item()
+                lr_values.append(context_mass)
 
-        weighted_masses = []
-        weights = []
-        for layer_idx, head_idx in self.copying_heads:
-            if layer_idx not in attention_slices:
-                continue
-            attn = attention_slices[layer_idx]  # [num_heads, kv_len]
-            if head_idx >= attn.shape[0]:
-                continue
-            # Sum attention to context positions
-            context_mass = attn[head_idx, :self.prompt_len].float().sum().item()
-            # Data-driven weight: copying affinity from identification phase
-            w = self._head_affinities.get((layer_idx, head_idx), 1.0)
-            weighted_masses.append(context_mass * w)
-            weights.append(w)
+        if len(lr_values) < 4:
+            return 0.5  # Not enough heads for bimodality measurement
 
-        if not weighted_masses:
-            return 0.5
+        lr = np.array(lr_values)
+        total_var = lr.var()
+        if total_var < 1e-10:
+            return 0.5  # All heads identical → uninformative
 
-        weighted_avg = sum(weighted_masses) / sum(weights)
-        return float(np.clip(1.0 - weighted_avg, 0.0, 1.0))
+        # Otsu threshold to split into two classes
+        threshold = _otsu_threshold(lr)
+        class1 = lr[lr <= threshold]
+        class2 = lr[lr > threshold]
+
+        if len(class1) == 0 or len(class2) == 0:
+            return 1.0  # Unimodal → no discrimination → risky
+
+        # Otsu coefficient = inter-class variance / total variance
+        w1, w2 = len(class1) / len(lr), len(class2) / len(lr)
+        mu1, mu2 = class1.mean(), class2.mean()
+        inter_var = w1 * w2 * (mu1 - mu2) ** 2
+        otsu_coeff = inter_var / (total_var + 1e-10)
+
+        # High bimodality (otsu_coeff→1) = healthy separation = low risk
+        # Low bimodality (otsu_coeff→0) = uniform attention = high risk
+        return float(np.clip(1.0 - otsu_coeff, 0.0, 1.0))

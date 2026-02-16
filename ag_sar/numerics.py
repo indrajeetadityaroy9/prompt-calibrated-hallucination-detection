@@ -2,7 +2,6 @@
 Numerical utilities for safe computation of softmax, JSD, and similarity.
 """
 
-from typing import Tuple
 import torch
 from torch import Tensor
 import math
@@ -171,20 +170,3 @@ def mad_sigma(values) -> float:
     return 1.4826 * float(mad)
 
 
-def max_cosine_similarity(query: Tensor, keys: Tensor, eps: float = 1e-8) -> float:
-    """
-    Compute maximum cosine similarity between query and multiple keys.
-
-    Args:
-        query: Query vector [dim]
-        keys: Key vectors [num_keys, dim]
-        eps: Small constant for numerical stability
-
-    Returns:
-        Maximum cosine similarity in [-1, 1]
-    """
-    query_norm = query / (torch.norm(query) + eps)
-    keys_norm = keys / (torch.norm(keys, dim=-1, keepdim=True) + eps)
-
-    similarities = torch.matmul(keys_norm, query_norm)
-    return similarities.max().item()

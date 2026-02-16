@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..hooks import LayerHiddenStates
-from ..numerics import safe_softmax, safe_jsd, EPS, otsu_threshold
+from ..numerics import safe_softmax, safe_log_softmax, safe_jsd, EPS, otsu_threshold
 
 
 class CandidateJSDSignal:
@@ -135,39 +135,6 @@ class CandidateJSDSignal:
             )
             results[layer_idx] = jsd
         return results
-
-    def compute_aggregated(
-        self,
-        layer_states: Dict[int, LayerHiddenStates],
-        candidate_set: Tensor,
-        aggregation: str = "sum",
-    ) -> float:
-        """
-        Compute aggregated JSD across layers.
-
-        Args:
-            layer_states: Dict mapping layer_idx to LayerHiddenStates
-            candidate_set: Indices of candidate tokens
-            aggregation: How to aggregate ("sum", "mean", "max")
-
-        Returns:
-            Aggregated JSD value
-        """
-        layer_jsds = self.compute_all_layers(layer_states, candidate_set)
-
-        if not layer_jsds:
-            return 0.0
-
-        values = list(layer_jsds.values())
-
-        if aggregation == "sum":
-            return sum(values)
-        elif aggregation == "mean":
-            return sum(values) / len(values)
-        elif aggregation == "max":
-            return max(values)
-        else:
-            raise ValueError(f"Unknown aggregation: {aggregation}")
 
     # --- POS (Parametric Override Score) methods for DSG ---
 
@@ -287,3 +254,80 @@ class CandidateJSDSignal:
                 overrides.append(override)
 
         return float(np.mean(overrides))
+
+    # --- DoLa Layer-Contrast Signal ---
+
+    def compute_dola_score(
+        self,
+        layer_states: Dict[int, LayerHiddenStates],
+        generated_token_id: int,
+        candidate_set: Tensor,
+    ) -> float:
+        """
+        DoLa layer-contrast score: log P_final(token) - log P_premature(token).
+
+        Premature layer = argmax JSD(q_final, q_j) over early layers (first half).
+        High DoLa = model added factual content in late layers.
+        Low DoLa = token was settled early (function word, copied token).
+
+        Uses candidate set for efficiency (same as POS).
+
+        Reference: Chuang et al. (ICLR 2024) "DoLa: Decoding by Contrasting
+        Layers Improves Factuality" — adapted from decoding to detection.
+        """
+        layer_indices = sorted(layer_states.keys())
+        if len(layer_indices) < 2:
+            return 0.0
+
+        final_layer = layer_indices[-1]
+        early_layers = layer_indices[:len(layer_indices) // 2]
+
+        if not early_layers:
+            return 0.0
+
+        lm_head_dtype = self.lm_head.weight.dtype
+        lm_head_device = self.lm_head.weight.device
+        w_subset = self.lm_head.weight[candidate_set]  # [K, Dim]
+
+        with torch.no_grad():
+            # Final layer distribution on candidate set
+            h_final = layer_states[final_layer].h_resid_mlp
+            if h_final.dim() == 1:
+                h_final = h_final.unsqueeze(0)
+            h_final = h_final.to(dtype=lm_head_dtype, device=lm_head_device)
+            h_final_norm = self.final_norm(h_final)
+            z_final = F.linear(h_final_norm, w_subset).float()
+            p_final = safe_softmax(z_final, dim=-1)
+            log_p_final = safe_log_softmax(z_final, dim=-1)
+
+            # Find premature layer with maximum JSD to final
+            max_jsd = 0.0
+            best_log_p = None
+            for j in early_layers:
+                h_j = layer_states[j].h_resid_mlp
+                if h_j.dim() == 1:
+                    h_j = h_j.unsqueeze(0)
+                h_j = h_j.to(dtype=lm_head_dtype, device=lm_head_device)
+                h_j_norm = self.final_norm(h_j)
+                z_j = F.linear(h_j_norm, w_subset).float()
+                p_j = safe_softmax(z_j, dim=-1)
+
+                jsd = safe_jsd(p_final, p_j)
+                if jsd > max_jsd:
+                    max_jsd = jsd
+                    best_log_p = safe_log_softmax(z_j, dim=-1)
+
+            if best_log_p is None:
+                return 0.0
+
+            # Find generated token in candidate set
+            token_mask = (candidate_set == generated_token_id)
+            if not token_mask.any():
+                return 0.0
+
+            idx = token_mask.nonzero(as_tuple=True)[0][0].item()
+
+            # DoLa contrast: log-prob difference for the actual generated token
+            dola = log_p_final.squeeze(0)[idx].item() - best_log_p.squeeze(0)[idx].item()
+
+        return float(dola)
