@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AG-SAR (Aggregated Signal Architecture for Risk) is a zero-shot, training-free hallucination detection system for retrieval-augmented LLMs. It intercepts transformer internals during generation to extract five mechanistically-grounded signals and fuses them via entropy-gated aggregation into per-token risk scores — no training data, calibration, or external models required.
+AG-SAR (Aggregated Signal Architecture for Risk) is a zero-shot, training-free hallucination detection system for retrieval-augmented LLMs. It intercepts transformer internals during generation to extract five mechanistically-grounded signals and fuses them via conflict-aware precision-weighted entropy-gated aggregation into per-token risk scores — no training data, calibration, or external models required.
 
 ## Build & Development Commands
 
@@ -12,87 +12,65 @@ AG-SAR (Aggregated Signal Architecture for Risk) is a zero-shot, training-free h
 # Install (editable mode)
 pip install -e .
 
-# Run all tests
-pytest
-
-# Run a single test
-pytest tests/test_full_pipeline.py
-
 # Run evaluation on QA datasets
-python scripts/run_dsg_evaluation.py --model meta-llama/Llama-3.1-8B-Instruct --dataset triviaqa --n-samples 100
-python scripts/run_dsg_evaluation.py --model meta-llama/Llama-3.1-8B-Instruct --all --n-samples 100
+python scripts/run_evaluation.py --model meta-llama/Llama-3.1-8B-Instruct --dataset triviaqa --n-samples 100
+python scripts/run_evaluation.py --model meta-llama/Llama-3.1-8B-Instruct --all --n-samples 100
 ```
 
-Requires Python >= 3.11, PyTorch >= 2.5.1, Transformers >= 4.57.0. Tests use SmolLM-135M-Instruct as a lightweight model.
+Requires Python >= 3.10, PyTorch >= 2.5.1, Transformers >= 4.57.0.
 
 ## Architecture
 
 ### Pipeline Flow
 
-The entry point is `DSGDetector` in `ag_sar/icml/dsg_detector.py`. It runs in two phases:
+Entry point: `Detector` in `ag_sar/detector.py`.
 
-1. **Prefill** (once per input): Identifies copying heads via Otsu thresholding on attention affinity, computes context subspace (SVD + Marchenko-Pastur rank), precomputes reasoning subspace from the unembedding matrix, derives prompt center (for CGD) from non-context prompt tokens, sets magnitude tau (for DPS gate) from prefill norms, and collects prompt statistics (mean/MAD-sigma) from a tail window of size sqrt(prompt_length). Hidden state hooks are installed once and persist across both phases.
+1. **Prefill** (once per input): `ModelAdapter` auto-detects architecture. Identifies copying heads (Otsu on attention affinity), computes context subspace (SVD + Marchenko-Pastur rank), reasoning subspace (bottom SVD of lm_head), prompt center (CGD), magnitude tau (DPS gate), informative DPS layers (variance-based Otsu), and prompt statistics (PIT reference values) from tail window sqrt(prompt_len). Hidden states in bfloat16.
 
-2. **Generation** (per token): Computes five signals, normalizes via prompt-anchored z-scoring (or direct mode for CUS), fuses with entropy-gated weighted mean for per-token risk (span detection), computes response-level risk via signal-first aggregation (mean of per-signal response probabilities), and merges risky spans via Tukey fences.
+2. **Generation** (per token): 5 signals → PIT or direct normalization → entropy-gated precision-weighted fusion → response risk → bimodality-adaptive percentile spans.
 
 ### Five Signals
 
-Each targets a distinct failure mode along the transformer's causal chain:
+- **CUS** — `signals/cus.py`: Affinity-weighted lookback ratio bimodality. CUS = 1 - weighted Otsu coefficient. Direct mode (no PIT).
+- **POS** — `signals/_jsd_base.py`: Candidate-set JSD + directional override decomposition. Otsu-selected active layers. PIT normalized.
+- **DPS** — `signals/dps.py`: Dual-subspace projection (s_rsn/(s_ctx+s_rsn)) with magnitude gating. Data-driven layer selection. PIT normalized.
+- **DoLa** — `signals/_jsd_base.py`: log P_premature - log P_final (argmax JSD over early layers). Negated at source so higher = riskier. PIT normalized.
+- **CGD** — `signals/dps.py`: (1 - cos(h_gen - prompt_center, ctx_center - prompt_center)) / 2. PIT normalized.
 
-- **CUS (Context Utilization Score)** — `ag_sar/signals/copying_heads.py`: Lookback ratio bimodality across all attention heads. Measures whether heads show healthy separation (some attend to context, others don't) vs uniform attention. CUS = 1 - Otsu coefficient. Range [0,1], higher = unimodal = riskier. Uses direct probability mapping (no z-score).
+### Hook System (`ag_sar/hooks/`)
 
-- **POS (Parametric Override Score)** — `ag_sar/signals/topk_jsd.py`: Candidate-set JSD between pre-FFN and post-FFN logit distributions, with directional override (measures if MLP shift avoids context subspace). Detects when MLP overrides what attention found. Uses z-score normalization.
+3-point capture per layer: h_resid_attn, h_mlp_in, h_resid_mlp.
+- `adapter.py`: ModelAdapter — auto-detects post-attention norm attribute
+- `buffer.py`: EphemeralHiddenBuffer — bfloat16, cleared per token
+- `layer_hooks.py`: LayerHooks — 3 hooks per layer
+- `prefill_hooks.py`: PrefillContextHook, PrefillStatisticsHook
 
-- **DPS (Dual-Subspace Projection Score)** — `ag_sar/signals/context_grounding.py`: Projects hidden states onto context subspace (from prefill SVD) and reasoning subspace (bottom singular vectors of unembedding matrix). DPS = s_rsn / (s_ctx + s_rsn), with magnitude gating that dampens toward 0.5 when ||h_centered|| is small. Middle third of layers. Uses z-score normalization.
+### Calibration (`ag_sar/calibration.py`)
 
-- **DoLa (Layer-Contrast Score)** — `ag_sar/signals/topk_jsd.py`: log P_final(token) - log P_premature(token), where premature layer = argmax JSD over early layers. High = model added factual content in late layers. Uses z-score normalization.
+`self_calibrate()`: prompt-anchored PIT reference values + variance per signal. `select_informative_dps_layers()`: variance-based Otsu. `adaptive_window()`: sqrt(prompt_len) clamped.
 
-- **CGD (Context-Grounding Direction)** — `ag_sar/signals/context_grounding.py`: Cosine between (h_gen - prompt_center) and (context_center - prompt_center). Measures whether generation moves toward or away from context. (1 - cos_sim)/2 in [0,1], higher = away from context = riskier. Uses z-score normalization.
+### Aggregation (`ag_sar/aggregation/`)
 
-### Hook System
+- `fusion.py`: w_i = (1/var_i) × (1-H_i)^κ. Token-level + response-level (signal-first). Data-driven conflict normalization.
+- `spans.py`: Bimodality-adaptive percentile threshold (Otsu split ↔ P95 interpolation). Expected-gap merging.
 
-`ag_sar/hooks.py` captures three residual stream points per layer per token: `h_resid_attn` (post-attention), `h_mlp_in` (post-norm, pre-MLP), `h_resid_mlp` (post-MLP). Uses an ephemeral buffer design — cleared after each token's signals are computed to prevent memory accumulation.
+### Data Structures (`ag_sar/config.py`)
 
-### Signal Registry (`ag_sar/config.py`)
+- `TokenSignals`: CUS/POS/DPS/DoLa/CGD per token
+- `DetectionResult`: generated_text, token_signals, token_risks, risky_spans, response_risk, is_flagged
 
-`SIGNAL_REGISTRY` is the single source of truth for each signal's properties:
+### Evaluation (`evaluation/`)
 
-- `NormMode`: `DIRECT` (value IS the probability, used by CUS) or `ZSCORE` (prompt-anchored z-score -> sigmoid, used by POS/DPS/DoLa/CGD)
-- `SignalMetadata`: name, norm_mode, bounded (whether signal is in [0,1]), neutral value, higher_is_riskier
-- `SignalMetadata.fallback_stats()`: Registry-derived fallback when calibration fails — bounded signals fall back to direct mode (no model-specific constants), unbounded signals fall back to wide sigma (uninformative)
-- `SignalMetadata.sigma_floor()`: Data-derived floor = 10% of observed sigma
-
-### Shared Calibration (`ag_sar/calibration.py`)
-
-- `get_layer_indices()`: Layer subset selection from config
-- `build_input()`: Tokenize context + question into model input
-- `adaptive_window()`: sqrt(prompt_len) clamped to [16, prompt_len//2]
-- `self_calibrate()`: Full self-calibration pipeline — computes prompt-anchored statistics for all active signals from prefill hidden states, with registry-derived fallbacks
-
-### Aggregation Pipeline (`ag_sar/aggregation/`)
-
-- `prompt_anchored.py`: Registry-aware signal normalization (direct vs z-score from `SIGNAL_REGISTRY`), entropy-gated fusion for per-token risk (w_i = (1-H_i)^2, uninformative signals at p=0.5 get weight 0), and signal-first response-level aggregation (mean of per-signal response probabilities)
-- `span_merger.py`: Groups contiguous high-risk tokens into spans via Tukey fence (Q3 + 0.5 * IQR)
-
-### Key Data Structures (`ag_sar/config.py`)
-
-- `DSGConfig`: Layer selection strategy (`"all"`, `"last_third"`, `"last_quarter"`, or `List[int]`)
-- `DSGTokenSignals`: Per-token CUS/POS/DPS/DoLa/CGD values
-- `DetectionResult`: Generated text, per-token signals and risks, risky spans, response-level risk, flagged status
-
-### Evaluation (`ag_sar/evaluation/`)
-
-- `metrics.py`: AUROC, AUPRC, TPR@FPR, ECE, Brier, AURC/E-AURC, Risk@Coverage, span precision/recall with IoU, bootstrap CI
-- Primary evaluation script: `scripts/run_dsg_evaluation.py`
+Separate from core. `metrics.py` (AUROC, AUPRC, TPR@FPR, ECE, AURC, bootstrap CI), `answer_matching.py` (F1), `input_builder.py` (tokenization), `loaders/` (TriviaQA, SQuAD). Script: `scripts/run_evaluation.py`.
 
 ### Numerics (`ag_sar/numerics.py`)
 
-Safe softmax (max-subtraction + clamping), JSD in bits bounded [0,1], Otsu thresholding (zero-parameter bimodal splitting), and MAD-based robust sigma estimation (1.4826 * median(|x - median(x)|)).
+safe_softmax (dtype-aware clamping), safe_log_softmax, safe_jsd (bits, [0,1]), otsu_threshold, entropy_adaptive_nucleus. Single named constant: EPS.
 
 ## Design Principles
 
-- **Zero-parameter**: Every threshold derived from input data, model architecture, or information-theoretic principles (Otsu, Marchenko-Pastur, order statistics). No learned weights or hyperparameters.
-- **Prompt-anchored calibration**: Signal statistics estimated from the prefill pass itself; generation values z-scored against these.
-- **Entropy-gated fusion**: Uninformative signals (p=0.5) get weight 0 via binary entropy gating with kappa=2 quadratic suppression.
-- **Robust statistics**: MAD replaces std-dev throughout; sigma floors prevent numerical issues.
-- **Candidate-set efficiency**: POS/DoLa use adaptive top-k (95% cumulative probability mass) + previous top-k + emitted token, not full vocabulary.
+- **Zero-parameter**: Otsu, Marchenko-Pastur, PIT, order statistics. No learned weights.
+- **Prompt-anchored**: PIT normalization against prefill-tail empirical CDF.
+- **Entropy-gated fusion**: p=0.5 → weight=0. Inverse-variance weighting (DerSimonian & Laird 1986).
+- **Architecture portability**: ModelAdapter auto-detects norm attributes.
+- **Candidate-set efficiency**: Entropy-adaptive nucleus mass (0.95–1.0 based on distribution entropy) + previous top-k + emitted token.

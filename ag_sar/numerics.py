@@ -11,26 +11,22 @@ import math
 EPS = 1e-10
 
 
+
+# Dtype-aware lower bounds for softmax clamping. Derived from
+# math.log(torch.finfo(dtype).tiny), rounded conservatively.
+# Below these values, exp() produces 0.0 — clamping is numerically lossless.
+_SOFTMAX_MIN = {torch.float32: -88.0, torch.float16: -15.0, torch.bfloat16: -88.0}
+
+
 def safe_softmax(logits: Tensor, dim: int = -1, eps: float = 1e-10) -> Tensor:
-    """
-    Numerically stable softmax that handles extreme values.
-
-    Subtracts max before exp to prevent overflow.
-
-    Args:
-        logits: Input logits tensor
-        dim: Dimension to apply softmax over
-        eps: Small constant added to prevent log(0)
-
-    Returns:
-        Probability distribution (sums to 1 along dim)
-    """
+    """Numerically stable softmax: max-subtraction + dtype-aware clamping."""
     # Subtract max for numerical stability
     logits_max = logits.max(dim=dim, keepdim=True).values
     logits_shifted = logits - logits_max
 
-    # Clamp to prevent exp overflow
-    logits_clamped = torch.clamp(logits_shifted, min=-100, max=0)
+    # Dtype-aware clamp to prevent exp overflow
+    min_val = _SOFTMAX_MIN.get(logits_shifted.dtype, -88.0)
+    logits_clamped = torch.clamp(logits_shifted, min=min_val, max=0)
 
     exp_logits = torch.exp(logits_clamped)
     probs = exp_logits / (exp_logits.sum(dim=dim, keepdim=True) + eps)
@@ -39,18 +35,7 @@ def safe_softmax(logits: Tensor, dim: int = -1, eps: float = 1e-10) -> Tensor:
 
 
 def safe_log_softmax(logits: Tensor, dim: int = -1) -> Tensor:
-    """
-    Numerically stable log-softmax.
-
-    Uses log-sum-exp trick for stability.
-
-    Args:
-        logits: Input logits tensor
-        dim: Dimension to apply log-softmax over
-
-    Returns:
-        Log probabilities
-    """
+    """Numerically stable log-softmax via log-sum-exp trick."""
     logits_max = logits.max(dim=dim, keepdim=True).values
     logits_shifted = logits - logits_max
 
@@ -62,22 +47,7 @@ def safe_log_softmax(logits: Tensor, dim: int = -1) -> Tensor:
 
 
 def safe_jsd(p: Tensor, q: Tensor, eps: float = 1e-10) -> float:
-    """
-    Compute Jensen-Shannon Divergence between two probability distributions.
-
-    JSD(P||Q) = 0.5 * KL(P||M) + 0.5 * KL(Q||M)
-    where M = 0.5 * (P + Q)
-
-    Returns JSD in BITS (divided by ln(2)), bounded [0, 1].
-
-    Args:
-        p: First probability distribution (1D tensor)
-        q: Second probability distribution (1D tensor)
-        eps: Small constant to prevent log(0)
-
-    Returns:
-        JSD in bits, bounded [0, 1]
-    """
+    """JSD(P||Q) in bits, bounded [0, 1]. M = 0.5*(P+Q)."""
     # Ensure valid probability distributions
     p = p + eps
     q = q + eps
@@ -101,23 +71,36 @@ def safe_jsd(p: Tensor, q: Tensor, eps: float = 1e-10) -> float:
     return jsd_bits
 
 
+# ── Adaptive Nucleus ─────────────────────────────────────────────
+
+# Base nucleus mass, embedded here (private). Callers use entropy_adaptive_nucleus().
+_BASE_NUCLEUS_MASS = 0.95
+
+
+def entropy_adaptive_nucleus(probs: Tensor) -> float:
+    """Adaptive nucleus mass: mass = base + (1 - base) * (1 - H/H_max).
+
+    Boundary conditions (verified):
+    - Uniform (H = ln(V)):  mass = 0.95 + 0.05 * 0 = 0.95
+    - Delta   (H = 0):      mass = 0.95 + 0.05 * 1 = 1.00
+    - Intermediate: linear interpolation between 0.95 and 1.0
+
+    For peaked distributions (low entropy), the candidate set grows slightly
+    (mass closer to 1.0), ensuring rare but important tokens are included.
+    For flat distributions, standard 0.95 applies.
+    """
+    V = probs.shape[-1]
+    if V <= 1:
+        return 1.0
+    ln_V = math.log(V)
+    p_clamped = probs.clamp(min=EPS)
+    H = -(p_clamped * p_clamped.log()).sum().item()
+    normalized_entropy = min(1.0, H / ln_V)
+    return _BASE_NUCLEUS_MASS + (1.0 - _BASE_NUCLEUS_MASS) * (1.0 - normalized_entropy)
+
+
 def otsu_threshold(values) -> float:
-    """
-    Optimal bimodal threshold maximizing between-class variance.
-
-    sigma_b^2(t) = w0 * w1 * (mu0 - mu1)^2
-
-    Zero free parameters. Optimal for bimodal distributions.
-
-    Reference: Otsu (1979) "A Threshold Selection Method from
-    Gray-Level Histograms"
-
-    Args:
-        values: 1D array-like of values to threshold
-
-    Returns:
-        Optimal threshold value
-    """
+    """Optimal bimodal threshold: argmax sigma_b^2(t) = w0*w1*(mu0-mu1)^2. Otsu (1979)."""
     import numpy as np
     values = np.asarray(values, dtype=float)
     if len(values) <= 1:
@@ -141,32 +124,5 @@ def otsu_threshold(values) -> float:
             best_threshold = 0.5 * (sorted_vals[i - 1] + sorted_vals[i])
 
     return float(best_threshold)
-
-
-def mad_sigma(values) -> float:
-    """
-    Robust standard deviation estimate via Median Absolute Deviation.
-
-    sigma_MAD = 1.4826 * median(|x_i - median(x)|)
-
-    The constant 1.4826 makes this a consistent estimator of sigma
-    for Gaussian distributions, while being robust to outliers.
-
-    Reference: Rousseeuw & Croux (1993) "Alternatives to the Median
-    Absolute Deviation"
-
-    Args:
-        values: 1D array-like of values
-
-    Returns:
-        Robust sigma estimate (0.0 if fewer than 2 values)
-    """
-    import numpy as np
-    values = np.asarray(values, dtype=float)
-    if len(values) < 2:
-        return 0.0
-    med = np.median(values)
-    mad = np.median(np.abs(values - med))
-    return 1.4826 * float(mad)
 
 
