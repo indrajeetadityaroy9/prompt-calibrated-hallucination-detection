@@ -56,6 +56,7 @@ def _find_spectral_gap_rank(
 
     # Fallback: Otsu on log-ratios (data-driven, consistent with codebase)
     ratios = S_trimmed[:-1] / (S_trimmed[1:] + EPS)
+    ratios = torch.clamp(ratios, min=EPS)  # Prevent log(0) → -inf
     if len(ratios) < 3:
         # Too few values for reliable Otsu; use argmax with conservative threshold
         if ratios.max().item() < 2.0:
@@ -90,7 +91,7 @@ class DualSubspaceGrounding:
         self._context_rank: int = 0
         self._prompt_center: Tensor = None  # type: ignore[assignment]
         self._tau: float = None  # type: ignore[assignment]
-        self._dps_layer_indices: List[int] = None  # type: ignore[assignment]
+        self._dps_layer_indices: List[int] = []
 
     def _compute_reasoning_basis(self, lm_head_weight: Tensor) -> Tensor:
         """SVD of lm_head.weight, keep bottom singular vectors via spectral gap."""
@@ -109,6 +110,8 @@ class DualSubspaceGrounding:
 
     def set_context_basis(self, context_hidden: Tensor) -> None:
         """SVD of centered context hidden states → V_ctx with Marchenko-Pastur rank."""
+        if context_hidden.shape[0] < 2:
+            raise ValueError("Context must contain at least 2 tokens for SVD.")
         context_hidden = context_hidden.float()
         context_mean = context_hidden.mean(dim=0, keepdim=True)
         context_centered = context_hidden - context_mean
@@ -137,7 +140,7 @@ class DualSubspaceGrounding:
         """tau = median(||h - mu_ctx||). DPS magnitude gate threshold."""
         h_centered = prefill_hidden.float() - context_center.squeeze(0).float()
         norms = torch.norm(h_centered, dim=-1)
-        self._tau = float(norms.median().item())
+        self._tau = max(float(norms.median().item()), EPS)
 
     def set_dps_layers(self, layer_indices: List[int]) -> None:
         """Set data-driven DPS layer indices (overrides middle-third default)."""
@@ -168,6 +171,8 @@ class DualSubspaceGrounding:
     ) -> float:
         """Mean DPS over data-selected layers."""
         target_layers = [i for i in self._dps_layer_indices if i in layer_hidden_states]
+        if not target_layers:
+            return 0.5  # Neutral when no layers available
         dps_values = [self.dps_from_hidden(layer_hidden_states[i]) for i in target_layers]
         return float(np.mean(dps_values))
 

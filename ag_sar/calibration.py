@@ -29,6 +29,7 @@ def self_calibrate(
     *,
     jsd_signal,
     dps_signal,
+    std_signal=None,
     lm_head,
     final_norm,
     num_layers: int,
@@ -45,6 +46,7 @@ def self_calibrate(
     - POS: From PrefillStatisticsHook JSD stats. MAD-based robust sigma.
     - DoLa: Compute from per-layer prefill tail via layer-contrast.
     - CGD: Compute from prefill tail hidden states.
+    - STD: Compute from per-layer prefill tail via trajectory dynamics.
 
     On the canonical path (layer_subset="all"), all signals produce valid statistics.
     """
@@ -135,6 +137,31 @@ def self_calibrate(
         "sorted_vals": np.sort(cgd_arr),
         "variance": float(np.var(cgd_arr)),
     }
+
+    # STD: compute from per-layer prefill tail via trajectory dynamics.
+    # Apply final_norm to h_resid_mlp to approximate h_mlp_in (scale-normalized).
+    # This removes residual norm growth artifacts that would corrupt trajectory metrics.
+    # The generation path uses actual h_mlp_in from 3-point hooks; calibration
+    # approximates via final_norm (same RMSNorm family, removes scale).
+    if std_signal is not None:
+        std_values = []
+        for t in range(n_tail):
+            h_dict = {}
+            for layer_idx in tail_per_layer:
+                h_raw = tail_per_layer[layer_idx][t]
+                if h_raw.dim() == 1:
+                    h_raw = h_raw.unsqueeze(0)
+                with torch.no_grad():
+                    h_normed = final_norm(h_raw.to(dtype=lm_head.weight.dtype)).squeeze(0)
+                h_dict[layer_idx] = h_normed
+            std_val = std_signal.compute_std(h_dict)
+            std_values.append(std_val)
+
+        std_arr = np.array(std_values)
+        stats["std"] = {
+            "sorted_vals": np.sort(std_arr),
+            "variance": float(np.var(std_arr)),
+        }
 
     return stats
 

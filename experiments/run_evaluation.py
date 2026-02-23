@@ -2,31 +2,35 @@
 """
 AG-SAR Evaluation on QA Benchmarks.
 
-Runs the full hallucination detection pipeline (5 signals, entropy-gated fusion)
+Runs the full hallucination detection pipeline (6 signals, entropy-gated fusion)
 on QA benchmarks:
   - TriviaQA (trivia with Wikipedia context)
   - SQuAD v2 (extractive QA)
 
 For each sample:
   1. Detector.detect() generates an answer with full signal computation
-     (CUS, POS, DPS, DoLa, CGD)
+     (CUS, POS, DPS, DoLa, CGD, STD)
   2. F1 matching against ground truth determines hallucination label
   3. Response risk is the detector's score
 
 Metrics: AUROC, AUPRC, TPR@5%FPR, AURC, E-AURC, Risk@90, ECE, Brier
 
+Supports YAML config files (experiments/configs/) with CLI overrides.
+
 Usage:
-    python scripts/run_evaluation.py --model meta-llama/Llama-3.1-8B-Instruct --dataset triviaqa --n-samples 200
-    python scripts/run_evaluation.py --model meta-llama/Llama-3.1-8B-Instruct --all --n-samples 100
+    python experiments/run_evaluation.py --model meta-llama/Llama-3.1-8B-Instruct --dataset triviaqa --n-samples 200
+    python experiments/run_evaluation.py --config experiments/configs/default.yaml --n-samples 100
+    python experiments/run_evaluation.py --model meta-llama/Llama-3.1-8B-Instruct --all --n-samples 100
 """
 
 import argparse
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 import numpy as np
 import torch
@@ -57,8 +61,20 @@ class SampleResult:
     mean_dps: float
     mean_dola: float
     mean_cgd: float
+    mean_std: float
     n_tokens: int
     is_flagged: bool
+
+
+def load_config(config_path: str) -> Dict:
+    """Load YAML experiment config."""
+    try:
+        import yaml
+    except ImportError:
+        print("Warning: PyYAML not installed, cannot load YAML configs. Install with: pip install pyyaml")
+        return {}
+    with open(config_path) as f:
+        return yaml.safe_load(f) or {}
 
 
 def run_evaluation(
@@ -67,6 +83,7 @@ def run_evaluation(
     samples: List[Dict],
     max_new_tokens: int = 64,
     f1_threshold: float = 0.3,
+    disabled_signals: Set[str] = None,
 ) -> Tuple[List[SampleResult], Dict]:
     """Run evaluation on a list of QA samples."""
     from ag_sar.detector import Detector
@@ -95,6 +112,7 @@ def run_evaluation(
         dps_vals = [s.dps for s in result.token_signals]
         dola_vals = [s.dola for s in result.token_signals]
         cgd_vals = [s.cgd for s in result.token_signals]
+        std_vals = [s.std for s in result.token_signals]
 
         results.append(SampleResult(
             question=sample["question"],
@@ -108,6 +126,7 @@ def run_evaluation(
             mean_dps=float(np.mean(dps_vals)),
             mean_dola=float(np.mean(dola_vals)),
             mean_cgd=float(np.mean(cgd_vals)),
+            mean_std=float(np.mean(std_vals)),
             n_tokens=result.num_tokens,
             is_flagged=result.is_flagged,
         ))
@@ -148,7 +167,7 @@ def run_evaluation(
 
     from sklearn.metrics import roc_auc_score
     signal_aurocs = {}
-    for sig_name in ["mean_cus", "mean_pos", "mean_dps", "mean_dola", "mean_cgd", "response_risk"]:
+    for sig_name in ["mean_cus", "mean_pos", "mean_dps", "mean_dola", "mean_cgd", "mean_std", "response_risk"]:
         vals = [getattr(r, sig_name) for r in results]
         signal_aurocs[sig_name] = float(roc_auc_score(labels, vals))
 
@@ -217,36 +236,60 @@ def print_results(summary: Dict):
 
 def main():
     parser = argparse.ArgumentParser(description="AG-SAR Evaluation")
-    parser.add_argument("--model", default="meta-llama/Llama-3.1-8B-Instruct")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to YAML config file (CLI args override config values)")
+    parser.add_argument("--model", default=None)
     parser.add_argument("--dataset", choices=list(DATASET_LOADERS.keys()), default=None)
     parser.add_argument("--all", action="store_true", help="Run all datasets")
-    parser.add_argument("--n-samples", type=int, default=200)
-    parser.add_argument("--max-new-tokens", type=int, default=64)
-    parser.add_argument("--f1-threshold", type=float, default=0.3,
+    parser.add_argument("--n-samples", type=int, default=None)
+    parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument("--f1-threshold", type=float, default=None,
                         help="F1 below this = hallucination")
-    parser.add_argument("--output", default="results/eval_{dataset}_{model_short}.json")
+    parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
-    if not args.all and not args.dataset:
-        parser.error("Must specify --dataset or --all")
+    # Load config file if provided
+    config = {}
+    if args.config:
+        config = load_config(args.config)
 
-    datasets_to_run = list(DATASET_LOADERS.keys()) if args.all else [args.dataset]
-    model_short = args.model.split("/")[-1]
+    # Resolve values: CLI > config > defaults
+    model_name = args.model or config.get("model", {}).get("name", "meta-llama/Llama-3.1-8B-Instruct")
+    n_samples = args.n_samples or config.get("evaluation", {}).get("n_samples", 200)
+    max_new_tokens = args.max_new_tokens or config.get("evaluation", {}).get("max_new_tokens", 64)
+    f1_threshold = args.f1_threshold if args.f1_threshold is not None else config.get("evaluation", {}).get("f1_threshold", 0.3)
+    output_template = args.output or config.get("output", {}).get("format", "results/eval_{dataset}_{model_short}.json")
+    output_dir = config.get("output", {}).get("dir", "results")
+
+    # Determine datasets
+    if args.all:
+        datasets_to_run = list(DATASET_LOADERS.keys())
+    elif args.dataset:
+        datasets_to_run = [args.dataset]
+    elif config.get("evaluation", {}).get("datasets"):
+        datasets_to_run = config["evaluation"]["datasets"]
+    else:
+        parser.error("Must specify --dataset, --all, or provide datasets in config")
+
+    model_short = model_name.split("/")[-1]
+    torch_dtype_str = config.get("model", {}).get("torch_dtype", "bfloat16")
+    torch_dtype = getattr(torch, torch_dtype_str, torch.bfloat16)
+    attn_impl = config.get("model", {}).get("attn_implementation", "eager")
 
     token = os.environ.get("HF_TOKEN")
-    print(f"Loading model: {args.model}")
+    print(f"Loading model: {model_name}")
     t0 = time.time()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, token=token)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=token)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        torch_dtype=torch.bfloat16,
+        model_name,
+        torch_dtype=torch_dtype,
         device_map="auto",
         token=token,
-        attn_implementation="eager",
+        attn_implementation=attn_impl,
     )
     model.eval()
     print(f"Model loaded in {time.time()-t0:.1f}s on {next(model.parameters()).device}")
@@ -258,7 +301,7 @@ def main():
         print(f"# DATASET: {dataset_name.upper()}")
         print(f"{'#'*65}")
 
-        samples = DATASET_LOADERS[dataset_name](n_samples=args.n_samples)
+        samples = DATASET_LOADERS[dataset_name](n_samples=n_samples)
         if not samples:
             print(f"No samples loaded for {dataset_name}")
             continue
@@ -266,17 +309,17 @@ def main():
         t0 = time.time()
         results, summary = run_evaluation(
             model, tokenizer, samples,
-            max_new_tokens=args.max_new_tokens,
-            f1_threshold=args.f1_threshold,
+            max_new_tokens=max_new_tokens,
+            f1_threshold=f1_threshold,
         )
         elapsed = time.time() - t0
         summary["elapsed_seconds"] = elapsed
-        summary["model"] = args.model
+        summary["model"] = model_name
         summary["samples_per_second"] = len(results) / elapsed if elapsed > 0 else 0
 
         print_results(summary)
 
-        out_path = args.output.format(dataset=dataset_name, model_short=model_short)
+        out_path = os.path.join(output_dir, output_template.format(dataset=dataset_name, model_short=model_short))
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
         output_data = {

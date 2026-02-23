@@ -1,0 +1,17 @@
+# AG-SAR default experiment configuration.
+# Override any setting via CLI: --model, --dataset, --n-samples, etc.
+
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  torch_dtype: "bfloat16"
+  attn_implementation: "eager"
+
+evaluation:
+  datasets: ["triviaqa", "squad"]
+  n_samples: 200
+  max_new_tokens: 64
+  f1_threshold: 0.3
+
+output:
+  dir: "results"
+  format: "eval_{dataset}_{model_short}.json"

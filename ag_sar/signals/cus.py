@@ -22,19 +22,23 @@ from ..numerics import otsu_threshold as _otsu_threshold, EPS
 
 def compute_layer_affinity(
     attn_weights: Tensor,
-    ctx_start: int,
-    ctx_end: int,
+    context_mask: Tensor,
 ) -> Tensor:
     """Per-head copying affinity: mean_{t in ctx} max_{s!=t in ctx} attn[h,t,s]."""
     if attn_weights.dim() == 4:
         attn_weights = attn_weights[0]  # [num_heads, seq, seq]
 
-    ctx_len = ctx_end - ctx_start
+    ctx_indices = context_mask.nonzero(as_tuple=True)[0]
+    ctx_len = len(ctx_indices)
     if ctx_len < 2:
         return torch.zeros(attn_weights.shape[0], device=attn_weights.device)
 
-    # Extract context-to-context attention [num_heads, ctx_len, ctx_len]
-    ctx_attn = attn_weights[:, ctx_start:ctx_end, ctx_start:ctx_end].float()
+    # Fast path for contiguous mask
+    if ctx_len == ctx_indices[-1] - ctx_indices[0] + 1:
+        start, end = ctx_indices[0].item(), ctx_indices[-1].item() + 1
+        ctx_attn = attn_weights[:, start:end, start:end].float()
+    else:
+        ctx_attn = attn_weights[:, ctx_indices][:, :, ctx_indices].float()
 
     # Mask diagonal (s != t)
     mask = ~torch.eye(ctx_len, device=ctx_attn.device, dtype=torch.bool)

@@ -12,18 +12,16 @@ class PrefillContextHook:
     """
     Temporary hook installed ONLY during prefill to capture context embeddings.
 
-    Captures the full sequence output at one layer, slicing context positions.
+    Captures the full sequence output at one layer, indexing by boolean context_mask.
     Preserves the "single decoding pass" claim by NOT running a second forward.
     """
 
     def __init__(
         self,
-        context_start: int,
-        context_end: int,
+        context_mask: Tensor,
         buffer_ref: List[Tensor],
     ):
-        self.context_start = context_start
-        self.context_end = context_end
+        self.context_mask = context_mask
         self.buffer_ref = buffer_ref
         self._handle = None
 
@@ -33,7 +31,7 @@ class PrefillContextHook:
 
     def _capture_context(self, module, args, output):
         """Capture context positions from this layer's output during prefill."""
-        context_hidden = output[0][0, self.context_start:self.context_end, :]
+        context_hidden = output[0][0, self.context_mask, :]
         self.buffer_ref.append(context_hidden.detach().bfloat16())
 
     def remove(self):

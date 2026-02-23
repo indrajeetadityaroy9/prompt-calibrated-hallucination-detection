@@ -24,6 +24,7 @@ class CandidateJSDSignal:
         self.final_norm = final_norm
         self._context_basis = None
         self._prompt_jsd_sigma = None
+        self._prompt_jsd_values = None
 
     def compute_layer_jsd(
         self,
@@ -226,8 +227,14 @@ class CandidateJSDSignal:
                     max_jsd = jsd
                     best_log_p = safe_log_softmax(z_j, dim=-1)
 
+            # Guard: if no early layers produced a valid contrast, return neutral
+            if best_log_p is None:
+                return 0.0
+
             # Find generated token in candidate set
             token_mask = (candidate_set == generated_token_id)
+            if not token_mask.any():
+                return 0.0  # Token not in candidate set (should not happen)
             idx = token_mask.nonzero(as_tuple=True)[0][0].item()
 
             # DoLa contrast: log-prob difference for the actual generated token.

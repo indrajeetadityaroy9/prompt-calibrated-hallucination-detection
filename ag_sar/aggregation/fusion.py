@@ -68,16 +68,19 @@ class PromptAnchoredAggregator:
             return 2.0  # All signals are direct-mode (CUS only) → max gating
         return 1.0 + float(np.median(decisiveness))
 
-    _SIGNALS = {"cus", "pos", "dps", "dola", "cgd"}
+    _SIGNALS = {"cus", "pos", "dps", "dola", "cgd", "std"}
 
     def compute_risk(
         self,
         prompt_stats: Dict[str, Dict[str, float]],
         response_signals: Dict[str, np.ndarray],
+        disabled_signals: Set[str] = None,
     ) -> AggregationResult:
         """Signal normalization → entropy-gated token fusion → precision-weighted response risk."""
         # Determine which signals we can process
         available_signals = set(prompt_stats.keys()) & set(response_signals.keys()) & self._SIGNALS
+        if disabled_signals:
+            available_signals -= disabled_signals
 
         # Get number of tokens
         first_signal = next(iter(available_signals))

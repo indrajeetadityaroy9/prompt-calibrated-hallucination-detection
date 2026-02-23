@@ -104,8 +104,6 @@ tmp/
 # AG-SAR internal documents (not part of submission)
 audit_report.md
 mechanism_review.md
-objectives.md
-papers/
 
 # AG-SAR specific data/artifacts
 *.json.gz

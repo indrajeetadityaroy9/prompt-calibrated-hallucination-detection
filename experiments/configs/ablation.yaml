@@ -1,0 +1,12 @@
+# Leave-one-out signal ablation study configuration.
+# Each signal is disabled in turn to measure its contribution (delta-AUROC).
+
+base_config: "default.yaml"
+
+ablation:
+  type: "leave_one_out"
+  signals: ["cus", "pos", "dps", "dola", "cgd", "std"]
+
+output:
+  dir: "results/ablation"
+  format: "ablation_{dataset}_{model_short}.json"

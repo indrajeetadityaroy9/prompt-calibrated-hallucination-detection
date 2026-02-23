@@ -20,6 +20,7 @@ class TokenSignals:
     dps: float = 0.0   # Dual-Subspace Projection Score (representation)
     dola: float = 0.0  # DoLa layer-contrast score (factuality)
     cgd: float = 0.0   # Context-Grounding Direction score (activation steering)
+    std: float = 0.0   # Semantic Trajectory Dynamics (layer trajectory consistency)
 
 
 @dataclass
