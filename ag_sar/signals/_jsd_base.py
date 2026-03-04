@@ -6,7 +6,6 @@ JSD-weighted directional override across all layers — no threshold selection n
 """
 
 from typing import Dict
-import numpy as np
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -24,6 +23,14 @@ class CandidateJSDSignal:
         self.final_norm = final_norm
         self._context_basis = None
 
+    def _prepare_pair(self, h_attn: Tensor, h_mlp: Tensor):
+        """Ensure 2D and cast to lm_head dtype on cuda."""
+        if h_attn.dim() == 1:
+            h_attn = h_attn.unsqueeze(0)
+            h_mlp = h_mlp.unsqueeze(0)
+        dtype = self.lm_head.weight.dtype
+        return h_attn.to(dtype=dtype, device="cuda"), h_mlp.to(dtype=dtype, device="cuda")
+
     def compute_layer_jsd(
         self,
         h_resid_attn: Tensor,
@@ -31,13 +38,7 @@ class CandidateJSDSignal:
         candidate_set: Tensor,
     ) -> float:
         """Candidate-set JSD for MLP-induced shift."""
-        if h_resid_attn.dim() == 1:
-            h_resid_attn = h_resid_attn.unsqueeze(0)
-            h_resid_mlp = h_resid_mlp.unsqueeze(0)
-
-        lm_head_dtype = self.lm_head.weight.dtype
-        h_resid_attn = h_resid_attn.to(dtype=lm_head_dtype, device="cuda")
-        h_resid_mlp = h_resid_mlp.to(dtype=lm_head_dtype, device="cuda")
+        h_resid_attn, h_resid_mlp = self._prepare_pair(h_resid_attn, h_resid_mlp)
 
         with torch.no_grad():
             h_pre_norm = self.final_norm(h_resid_attn)
@@ -62,13 +63,7 @@ class CandidateJSDSignal:
         h_resid_mlp: Tensor,
     ) -> float:
         """Override = max(0, 1 - ||proj_ctx(delta)||/||delta|| / sqrt(k/d))."""
-        if h_resid_attn.dim() == 1:
-            h_resid_attn = h_resid_attn.unsqueeze(0)
-            h_resid_mlp = h_resid_mlp.unsqueeze(0)
-
-        lm_head_dtype = self.lm_head.weight.dtype
-        h_resid_attn = h_resid_attn.to(dtype=lm_head_dtype, device="cuda")
-        h_resid_mlp = h_resid_mlp.to(dtype=lm_head_dtype, device="cuda")
+        h_resid_attn, h_resid_mlp = self._prepare_pair(h_resid_attn, h_resid_mlp)
 
         with torch.no_grad():
             h_pre = self.final_norm(h_resid_attn).float().squeeze(0)

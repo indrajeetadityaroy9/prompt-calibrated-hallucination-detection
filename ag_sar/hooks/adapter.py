@@ -1,7 +1,6 @@
 """Architecture adapter for accessing model-specific attributes."""
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 def _resolve_path(obj, dot_path: str):

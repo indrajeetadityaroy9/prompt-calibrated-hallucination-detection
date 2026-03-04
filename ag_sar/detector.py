@@ -1,10 +1,11 @@
 """
 AG-SAR Hallucination Detector.
 
-3-signal decomposition of hallucination risk:
+4-signal decomposition of hallucination risk:
 - CUS: Lookback ratio bimodality — is the model looking at context? (attention)
 - POS: Parametric override — is the FFN overriding what attention found? (transformation)
 - DPS: Dual-subspace projection — does the representation live in context or reasoning space? (geometry)
+- SPT: Spectral phase-transition — has the representation manifold collapsed toward noise? (spectral)
 
 Fusion: Entropy-gated weighted mean with prompt-anchored calibration.
 """
@@ -25,6 +26,7 @@ from .hooks import (
 from .signals.dps import DualSubspaceGrounding
 from .signals._jsd_base import CandidateJSDSignal
 from .signals.cus import compute_cus
+from .signals.spt import SpectralPhaseTransition
 from .aggregation.fusion import PromptAnchoredAggregator
 from .aggregation.spans import SpanMerger
 from .calibration import adaptive_window, self_calibrate
@@ -37,8 +39,8 @@ class Detector:
 
     Pipeline:
     1. __init__: Precompute reasoning subspace SVD (once per model load)
-    2. prefill: Compute context SVD, prompt stats, prompt center, magnitude tau
-    3. detect/score: CUS + POS + DPS -> Entropy-Gated fusion -> spans
+    2. prefill: Compute context SVD, prompt stats, prompt center, magnitude tau, SPT window
+    3. detect/score: CUS + POS + DPS + SPT -> Entropy-Gated fusion -> spans
     """
 
     def __init__(self, model: nn.Module, tokenizer):
@@ -57,7 +59,7 @@ class Detector:
         self.aggregator = PromptAnchoredAggregator()
         self.hidden_buffer = EphemeralHiddenBuffer()
 
-        self._prompt_stats = None
+        self.prompt_stats = None
         self._cus_prompt_len: int = 0
         self._hooks: List = []
 
@@ -149,6 +151,14 @@ class Detector:
         self.jsd_signal.set_context_basis(self.dps_signal.context_basis)
         ctx_hook.remove()
 
+        # SPT: window size from context spectral structure
+        ctx_hidden = ctx_buf[0].float()
+        ctx_centered = ctx_hidden - ctx_hidden.mean(dim=0, keepdim=True)
+        ctx_S = torch.linalg.svdvals(ctx_centered)
+        spt_window = effective_rank(ctx_S)
+        hidden_dim = ctx_hidden.shape[-1]
+        self.spt_signal = SpectralPhaseTransition(hidden_dim, spt_window)
+
         # Prompt center (non-context tokens)
         non_context_mask = ~context_mask[:prompt_len]
         non_context_hidden = prefill_hidden[0, non_context_mask, :]
@@ -164,14 +174,22 @@ class Detector:
         self._cus_prompt_len = prompt_len
 
         # Self-calibrate
-        self._prompt_stats = self_calibrate(
+        self.prompt_stats = self_calibrate(
             dps_signal=self.dps_signal,
             jsd_signal=self.jsd_signal,
+            spt_signal=self.spt_signal,
             lm_head=self.lm_head,
             final_norm=self.final_norm,
             prompt_len=prompt_len,
             tail_per_layer=tail_per_layer,
+            ctx_layer_idx=ctx_layer_idx,
         )
+
+        # Seed SPT generation window from tail
+        self.spt_signal.reset()
+        tail_states = tail_per_layer[ctx_layer_idx]["h_resid_mlp"]
+        for t in range(tail_states.shape[0]):
+            self.spt_signal.push(tail_states[t])
 
         return past_key_values, last_logits
 
@@ -181,7 +199,7 @@ class Detector:
         emitted_token_id: int,
         attentions: Tuple = None,
     ) -> TokenSignals:
-        """Compute all 3 signals for a single generation token."""
+        """Compute all 4 signals for a single generation token."""
         layer_states = self.hidden_buffer.get_states()
 
         # Candidate set via effective rank
@@ -206,8 +224,13 @@ class Detector:
             }
             cus = compute_cus(attn_slices, self._cus_prompt_len)
 
+        # SPT — spectral phase-transition (midpoint layer)
+        mid_layer = self.num_layers // 2
+        self.spt_signal.push(layer_states[mid_layer].h_resid_mlp)
+        spt = self.spt_signal.compute_spt()
+
         self.hidden_buffer.clear()
-        return TokenSignals(cus=cus, pos=pos, dps=dps)
+        return TokenSignals(cus=cus, pos=pos, dps=dps, spt=spt)
 
     def _cleanup(self):
         for h in self._hooks:
@@ -258,9 +281,10 @@ class Detector:
             "cus": np.array([s.cus for s in token_results]),
             "pos": np.array([s.pos for s in token_results]),
             "dps": np.array([s.dps for s in token_results]),
+            "spt": np.array([s.spt for s in token_results]),
         }
 
-        agg_result = self.aggregator.compute_risk(self._prompt_stats, response_signals)
+        agg_result = self.aggregator.compute_risk(self.prompt_stats, response_signals)
         token_risks = agg_result.token_risks.tolist()
         response_risk = agg_result.risk
 
@@ -395,18 +419,14 @@ class Detector:
         response_ids = full_tokens[prompt_len:]
 
         ctx_ids = self.tokenizer.encode(context_text, add_special_tokens=False)
-        ctx_start = _find_subsequence(prompt_tokens, ctx_ids)
+        ctx_start = next(
+            (i for i in range(len(prompt_tokens) - len(ctx_ids) + 1)
+             if prompt_tokens[i:i + len(ctx_ids)] == ctx_ids),
+            -1,
+        )
 
         context_mask = torch.zeros(prompt_len, dtype=torch.bool)
         context_mask[ctx_start:ctx_start + len(ctx_ids)] = True
 
         input_ids = torch.tensor([prompt_tokens], dtype=torch.long, device="cuda")
         return self._generation_loop(input_ids, context_mask, response_ids=response_ids)
-
-
-def _find_subsequence(haystack: List[int], needle: List[int]) -> int:
-    n, m = len(haystack), len(needle)
-    for i in range(n - m + 1):
-        if haystack[i:i + m] == needle:
-            return i
-    return -1

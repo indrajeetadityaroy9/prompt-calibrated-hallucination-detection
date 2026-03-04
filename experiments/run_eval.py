@@ -26,6 +26,7 @@ class SampleResult:
     mean_cus: float
     mean_pos: float
     mean_dps: float
+    mean_spt: float
     n_tokens: int
     is_flagged: bool
 
@@ -59,6 +60,7 @@ def _run_dataset(
             mean_cus=float(np.mean([s.cus for s in result.token_signals])),
             mean_pos=float(np.mean([s.pos for s in result.token_signals])),
             mean_dps=float(np.mean([s.dps for s in result.token_signals])),
+            mean_spt=float(np.mean([s.spt for s in result.token_signals])),
             n_tokens=result.num_tokens,
             is_flagged=result.is_flagged,
         ))
@@ -82,7 +84,7 @@ def _run_dataset(
     metrics = compute_metrics(scores, labels)
 
     signal_aurocs = {}
-    for sig_name in ["mean_cus", "mean_pos", "mean_dps", "response_risk"]:
+    for sig_name in ["mean_cus", "mean_pos", "mean_dps", "mean_spt", "response_risk"]:
         vals = [getattr(r, sig_name) for r in results]
         signal_aurocs[sig_name] = float(roc_auc_score(labels, vals))
 

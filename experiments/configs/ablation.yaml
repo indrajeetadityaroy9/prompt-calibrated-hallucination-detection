@@ -15,7 +15,7 @@ evaluation:
   seed: 42
 
 ablation:
-  signals: ["cus", "pos", "dps"]
+  signals: ["cus", "pos", "dps", "spt"]
 
 output:
   dir: "results/ablation"

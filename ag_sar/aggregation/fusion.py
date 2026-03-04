@@ -28,6 +28,12 @@ class PromptAnchoredAggregator:
     """Training-free: normalize -> entropy-gated token fusion -> precision-weighted response risk."""
 
     @staticmethod
+    def _binary_entropy(p):
+        """H(p) = -(p log2 p + (1-p) log2(1-p)). Works on scalars and arrays."""
+        p = np.clip(p, EPS, 1 - EPS)
+        return -(p * np.log2(p) + (1 - p) * np.log2(1 - p))
+
+    @staticmethod
     def _pit_normalize(sorted_vals: np.ndarray, response_vals: np.ndarray) -> np.ndarray:
         """PIT: p = (rank + 0.5)/(n + 1) via empirical CDF. Haldane-Anscombe correction."""
         n = len(sorted_vals)
@@ -36,10 +42,7 @@ class PromptAnchoredAggregator:
 
     @staticmethod
     def _adaptive_kappa(prompt_stats: Dict[str, Dict]) -> float:
-        """Derive entropy gating exponent from prompt-tail signal decisiveness.
-
-        kappa = 1 + median(per-signal decisiveness).
-        """
+        """kappa = 1 + median(per-signal decisiveness)."""
         decisiveness = []
         for sig, stats in prompt_stats.items():
             if "sorted_vals" not in stats:
@@ -47,14 +50,13 @@ class PromptAnchoredAggregator:
             sv = stats["sorted_vals"]
             if np.any(sv < 0.0) or np.any(sv > 1.0):
                 continue
-            sv = np.clip(sv, EPS, 1 - EPS)
-            H = -(sv * np.log2(sv) + (1 - sv) * np.log2(1 - sv))
+            H = PromptAnchoredAggregator._binary_entropy(sv)
             decisiveness.append(float(np.median(1.0 - H)))
         if not decisiveness:
             return 2.0
         return 1.0 + float(np.median(decisiveness))
 
-    _SIGNALS = {"cus", "pos", "dps"}
+    _SIGNALS = {"cus", "pos", "dps", "spt"}
 
     def compute_risk(
         self,
@@ -125,8 +127,7 @@ class PromptAnchoredAggregator:
         weight_sum = np.zeros(n_tokens)
 
         for sig, p in probabilities.items():
-            p_clipped = np.clip(p, EPS, 1 - EPS)
-            H = -(p_clipped * np.log2(p_clipped) + (1 - p_clipped) * np.log2(1 - p_clipped))
+            H = self._binary_entropy(p)
             w = precisions[sig] * (1.0 - H) ** kappa
             weighted_sum += w * p
             weight_sum += w
@@ -165,8 +166,7 @@ class PromptAnchoredAggregator:
         signal_weights = {}
         for sig in signal_probs:
             precision = raw_precisions[sig] / max_prec
-            p_clip = np.clip(signal_probs[sig], EPS, 1 - EPS)
-            H = -(p_clip * np.log2(p_clip) + (1 - p_clip) * np.log2(1 - p_clip))
+            H = self._binary_entropy(signal_probs[sig])
             entropy_weight = (1.0 - H) ** kappa
             signal_weights[sig] = float(precision * entropy_weight)
 

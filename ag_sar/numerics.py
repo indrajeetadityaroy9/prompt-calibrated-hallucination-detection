@@ -1,4 +1,4 @@
-"""Numerical utilities for JSD, Otsu thresholding, and effective rank."""
+"""Numerical utilities: JSD, effective rank, Otsu threshold."""
 
 import math
 import numpy as np

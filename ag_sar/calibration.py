@@ -2,7 +2,7 @@
 Self-calibrating prompt statistics for AG-SAR.
 
 Computes PIT reference distributions from prompt tail for DPS and POS signals.
-CUS uses direct mode with peer-derived variance.
+CUS and SPT use direct mode with peer-derived variance.
 """
 
 import math
@@ -10,9 +10,8 @@ from typing import Dict
 
 import numpy as np
 import torch
-from torch import Tensor
 
-from .numerics import effective_rank, EPS
+from .numerics import effective_rank
 from .hooks import LayerHiddenStates
 
 
@@ -25,10 +24,12 @@ def self_calibrate(
     *,
     dps_signal,
     jsd_signal,
+    spt_signal,
     lm_head,
     final_norm,
     prompt_len: int,
     tail_per_layer: Dict[int, Dict],
+    ctx_layer_idx: int,
 ) -> Dict[str, Dict]:
     """Self-calibrating prompt statistics for PIT normalization."""
     stats = {}
@@ -74,5 +75,12 @@ def self_calibrate(
     # CUS: direct mode, variance = median of peer variances
     peer_vars = [stats[s]["variance"] for s in stats]
     stats["cus"] = {"mode": "direct", "variance": float(np.median(peer_vars))}
+
+    # SPT: direct mode, peer-derived variance (MP edge is its own null model)
+    spt_signal.reset()
+    for t in range(n_tail):
+        spt_signal.push(tail_per_layer[ctx_layer_idx]["h_resid_mlp"][t])
+    all_peer_vars = [stats[s]["variance"] for s in stats if "variance" in stats[s]]
+    stats["spt"] = {"mode": "direct", "variance": float(np.median(all_peer_vars))}
 
     return stats

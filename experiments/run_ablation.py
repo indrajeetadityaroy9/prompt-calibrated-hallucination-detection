@@ -40,7 +40,7 @@ def _generate_baseline(
 
         cached.append({
             "response_signals": response_signals,
-            "prompt_stats": detector._prompt_stats,
+            "prompt_stats": detector.prompt_stats,
             "response_risk": result.response_risk,
             "f1": f1,
         })
