@@ -24,8 +24,7 @@ def _has_path(obj, dot_path: str) -> bool:
 _ARCH_PATTERNS = [
     # LLaMA / Mistral / Qwen / Gemma
     ("model.layers", "model.norm", "lm_head", "post_attention_layernorm"),
-    # Phi-3 / Phi-2
-    ("model.layers", "model.norm", "lm_head", "post_layernorm"),
+    # NOTE: Phi-3 has post_attention_layernorm and matches the LLaMA/Mistral pattern above.
     # Phi-1 / Phi-1.5 (MixFormer)
     ("model.layers", "model.final_layernorm", "lm_head", "post_attention_layernorm"),
     # GPT-2 / GPT-Neo

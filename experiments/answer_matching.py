@@ -9,8 +9,6 @@ import string
 from collections import Counter
 from typing import List
 
-F1_HALLUCINATION_THRESHOLD = 0.3
-
 
 def normalize_answer(s: str) -> str:
     """Lower text and remove punctuation, articles and extra whitespace."""
@@ -54,18 +52,9 @@ def extract_short_answer(text: str) -> str:
 
 
 def compute_adaptive_f1_threshold(f1_scores: List[float]) -> float:
-    """Otsu threshold on F1 scores to separate correct from hallucinated.
-
-    Falls back to F1_HALLUCINATION_THRESHOLD if too few samples or
-    if Otsu returns an implausible value outside [0.1, 0.7].
-    """
-    if len(f1_scores) < 20:
-        return F1_HALLUCINATION_THRESHOLD
+    """Otsu threshold on F1 scores to separate correct from hallucinated."""
     from ag_sar.numerics import otsu_threshold
-    threshold = otsu_threshold(f1_scores)
-    if threshold < 0.1 or threshold > 0.7:
-        return F1_HALLUCINATION_THRESHOLD
-    return threshold
+    return otsu_threshold(f1_scores)
 
 
 def max_f1_score(prediction: str, ground_truths: List[str]) -> float:

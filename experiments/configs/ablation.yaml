@@ -1,12 +1,21 @@
-# Leave-one-out signal ablation study configuration.
-# Each signal is disabled in turn to measure its contribution (delta-AUROC).
+run:
+  mode: ablation
 
-base_config: "default.yaml"
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  torch_dtype: "bfloat16"
+  attn_implementation: "eager"
+
+evaluation:
+  datasets: ["triviaqa"]
+  n_samples: 100
+  max_new_tokens: 64
+  f1_threshold: 0.3
+  max_context_chars: 2000
+  seed: 42
 
 ablation:
-  type: "leave_one_out"
-  signals: ["cus", "pos", "dps", "dola", "cgd", "std"]
+  signals: ["cus", "pos", "dps"]
 
 output:
   dir: "results/ablation"
-  format: "ablation_{dataset}_{model_short}.json"

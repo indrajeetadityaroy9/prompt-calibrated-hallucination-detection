@@ -1,15 +1,11 @@
-"""Signal computation: CUS, POS, DPS, DoLa, CGD, STD."""
+"""Signal computation: CUS, POS, DPS."""
 
-from .cus import ContextUtilizationSignal, compute_layer_affinity, identify_copying_heads
+from .cus import compute_cus
 from .dps import DualSubspaceGrounding
 from ._jsd_base import CandidateJSDSignal
-from .std import SemanticTrajectoryDynamics
 
 __all__ = [
-    "ContextUtilizationSignal",
-    "compute_layer_affinity",
-    "identify_copying_heads",
+    "compute_cus",
     "DualSubspaceGrounding",
     "CandidateJSDSignal",
-    "SemanticTrajectoryDynamics",
 ]

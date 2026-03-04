@@ -1,9 +1,9 @@
-"""TriviaQA dataset loader."""
+"""Dataset loaders for QA benchmarks."""
 
 from typing import Dict, List
 
 
-def load_triviaqa(n_samples: int = 100, max_context_chars: int = 2000) -> List[Dict]:
+def load_triviaqa(n_samples: int, max_context_chars: int) -> List[Dict]:
     from datasets import load_dataset
     print("Loading TriviaQA...")
     dataset = load_dataset("trivia_qa", "rc", split="validation", trust_remote_code=True)
@@ -31,4 +31,26 @@ def load_triviaqa(n_samples: int = 100, max_context_chars: int = 2000) -> List[D
         samples.append({"question": question, "answers": answers, "context": context, "dataset": "triviaqa"})
 
     print(f"Loaded {len(samples)} TriviaQA samples")
+    return samples
+
+
+def load_squad(n_samples: int) -> List[Dict]:
+    from datasets import load_dataset
+    print("Loading SQuAD v2...")
+    dataset = load_dataset("squad_v2", split="validation", trust_remote_code=True)
+
+    samples = []
+    for item in dataset:
+        if len(samples) >= n_samples:
+            break
+        if not item["answers"]["text"]:
+            continue
+        samples.append({
+            "question": item["question"],
+            "answers": list(set(item["answers"]["text"])),
+            "context": item["context"],
+            "dataset": "squad",
+        })
+
+    print(f"Loaded {len(samples)} SQuAD samples")
     return samples

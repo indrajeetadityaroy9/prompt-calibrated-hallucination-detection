@@ -16,12 +16,11 @@ dependencies = [
     "scikit-learn>=1.4.0",
     "datasets>=4.0.0",
     "tqdm>=4.65.0",
-]
-
-[project.optional-dependencies]
-dev = [
     "pyyaml>=6.0",
 ]
 
+[project.scripts]
+ag-sar-eval = "experiments.eval:main"
+
 [tool.setuptools.packages.find]
-include = ["ag_sar*", "evaluation*"]
+include = ["ag_sar*", "experiments*"]
