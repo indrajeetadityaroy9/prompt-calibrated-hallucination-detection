@@ -5,14 +5,15 @@ CUS = 1 - Otsu coefficient of lookback ratio vector.
 Range [0,1], higher = more unimodal = riskier.
 """
 
+from __future__ import annotations
+
 import numpy as np
 from torch import Tensor
-from typing import Dict
 
 from ..numerics import otsu_threshold, EPS
 
 
-def compute_cus(attention_slices: Dict[int, Tensor], prompt_len: int) -> float:
+def compute_cus(attention_slices: dict[int, Tensor], prompt_len: int) -> float:
     """CUS = 1 - otsu_coefficient(lookback_ratios).
 
     Collects per-head lookback ratios (context attention mass) across all layers,
@@ -31,4 +32,4 @@ def compute_cus(attention_slices: Dict[int, Tensor], prompt_len: int) -> float:
     w1 = float(mask_low.mean())
     w2 = float(mask_high.mean())
     inter_var = w1 * w2 * (float(lr[mask_low].mean()) - float(lr[mask_high].mean())) ** 2
-    return float(1.0 - inter_var / (total_var + EPS))
+    return float(np.clip(1.0 - inter_var / (total_var + EPS), 0.0, 1.0))

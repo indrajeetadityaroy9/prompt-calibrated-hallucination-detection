@@ -1,6 +1,9 @@
 """Architecture adapter for accessing model-specific attributes."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
+import torch.nn as nn
 
 
 def _resolve_path(obj, dot_path: str):
@@ -44,7 +47,7 @@ class ModelAdapter:
     lm_head_path: str = "lm_head"
 
     @classmethod
-    def from_model(cls, model) -> "ModelAdapter":
+    def from_model(cls, model: nn.Module) -> ModelAdapter:
         """Auto-detect architecture by probing known patterns."""
         for layers_path, norm_path, head_path, norm_attr in _ARCH_PATTERNS:
             if not _has_path(model, layers_path):
@@ -69,18 +72,18 @@ class ModelAdapter:
             f"Could not find matching layer/norm/head pattern."
         )
 
-    def get_layers(self, model) -> list:
+    def get_layers(self, model: nn.Module) -> list[nn.Module]:
         """Get the list of decoder layers."""
         return list(_resolve_path(model, self.layers_path))
 
-    def get_final_norm(self, model):
+    def get_final_norm(self, model: nn.Module) -> nn.Module:
         """Get the final layer norm module."""
         return _resolve_path(model, self.final_norm_path)
 
-    def get_lm_head(self, model):
+    def get_lm_head(self, model: nn.Module) -> nn.Module:
         """Get the language model head."""
         return _resolve_path(model, self.lm_head_path)
 
-    def get_post_attn_norm(self, layer):
+    def get_post_attn_norm(self, layer: nn.Module) -> nn.Module:
         """Get the post-attention norm module from a layer."""
         return getattr(layer, self.post_attn_norm_attr)

@@ -1,6 +1,8 @@
 """Ablation orchestration — leave-one-out signal ablation study."""
 
-from typing import Dict, List, Set
+from __future__ import annotations
+
+import copy
 
 import numpy as np
 from tqdm import tqdm
@@ -16,9 +18,9 @@ from .common import load_dataset, save_results
 
 def _generate_baseline(
     detector: Detector,
-    samples: List[Dict],
+    samples: list[dict],
     config: ExperimentConfig,
-) -> List[Dict]:
+) -> list[dict]:
     """Generate baseline once per sample. Cache signals and prompt stats for re-aggregation."""
     signals = config.ablation.signals
     cached = []
@@ -40,7 +42,7 @@ def _generate_baseline(
 
         cached.append({
             "response_signals": response_signals,
-            "prompt_stats": detector.prompt_stats,
+            "prompt_stats": copy.deepcopy(detector.prompt_stats),
             "response_risk": result.response_risk,
             "f1": f1,
         })
@@ -49,10 +51,10 @@ def _generate_baseline(
 
 
 def _evaluate_condition(
-    cached: List[Dict],
-    labels: List[int],
-    disabled_signals: Set[str],
-) -> Dict:
+    cached: list[dict],
+    labels: list[int],
+    disabled_signals: set[str],
+) -> dict:
     """Re-aggregate from cached signals with optional signal disabling."""
     aggregator = PromptAnchoredAggregator()
     scores = []
@@ -72,7 +74,7 @@ def _evaluate_condition(
     return {"auroc": metrics.auroc, "auprc": metrics.auprc}
 
 
-def run_ablation(model, tokenizer, config: ExperimentConfig) -> Dict:
+def run_ablation(model, tokenizer, config: ExperimentConfig) -> dict:
     """Run leave-one-out signal ablation study."""
     detector = Detector(model, tokenizer)
     model_short = config.model.name.split("/")[-1]

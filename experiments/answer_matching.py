@@ -4,10 +4,11 @@ Answer matching utilities for QA evaluation.
 Standard SQuAD-style F1 matching with answer extraction for verbose model responses.
 """
 
+from __future__ import annotations
+
 import re
 import string
 from collections import Counter
-from typing import List
 
 
 def normalize_answer(s: str) -> str:
@@ -51,13 +52,13 @@ def extract_short_answer(text: str) -> str:
     return text
 
 
-def compute_adaptive_f1_threshold(f1_scores: List[float]) -> float:
+def compute_adaptive_f1_threshold(f1_scores: list[float]) -> float:
     """Otsu threshold on F1 scores to separate correct from hallucinated."""
     from ag_sar.numerics import otsu_threshold
     return otsu_threshold(f1_scores)
 
 
-def max_f1_score(prediction: str, ground_truths: List[str]) -> float:
+def max_f1_score(prediction: str, ground_truths: list[str]) -> float:
     if not prediction.strip() or not ground_truths:
         return 0.0
     short = extract_short_answer(prediction)

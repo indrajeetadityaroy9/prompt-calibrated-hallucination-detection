@@ -1,6 +1,7 @@
 """2-point per-layer hook installation for hidden state capture."""
 
-from typing import List
+from __future__ import annotations
+
 from torch import Tensor
 
 from .adapter import ModelAdapter
@@ -19,8 +20,8 @@ class LayerHooks:
         self.layer_idx = layer_idx
         self.buffer = buffer
         self.adapter = adapter
-        self._h_resid_attn: Tensor = None  # type: ignore[assignment]
-        self._handles: List = []
+        self._h_resid_attn: Tensor | None = None
+        self._handles: list = []
 
     def install(self, layer):
         post_attn_norm = self.adapter.get_post_attn_norm(layer)

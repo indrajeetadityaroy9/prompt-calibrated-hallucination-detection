@@ -1,7 +1,8 @@
 """Ephemeral hidden state buffer for per-token signal computation."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Dict
 from torch import Tensor
 
 
@@ -21,7 +22,7 @@ class EphemeralHiddenBuffer:
     """
 
     def __init__(self):
-        self.layer_states: Dict[int, LayerHiddenStates] = {}
+        self.layer_states: dict[int, LayerHiddenStates] = {}
 
     def store(self, layer_idx: int, h_resid_attn: Tensor, h_resid_mlp: Tensor):
         """Store bfloat16 hidden states (last position only, detached)."""
@@ -30,7 +31,7 @@ class EphemeralHiddenBuffer:
             h_resid_mlp=h_resid_mlp[:, -1, :].detach().bfloat16(),
         )
 
-    def get_states(self) -> Dict[int, LayerHiddenStates]:
+    def get_states(self) -> dict[int, LayerHiddenStates]:
         return self.layer_states
 
     def clear(self):

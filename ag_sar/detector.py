@@ -1,16 +1,18 @@
 """
 AG-SAR Hallucination Detector.
 
-4-signal decomposition of hallucination risk:
+5-signal decomposition of hallucination risk:
 - CUS: Lookback ratio bimodality — is the model looking at context? (attention)
 - POS: Parametric override — is the FFN overriding what attention found? (transformation)
 - DPS: Dual-subspace projection — does the representation live in context or reasoning space? (geometry)
-- SPT: Spectral phase-transition — has the representation manifold collapsed toward noise? (spectral)
+- SPT: Tracy-Widom calibrated spectral phase-transition — has the manifold collapsed toward noise? (spectral)
+- Spectral Gap: λ₂/(λ₁+λ₂) — is the signal structure directionally coherent? (spectral)
 
-Fusion: Entropy-gated weighted mean with prompt-anchored calibration.
+Fusion: Cross-signal precision-coupled entropy-gated weighted mean.
 """
 
-from typing import List, Tuple
+from __future__ import annotations
+
 import numpy as np
 import torch
 from torch import Tensor
@@ -43,9 +45,10 @@ class Detector:
     3. detect/score: CUS + POS + DPS + SPT -> Entropy-Gated fusion -> spans
     """
 
-    def __init__(self, model: nn.Module, tokenizer):
+    def __init__(self, model: nn.Module, tokenizer) -> None:
         self.model = model
         self.tokenizer = tokenizer
+        self.device = next(model.parameters()).device
 
         self.adapter = ModelAdapter.from_model(model)
         self.lm_head = self.adapter.get_lm_head(model)
@@ -59,18 +62,18 @@ class Detector:
         self.aggregator = PromptAnchoredAggregator()
         self.hidden_buffer = EphemeralHiddenBuffer()
 
-        self.prompt_stats = None
+        self.prompt_stats: dict | None = None
         self._cus_prompt_len: int = 0
-        self._hooks: List = []
+        self._hooks: list[LayerHooks] = []
 
     def _prefill(
         self,
         input_ids: Tensor,
         context_mask: Tensor,
         prompt_len: int,
-    ) -> Tuple:
+    ) -> tuple:
         """Run prefill: compute context SVD, prompt center, magnitude tau, prompt stats."""
-        context_mask = context_mask.to("cuda")
+        context_mask = context_mask.to(self.device)
         window_size = adaptive_window(prompt_len)
 
         self.model.config._attn_implementation = "eager"
@@ -197,16 +200,16 @@ class Detector:
         self,
         logits: Tensor,
         emitted_token_id: int,
-        attentions: Tuple = None,
+        attentions: tuple | None = None,
     ) -> TokenSignals:
-        """Compute all 4 signals for a single generation token."""
+        """Compute all 5 signals for a single generation token."""
         layer_states = self.hidden_buffer.get_states()
 
         # Candidate set via effective rank
         probs = torch.softmax(logits.float(), dim=-1)
         k = max(2, effective_rank(probs))
         cand = torch.topk(logits, min(k, len(logits))).indices
-        cand = torch.unique(torch.cat([cand, torch.tensor([emitted_token_id], device="cuda")]))
+        cand = torch.unique(torch.cat([cand, torch.tensor([emitted_token_id], device=logits.device)]))
 
         # DPS — all-layer mean
         dps_hidden = {idx: states.h_resid_mlp for idx, states in layer_states.items()}
@@ -224,13 +227,13 @@ class Detector:
             }
             cus = compute_cus(attn_slices, self._cus_prompt_len)
 
-        # SPT — spectral phase-transition (midpoint layer)
+        # SPT — spectral phase-transition (midpoint layer) + spectral gap
         mid_layer = self.num_layers // 2
         self.spt_signal.push(layer_states[mid_layer].h_resid_mlp)
-        spt = self.spt_signal.compute_spt()
+        spt, spectral_gap = self.spt_signal.compute_spt()
 
         self.hidden_buffer.clear()
-        return TokenSignals(cus=cus, pos=pos, dps=dps, spt=spt)
+        return TokenSignals(cus=cus, pos=pos, dps=dps, spt=spt, spectral_gap=spectral_gap)
 
     def _cleanup(self):
         for h in self._hooks:
@@ -242,7 +245,7 @@ class Detector:
         context: str,
         question: str,
         template: str,
-    ) -> Tuple[Tensor, Tensor, int]:
+    ) -> tuple[Tensor, Tensor, int]:
         """Build input_ids + context_mask from template segments."""
         parts = template.split("{context}")
         prefix_str = parts[0]
@@ -264,12 +267,12 @@ class Detector:
         context_mask = torch.zeros(len(tokens), dtype=torch.bool)
         context_mask[ctx_start:ctx_end] = True
 
-        input_ids = torch.tensor([tokens], dtype=torch.long, device="cuda")
+        input_ids = torch.tensor([tokens], dtype=torch.long, device=self.device)
         return input_ids, context_mask, len(tokens)
 
     def _aggregate_results(
         self,
-        token_results: List[TokenSignals],
+        token_results: list[TokenSignals],
         all_ids: Tensor,
         prompt_len: int,
     ) -> DetectionResult:
@@ -282,6 +285,7 @@ class Detector:
             "pos": np.array([s.pos for s in token_results]),
             "dps": np.array([s.dps for s in token_results]),
             "spt": np.array([s.spt for s in token_results]),
+            "spectral_gap": np.array([s.spectral_gap for s in token_results]),
         }
 
         agg_result = self.aggregator.compute_risk(self.prompt_stats, response_signals)
@@ -307,7 +311,7 @@ class Detector:
         self,
         input_ids: Tensor,
         context_mask: Tensor,
-        response_ids: List[int] = None,
+        response_ids: list[int] | None = None,
         max_new_tokens: int = 256,
     ) -> DetectionResult:
         """Shared generation loop. Teacher-forced if response_ids provided, greedy otherwise."""
@@ -317,7 +321,7 @@ class Detector:
         past_key_values, next_logits = self._prefill(input_ids, context_mask, prompt_len)
 
         all_ids = input_ids.clone()
-        token_results: List[TokenSignals] = []
+        token_results: list[TokenSignals] = []
 
         # Determine total steps
         n_steps = len(response_ids) if response_ids is not None else max_new_tokens
@@ -333,13 +337,13 @@ class Detector:
         )
         token_results.append(signals)
 
-        next_token = torch.tensor([[token_id]], device="cuda")
+        next_token = torch.tensor([[token_id]], device=self.device)
         all_ids = torch.cat([all_ids, next_token], dim=1)
         attention_mask = torch.cat([
             attention_mask,
-            torch.ones((1, 1), device="cuda", dtype=attention_mask.dtype)
+            torch.ones((1, 1), device=self.device, dtype=attention_mask.dtype)
         ], dim=1)
-        cache_position = torch.tensor([prompt_len - 1], device="cuda")
+        cache_position = torch.tensor([prompt_len], device=self.device)
 
         # Remaining tokens
         for step in range(1, n_steps):
@@ -368,11 +372,11 @@ class Detector:
             )
             token_results.append(signals)
 
-            next_token = torch.tensor([[token_id]], device="cuda")
+            next_token = torch.tensor([[token_id]], device=self.device)
             all_ids = torch.cat([all_ids, next_token], dim=1)
             attention_mask = torch.cat([
                 attention_mask,
-                torch.ones((1, 1), device="cuda", dtype=attention_mask.dtype)
+                torch.ones((1, 1), device=self.device, dtype=attention_mask.dtype)
             ], dim=1)
 
             if response_ids is None and token_id == self.tokenizer.eos_token_id:
@@ -424,9 +428,14 @@ class Detector:
              if prompt_tokens[i:i + len(ctx_ids)] == ctx_ids),
             -1,
         )
+        if ctx_start < 0:
+            raise ValueError(
+                "Context text not found in prompt tokens. "
+                "Ensure context_text appears verbatim in the prompt."
+            )
 
         context_mask = torch.zeros(prompt_len, dtype=torch.bool)
         context_mask[ctx_start:ctx_start + len(ctx_ids)] = True
 
-        input_ids = torch.tensor([prompt_tokens], dtype=torch.long, device="cuda")
+        input_ids = torch.tensor([prompt_tokens], dtype=torch.long, device=self.device)
         return self._generation_loop(input_ids, context_mask, response_ids=response_ids)

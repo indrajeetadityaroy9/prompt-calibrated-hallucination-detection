@@ -1,13 +1,14 @@
 """Prefill-phase hook for context capture."""
 
-from typing import List
+from __future__ import annotations
+
 from torch import Tensor
 
 
 class PrefillContextHook:
     """Temporary hook installed during prefill to capture context embeddings."""
 
-    def __init__(self, context_mask: Tensor, buffer_ref: List[Tensor]):
+    def __init__(self, context_mask: Tensor, buffer_ref: list[Tensor]):
         self.context_mask = context_mask
         self.buffer_ref = buffer_ref
         self._handle = None

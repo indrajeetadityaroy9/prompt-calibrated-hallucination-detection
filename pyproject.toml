@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ag-sar"
 version = "0.1.0"
-description = "Aggregated Signal Architecture for Risk — zero-shot, training-free hallucination detection via 4 mechanistic signals"
+description = "Aggregated Signal Architecture for Risk — zero-shot, training-free hallucination detection via 5 mechanistic signals"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.5.1",

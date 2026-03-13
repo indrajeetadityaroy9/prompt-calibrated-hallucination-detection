@@ -1,12 +1,12 @@
 """Dataset loaders for QA benchmarks."""
 
-from typing import Dict, List
+from __future__ import annotations
 
 
-def load_triviaqa(n_samples: int, max_context_chars: int) -> List[Dict]:
+def load_triviaqa(n_samples: int, max_context_chars: int) -> list[dict]:
     from datasets import load_dataset
     print("Loading TriviaQA...")
-    dataset = load_dataset("trivia_qa", "rc", split="validation", trust_remote_code=True)
+    dataset = load_dataset("trivia_qa", "rc", split="validation")
 
     samples = []
     for item in dataset:
@@ -34,10 +34,10 @@ def load_triviaqa(n_samples: int, max_context_chars: int) -> List[Dict]:
     return samples
 
 
-def load_squad(n_samples: int) -> List[Dict]:
+def load_squad(n_samples: int) -> list[dict]:
     from datasets import load_dataset
     print("Loading SQuAD v2...")
-    dataset = load_dataset("squad_v2", split="validation", trust_remote_code=True)
+    dataset = load_dataset("squad_v2", split="validation")
 
     samples = []
     for item in dataset:

@@ -27,6 +27,8 @@ def main():
     elif config.run.mode == "ablation":
         from .run_ablation import run_ablation
         run_ablation(model, tokenizer, config)
+    else:
+        raise ValueError(f"Unknown run mode: {config.run.mode!r}. Expected 'evaluation' or 'ablation'.")
 
 
 if __name__ == "__main__":

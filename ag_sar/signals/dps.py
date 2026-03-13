@@ -5,8 +5,9 @@ DPS(t) = s_rsn / (s_ctx + s_rsn + eps), range [0,1], higher = riskier.
 Magnitude-gated: DPS blends toward 0.5 when ||h_centered|| is small.
 """
 
+from __future__ import annotations
+
 import math
-from typing import Dict
 
 import torch
 import numpy as np
@@ -32,7 +33,7 @@ class DualSubspaceGrounding:
             _, S, Vh = torch.linalg.svd(w, full_matrices=False)
             k_r = effective_rank(S.flip(0))
             V_rsn = Vh[-k_r:]
-        return V_rsn.to("cuda")
+        return V_rsn.to(lm_head_weight.device)
 
     def set_context_basis(self, context_hidden: Tensor) -> None:
         """SVD of centered context hidden states -> V_ctx with effective rank."""
@@ -69,10 +70,12 @@ class DualSubspaceGrounding:
         s_rsn = torch.norm(V_rsn @ h_centered).item() / h_norm
 
         dps_raw = s_rsn / (s_ctx + s_rsn + EPS)
+        if self._tau < EPS:
+            return 0.5
         gate = 1.0 - math.exp(-(mag ** 2) / (self._tau ** 2))
         return 0.5 + (dps_raw - 0.5) * gate
 
-    def compute_dps(self, layer_hidden_states: Dict[int, Tensor]) -> float:
+    def compute_dps(self, layer_hidden_states: dict[int, Tensor]) -> float:
         """Mean DPS over all layers."""
         dps_values = [self.dps_from_hidden(h) for h in layer_hidden_states.values()]
         return float(np.mean(dps_values))

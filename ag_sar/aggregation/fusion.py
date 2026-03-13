@@ -1,15 +1,18 @@
 """
-Prompt-anchored signal aggregation.
+Prompt-anchored signal aggregation with cross-signal precision fusion.
 
-Direct (CUS) or PIT (POS/DPS) normalization.
-Fusion: w_i = (1/var_i) * (1-H_i)^kappa — DerSimonian & Laird (1986) + adaptive entropy gating.
+Direct (CUS/SPT/spectral_gap) or PIT (POS/DPS) normalization.
+Fusion: w_i = Σ_j Ω_ij * (1-H_j)^kappa — generalized DerSimonian & Laird (1986)
+with full cross-signal precision matrix Ω = Σ⁻¹ (Hartung, Knapp & Sinha, 2008).
 kappa = 1 + median(prompt decisiveness) in [1, 2].
-Token-level: entropy-gated weighted mean. Response-level: signal-first aggregation.
+Token-level: entropy-gated precision-coupled weighted mean.
+Response-level: signal-first aggregation with cross-signal precision.
 """
+
+from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, Tuple, Set
 
 from ..numerics import EPS
 
@@ -19,13 +22,17 @@ class AggregationResult:
     """Result of prompt-anchored aggregation."""
     risk: float
     token_risks: np.ndarray
-    z_scores: Dict[str, np.ndarray]
-    probabilities: Dict[str, np.ndarray]
-    signal_response_probs: Dict[str, float] = field(default_factory=dict)
+    raw_signals: dict[str, np.ndarray]
+    probabilities: dict[str, np.ndarray]
+    signal_response_probs: dict[str, float] = field(default_factory=dict)
+
+
+# Canonical signal ordering for precision matrix indexing
+_SIGNAL_ORDER = ["cus", "pos", "dps", "spt", "spectral_gap"]
 
 
 class PromptAnchoredAggregator:
-    """Training-free: normalize -> entropy-gated token fusion -> precision-weighted response risk."""
+    """Training-free: normalize -> cross-signal precision fusion -> response risk."""
 
     @staticmethod
     def _binary_entropy(p):
@@ -41,10 +48,12 @@ class PromptAnchoredAggregator:
         return (ranks + 0.5) / (n + 1)
 
     @staticmethod
-    def _adaptive_kappa(prompt_stats: Dict[str, Dict]) -> float:
+    def _adaptive_kappa(prompt_stats: dict[str, dict]) -> float:
         """kappa = 1 + median(per-signal decisiveness)."""
         decisiveness = []
         for sig, stats in prompt_stats.items():
+            if sig.startswith("_"):
+                continue
             if "sorted_vals" not in stats:
                 continue
             sv = stats["sorted_vals"]
@@ -56,23 +65,24 @@ class PromptAnchoredAggregator:
             return 2.0
         return 1.0 + float(np.median(decisiveness))
 
-    _SIGNALS = {"cus", "pos", "dps", "spt"}
+    _SIGNALS = {"cus", "pos", "dps", "spt", "spectral_gap"}
 
     def compute_risk(
         self,
-        prompt_stats: Dict[str, Dict[str, float]],
-        response_signals: Dict[str, np.ndarray],
-        disabled_signals: Set[str] = None,
+        prompt_stats: dict[str, dict[str, float]],
+        response_signals: dict[str, np.ndarray],
+        disabled_signals: set[str] | None = None,
     ) -> AggregationResult:
-        """Signal normalization -> entropy-gated token fusion -> precision-weighted response risk."""
+        """Signal normalization -> cross-signal precision fusion -> response risk."""
         available_signals = set(prompt_stats.keys()) & set(response_signals.keys()) & self._SIGNALS
         if disabled_signals:
             available_signals -= disabled_signals
 
-        first_signal = next(iter(available_signals))
-        n_tokens = len(response_signals[first_signal])
+        # Use deterministic ordering from _SIGNAL_ORDER
+        ordered_available = [s for s in _SIGNAL_ORDER if s in available_signals]
+        n_tokens = len(response_signals[ordered_available[0]])
 
-        z_scores = {}
+        raw_signals = {}
         probabilities = {}
 
         for sig in available_signals:
@@ -81,69 +91,125 @@ class PromptAnchoredAggregator:
 
             if stats.get("mode") == "direct":
                 probabilities[sig] = response_vals
-                z_scores[sig] = response_vals
+                raw_signals[sig] = response_vals
             else:
                 sorted_vals = stats["sorted_vals"]
                 p = self._pit_normalize(sorted_vals, response_vals)
-                z_scores[sig] = response_vals
+                raw_signals[sig] = response_vals
                 probabilities[sig] = p
 
         kappa = self._adaptive_kappa(prompt_stats)
 
+        # Retrieve cross-signal precision matrix (or fall back to diagonal)
+        precision_matrix = prompt_stats.get("_cross_signal_precision", None)
+
         token_risks = self._entropy_gated_fusion(
-            probabilities, prompt_stats, n_tokens, kappa,
+            probabilities, prompt_stats, n_tokens, kappa, precision_matrix,
         )
 
         risk, signal_probs = self._response_level_risk(
-            response_signals, prompt_stats, available_signals, kappa,
+            response_signals, prompt_stats, available_signals, kappa, precision_matrix,
         )
 
         return AggregationResult(
             risk=risk,
             token_risks=token_risks,
-            z_scores=z_scores,
+            raw_signals=raw_signals,
             probabilities=probabilities,
             signal_response_probs=signal_probs,
         )
 
+    @staticmethod
+    def _compute_cross_signal_weights(
+        entropy_mods: dict[str, np.ndarray],
+        precision_matrix: np.ndarray,
+        available_signals: set[str],
+    ) -> dict[str, np.ndarray]:
+        """Compute precision-coupled entropy-modulated weights.
+
+        w_i = Σ_j Ω_ij × e_j  where e_j = (1 - H_j)^κ
+
+        When Ω is diagonal, this reduces to w_i = (1/var_i) × e_i (current AG-SAR).
+        Off-diagonal terms couple weights: if signals i and j are correlated (Ω_ij < 0),
+        high informativeness of j reduces i's effective weight (avoids double-counting).
+        """
+        # Map available signals to their indices in _SIGNAL_ORDER
+        sig_indices = {}
+        for sig in available_signals:
+            if sig in _SIGNAL_ORDER:
+                sig_indices[sig] = _SIGNAL_ORDER.index(sig)
+
+        # Build entropy modulation vector (shape matches available signals)
+        ordered_sigs = [s for s in _SIGNAL_ORDER if s in sig_indices]
+
+        # Compute w_i = Σ_j Ω_ij × e_j for available signals
+        weights = {}
+        for sig_i in ordered_sigs:
+            idx_i = sig_indices[sig_i]
+            w = np.zeros_like(entropy_mods[sig_i])
+            for sig_j in ordered_sigs:
+                idx_j = sig_indices[sig_j]
+                w = w + precision_matrix[idx_i, idx_j] * entropy_mods[sig_j]
+            # Clamp to non-negative (negative weights from strong negative correlation
+            # indicate redundancy — set to zero rather than subtracting)
+            weights[sig_i] = np.maximum(w, 0.0)
+
+        return weights
+
     def _entropy_gated_fusion(
         self,
-        probabilities: Dict[str, np.ndarray],
-        prompt_stats: Dict[str, Dict[str, float]],
+        probabilities: dict[str, np.ndarray],
+        prompt_stats: dict[str, dict[str, float]],
         n_tokens: int,
         kappa: float,
+        precision_matrix: np.ndarray = None,
     ) -> np.ndarray:
-        """w_i(t) = (1/var_i) * (1-H_i)^kappa."""
-        precisions = {}
-        for sig in probabilities:
-            variance = prompt_stats[sig]["variance"]
-            precisions[sig] = 1.0 / max(variance, EPS)
+        """Cross-signal precision-coupled entropy-gated fusion.
 
-        max_prec = max(precisions.values())
-        for sig in precisions:
-            precisions[sig] /= max_prec
+        w_i(t) = Σ_j Ω_ij × (1-H_j(t))^κ
+        risk(t) = Σ_i max(w_i, 0) × p_i(t) / Σ_i max(w_i, 0)
+        """
+        # Compute per-signal entropy modulation
+        entropy_mods = {}
+        for sig, p in probabilities.items():
+            H = self._binary_entropy(p)
+            entropy_mods[sig] = (1.0 - H) ** kappa
+
+        if precision_matrix is not None:
+            weights = self._compute_cross_signal_weights(
+                entropy_mods, precision_matrix, set(probabilities.keys()),
+            )
+        else:
+            # Fallback to diagonal (original AG-SAR behavior)
+            precisions = {}
+            for sig in probabilities:
+                variance = prompt_stats[sig]["variance"]
+                precisions[sig] = 1.0 / max(variance, EPS)
+            max_prec = max(precisions.values())
+            weights = {}
+            for sig in probabilities:
+                weights[sig] = (precisions[sig] / max_prec) * entropy_mods[sig]
 
         weighted_sum = np.zeros(n_tokens)
         weight_sum = np.zeros(n_tokens)
 
         for sig, p in probabilities.items():
-            H = self._binary_entropy(p)
-            w = precisions[sig] * (1.0 - H) ** kappa
+            w = weights.get(sig, entropy_mods[sig])
             weighted_sum += w * p
             weight_sum += w
 
-        return weighted_sum / weight_sum
+        return weighted_sum / np.maximum(weight_sum, EPS)
 
     def _response_level_risk(
         self,
-        response_signals: Dict[str, np.ndarray],
-        prompt_stats: Dict[str, Dict[str, float]],
-        available_signals: Set[str],
+        response_signals: dict[str, np.ndarray],
+        prompt_stats: dict[str, dict[str, float]],
+        available_signals: set[str],
         kappa: float,
-    ) -> Tuple[float, Dict[str, float]]:
-        """Signal-first: per-signal mean -> PIT normalize -> precision * entropy weighted fusion."""
+        precision_matrix: np.ndarray = None,
+    ) -> tuple[float, dict[str, float]]:
+        """Signal-first: per-signal mean -> normalize -> cross-signal precision fusion."""
         signal_probs = {}
-        raw_precisions = {}
 
         for sig in available_signals:
             raw_vals = np.asarray(response_signals[sig])
@@ -158,18 +224,34 @@ class PromptAnchoredAggregator:
                 p = float(p_arr[0])
 
             signal_probs[sig] = p
-            variance = prompt_stats[sig]["variance"]
-            raw_precisions[sig] = 1.0 / max(variance, EPS)
 
-        max_prec = max(raw_precisions.values())
+        # Compute entropy modulation for each signal (scalar)
+        entropy_mods = {}
+        for sig, p in signal_probs.items():
+            H = float(self._binary_entropy(p))
+            entropy_mods[sig] = (1.0 - H) ** kappa
 
-        signal_weights = {}
-        for sig in signal_probs:
-            precision = raw_precisions[sig] / max_prec
-            H = self._binary_entropy(signal_probs[sig])
-            entropy_weight = (1.0 - H) ** kappa
-            signal_weights[sig] = float(precision * entropy_weight)
+        if precision_matrix is not None:
+            # Cross-signal precision weights (scalar per signal)
+            entropy_mods_arr = {sig: np.array([e]) for sig, e in entropy_mods.items()}
+            weights_arr = self._compute_cross_signal_weights(
+                entropy_mods_arr, precision_matrix, available_signals,
+            )
+            signal_weights = {sig: float(w[0]) for sig, w in weights_arr.items()}
+        else:
+            # Fallback to diagonal
+            raw_precisions = {}
+            for sig in available_signals:
+                variance = prompt_stats[sig]["variance"]
+                raw_precisions[sig] = 1.0 / max(variance, EPS)
+            max_prec = max(raw_precisions.values())
+            signal_weights = {}
+            for sig in signal_probs:
+                precision = raw_precisions[sig] / max_prec
+                signal_weights[sig] = float(precision * entropy_mods[sig])
 
         total_weight = sum(signal_weights.values())
+        if total_weight < EPS:
+            total_weight = 1.0
         risk = sum(signal_probs[s] * signal_weights[s] for s in signal_probs) / total_weight
         return float(risk), signal_probs

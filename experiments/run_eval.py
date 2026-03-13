@@ -1,7 +1,8 @@
 """Evaluation orchestration — runs AG-SAR detection on QA benchmarks."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Tuple
 
 import numpy as np
 from sklearn.metrics import roc_auc_score
@@ -19,7 +20,7 @@ from .common import load_dataset, save_results
 class SampleResult:
     question: str
     generated_answer: str
-    ground_truths: List[str]
+    ground_truths: list[str]
     f1: float
     is_hallucination: bool
     response_risk: float
@@ -27,17 +28,18 @@ class SampleResult:
     mean_pos: float
     mean_dps: float
     mean_spt: float
+    mean_spectral_gap: float
     n_tokens: int
     is_flagged: bool
 
 
 def _run_dataset(
     detector: Detector,
-    samples: List[Dict],
+    samples: list[dict],
     config: ExperimentConfig,
-) -> Tuple[List[SampleResult], Dict]:
+) -> tuple[list[SampleResult], dict]:
     """Evaluate a single dataset."""
-    results: List[SampleResult] = []
+    results: list[SampleResult] = []
     print_interval = max(1, config.evaluation.n_samples // 4)
 
     for i, sample in enumerate(tqdm(samples, desc=f"Eval ({samples[0]['dataset']})")):
@@ -50,6 +52,15 @@ def _run_dataset(
         generated = result.generated_text.strip()
         f1 = max_f1_score(generated, sample["answers"])
 
+        if result.token_signals:
+            mean_cus = float(np.mean([s.cus for s in result.token_signals]))
+            mean_pos = float(np.mean([s.pos for s in result.token_signals]))
+            mean_dps = float(np.mean([s.dps for s in result.token_signals]))
+            mean_spt = float(np.mean([s.spt for s in result.token_signals]))
+            mean_gap = float(np.mean([s.spectral_gap for s in result.token_signals]))
+        else:
+            mean_cus = mean_pos = mean_dps = mean_spt = mean_gap = 0.5
+
         results.append(SampleResult(
             question=sample["question"],
             generated_answer=generated,
@@ -57,10 +68,11 @@ def _run_dataset(
             f1=f1,
             is_hallucination=f1 < config.evaluation.f1_threshold,
             response_risk=result.response_risk,
-            mean_cus=float(np.mean([s.cus for s in result.token_signals])),
-            mean_pos=float(np.mean([s.pos for s in result.token_signals])),
-            mean_dps=float(np.mean([s.dps for s in result.token_signals])),
-            mean_spt=float(np.mean([s.spt for s in result.token_signals])),
+            mean_cus=mean_cus,
+            mean_pos=mean_pos,
+            mean_dps=mean_dps,
+            mean_spt=mean_spt,
+            mean_spectral_gap=mean_gap,
             n_tokens=result.num_tokens,
             is_flagged=result.is_flagged,
         ))
@@ -73,7 +85,7 @@ def _run_dataset(
     # Adaptive F1 threshold via Otsu, then re-label
     f1_scores = [r.f1 for r in results]
     adaptive_threshold = compute_adaptive_f1_threshold(f1_scores)
-    if adaptive_threshold != config.evaluation.f1_threshold:
+    if abs(adaptive_threshold - config.evaluation.f1_threshold) > 1e-6:
         print(f"  Adaptive F1 threshold: {adaptive_threshold:.3f} (was {config.evaluation.f1_threshold:.3f})")
         for r in results:
             r.is_hallucination = r.f1 < adaptive_threshold
@@ -84,7 +96,7 @@ def _run_dataset(
     metrics = compute_metrics(scores, labels)
 
     signal_aurocs = {}
-    for sig_name in ["mean_cus", "mean_pos", "mean_dps", "mean_spt", "response_risk"]:
+    for sig_name in ["mean_cus", "mean_pos", "mean_dps", "mean_spt", "mean_spectral_gap", "response_risk"]:
         vals = [getattr(r, sig_name) for r in results]
         signal_aurocs[sig_name] = float(roc_auc_score(labels, vals))
 
@@ -120,7 +132,7 @@ def _run_dataset(
     return results, summary
 
 
-def _print_results(summary: Dict):
+def _print_results(summary: dict):
     """Print formatted evaluation results."""
     print(f"\n{'='*65}")
     print(f"  AG-SAR Evaluation Results: {summary.get('dataset', 'unknown').upper()}")
@@ -154,7 +166,7 @@ def _print_results(summary: Dict):
     print(f"{'='*65}\n")
 
 
-def run_evaluation(model, tokenizer, config: ExperimentConfig) -> Dict:
+def run_evaluation(model, tokenizer, config: ExperimentConfig) -> dict:
     """Run evaluation across all configured datasets."""
     import time
 

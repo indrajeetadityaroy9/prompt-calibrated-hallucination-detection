@@ -4,7 +4,8 @@ Evaluation metrics for hallucination detection.
 Computes AUROC, AUPRC, TPR@FPR, Calibration (ECE/Brier), and Selective Prediction.
 """
 
-from typing import List, Tuple
+from __future__ import annotations
+
 from dataclasses import dataclass
 import numpy as np
 from sklearn.metrics import (
@@ -35,41 +36,46 @@ class MetricsResult:
     risk_at_90_coverage: float = 0.0
 
 
-def compute_tpr_at_fpr(scores: List[float], labels: List[int], target_fpr: float = 0.05) -> float:
+def compute_tpr_at_fpr(scores: list[float], labels: list[int], target_fpr: float = 0.05) -> float:
     """Compute TPR at a specific FPR threshold via linear interpolation."""
     fpr, tpr, _ = roc_curve(labels, scores)
     return float(np.interp(target_fpr, fpr, tpr))
 
 
-def compute_calibration_error(scores: List[float], labels: List[int], n_bins: int = 10) -> float:
+def compute_calibration_error(scores: list[float], labels: list[int], n_bins: int = 10) -> float:
     """Compute Expected Calibration Error (ECE)."""
-    scores = np.array(scores)
-    labels = np.array(labels)
-    n = len(scores)
+    scores_arr = np.array(scores)
+    labels_arr = np.array(labels)
+    n = len(scores_arr)
 
     bin_boundaries = np.linspace(0, 1, n_bins + 1)
     ece = 0.0
     for i in range(n_bins):
         if i == n_bins - 1:
-            in_bin = (scores >= bin_boundaries[i]) & (scores <= bin_boundaries[i + 1])
+            in_bin = (scores_arr >= bin_boundaries[i]) & (scores_arr <= bin_boundaries[i + 1])
         else:
-            in_bin = (scores >= bin_boundaries[i]) & (scores < bin_boundaries[i + 1])
+            in_bin = (scores_arr >= bin_boundaries[i]) & (scores_arr < bin_boundaries[i + 1])
 
         bin_size = np.sum(in_bin)
         if bin_size > 0:
-            bin_accuracy = np.mean(labels[in_bin])
-            bin_confidence = np.mean(scores[in_bin])
+            bin_accuracy = np.mean(labels_arr[in_bin])
+            bin_confidence = np.mean(scores_arr[in_bin])
             ece += (bin_size / n) * np.abs(bin_accuracy - bin_confidence)
 
     return float(ece)
 
 
 def compute_metrics(
-    scores: List[float],
-    labels: List[int],
+    scores: list[float],
+    labels: list[int],
     threshold: float = 0.5,
 ) -> MetricsResult:
     """Compute all evaluation metrics."""
+    if len(set(labels)) < 2:
+        raise ValueError(
+            f"Cannot compute metrics with a single class (found only label={labels[0]}). "
+            "Need both positive and negative examples."
+        )
     auroc = float(roc_auc_score(labels, scores))
     auprc = float(average_precision_score(labels, scores))
     tpr_5 = compute_tpr_at_fpr(scores, labels, 0.05)
@@ -101,7 +107,7 @@ def compute_metrics(
     )
 
 
-def compute_aurc(scores: List[float], labels: List[int]) -> float:
+def compute_aurc(scores: list[float], labels: list[int]) -> float:
     """Area Under Risk-Coverage curve (AURC). Geifman & El-Yaniv (2017)."""
     scores = np.array(scores)
     labels = np.array(labels)
@@ -117,7 +123,7 @@ def compute_aurc(scores: List[float], labels: List[int]) -> float:
     return float(np.trapezoid(risks, coverages))
 
 
-def compute_e_aurc(scores: List[float], labels: List[int]) -> float:
+def compute_e_aurc(scores: list[float], labels: list[int]) -> float:
     """Excess AURC (E-AURC = AURC - AURC_optimal)."""
     labels = np.array(labels)
     n = len(labels)
@@ -133,8 +139,8 @@ def compute_e_aurc(scores: List[float], labels: List[int]) -> float:
 
 
 def compute_risk_at_coverage(
-    scores: List[float],
-    labels: List[int],
+    scores: list[float],
+    labels: list[int],
     target_coverage: float = 0.9,
 ) -> float:
     """Compute risk (error rate) at a specific coverage level."""
@@ -150,22 +156,22 @@ def compute_risk_at_coverage(
 
 
 def bootstrap_auroc_ci(
-    scores: List[float],
-    labels: List[int],
+    scores: list[float],
+    labels: list[int],
     n_bootstrap: int = 1000,
     confidence: float = 0.95,
     seed: int = 42,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """Compute bootstrap confidence interval for AUROC."""
     scores = np.array(scores)
     labels = np.array(labels)
     n = len(scores)
 
-    rng = np.random.RandomState(seed)
+    rng = np.random.default_rng(seed)
     aurocs = []
 
     for _ in range(n_bootstrap):
-        indices = rng.choice(n, size=n, replace=True)
+        indices = rng.choice(n, size=n)
         boot_scores = scores[indices]
         boot_labels = labels[indices]
 

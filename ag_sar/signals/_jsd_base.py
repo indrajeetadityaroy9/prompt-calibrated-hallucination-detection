@@ -5,7 +5,8 @@ JSD between pre-MLP and post-MLP distributions restricted to adaptive candidate 
 JSD-weighted directional override across all layers — no threshold selection needed.
 """
 
-from typing import Dict
+from __future__ import annotations
+
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -29,7 +30,8 @@ class CandidateJSDSignal:
             h_attn = h_attn.unsqueeze(0)
             h_mlp = h_mlp.unsqueeze(0)
         dtype = self.lm_head.weight.dtype
-        return h_attn.to(dtype=dtype, device="cuda"), h_mlp.to(dtype=dtype, device="cuda")
+        device = self.lm_head.weight.device
+        return h_attn.to(dtype=dtype, device=device), h_mlp.to(dtype=dtype, device=device)
 
     def compute_layer_jsd(
         self,
@@ -62,7 +64,7 @@ class CandidateJSDSignal:
         h_resid_attn: Tensor,
         h_resid_mlp: Tensor,
     ) -> float:
-        """Override = max(0, 1 - ||proj_ctx(delta)||/||delta|| / sqrt(k/d))."""
+        """Override = clamp(1 - context_ratio / expected_ratio, 0, 1)."""
         h_resid_attn, h_resid_mlp = self._prepare_pair(h_resid_attn, h_resid_mlp)
 
         with torch.no_grad():
@@ -72,7 +74,7 @@ class CandidateJSDSignal:
             delta = h_post - h_pre
             delta_norm = torch.norm(delta)
 
-            V = self._context_basis.to(dtype=torch.float32, device="cuda")
+            V = self._context_basis.to(dtype=torch.float32, device=delta.device)
             proj = V.T @ (V @ delta)
             context_ratio = torch.norm(proj) / (delta_norm + EPS)
 
@@ -86,7 +88,7 @@ class CandidateJSDSignal:
 
     def compute_pos(
         self,
-        layer_states: Dict[int, LayerHiddenStates],
+        layer_states: dict[int, LayerHiddenStates],
         candidate_set: Tensor,
     ) -> float:
         """POS: JSD-weighted mean of directional override across all layers."""

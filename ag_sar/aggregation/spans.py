@@ -4,7 +4,8 @@ Span merger for grouping high-risk tokens into contiguous spans.
 Identifies risky spans (potential hallucinations) from token-level risks.
 """
 
-from typing import List
+from __future__ import annotations
+
 from dataclasses import dataclass
 import numpy as np
 
@@ -16,7 +17,7 @@ class RiskySpan:
     """A contiguous span of high-risk tokens."""
     start: int
     end: int
-    token_risks: List[float]
+    token_risks: list[float]
     max_risk: float
     mean_risk: float
 
@@ -33,7 +34,7 @@ class SpanMerger:
         self.max_gap = max_gap
 
     @classmethod
-    def adaptive(cls, token_risks: List[float]) -> "SpanMerger":
+    def adaptive(cls, token_risks: list[float]) -> SpanMerger:
         """Otsu-based adaptive threshold with expected-gap merging."""
         n = len(token_risks)
         risks = np.array(token_risks)
@@ -49,7 +50,7 @@ class SpanMerger:
 
         return cls(threshold=threshold, max_gap=max_gap)
 
-    def find_spans(self, token_risks: List[float]) -> List[RiskySpan]:
+    def find_spans(self, token_risks: list[float]) -> list[RiskySpan]:
         """Find contiguous spans above threshold, merge with gap tolerance."""
         high_risk_indices = [
             i for i, r in enumerate(token_risks) if r >= self.threshold
