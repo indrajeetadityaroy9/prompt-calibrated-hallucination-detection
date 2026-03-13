@@ -1,32 +1,14 @@
-"""Architecture adapter for accessing model-specific attributes."""
-
-from __future__ import annotations
+"""Architecture adapter for accessing model-specific attributes via nn.Module.get_submodule()."""
 
 from dataclasses import dataclass
+
 import torch.nn as nn
-
-
-def _resolve_path(obj, dot_path: str):
-    """Traverse a dot-separated attribute path (e.g. 'model.layers')."""
-    for attr in dot_path.split("."):
-        obj = getattr(obj, attr)
-    return obj
-
-
-def _has_path(obj, dot_path: str) -> bool:
-    """Check if a dot-separated attribute path exists."""
-    try:
-        _resolve_path(obj, dot_path)
-        return True
-    except AttributeError:
-        return False
 
 
 # Architecture patterns: (layers_path, final_norm_path, lm_head_path, post_attn_norm_attr)
 _ARCH_PATTERNS = [
     # LLaMA / Mistral / Qwen / Gemma
     ("model.layers", "model.norm", "lm_head", "post_attention_layernorm"),
-    # NOTE: Phi-3 has post_attention_layernorm and matches the LLaMA/Mistral pattern above.
     # Phi-1 / Phi-1.5 (MixFormer)
     ("model.layers", "model.final_layernorm", "lm_head", "post_attention_layernorm"),
     # GPT-2 / GPT-Neo
@@ -40,50 +22,47 @@ _ARCH_PATTERNS = [
 
 @dataclass
 class ModelAdapter:
-    """Architecture adapter for accessing model components across model families."""
+    """Architecture adapter for accessing model components across model families.
+
+    Uses nn.Module.get_submodule() for dot-path traversal instead of manual
+    getattr chains. Raises AttributeError on invalid paths with clear messages.
+    """
     post_attn_norm_attr: str = "post_attention_layernorm"
     layers_path: str = "model.layers"
     final_norm_path: str = "model.norm"
     lm_head_path: str = "lm_head"
 
     @classmethod
-    def from_model(cls, model: nn.Module) -> ModelAdapter:
+    def from_model(cls, model: nn.Module) -> "ModelAdapter":
         """Auto-detect architecture by probing known patterns."""
         for layers_path, norm_path, head_path, norm_attr in _ARCH_PATTERNS:
-            if not _has_path(model, layers_path):
+            try:
+                layers = model.get_submodule(layers_path)
+            except AttributeError:
                 continue
-            if not _has_path(model, norm_path):
-                continue
-            if not _has_path(model, head_path):
-                continue
-            layers = _resolve_path(model, layers_path)
-            if len(layers) == 0:
-                continue
-            if not hasattr(layers[0], norm_attr):
-                continue
-            return cls(
-                post_attn_norm_attr=norm_attr,
-                layers_path=layers_path,
-                final_norm_path=norm_path,
-                lm_head_path=head_path,
-            )
-        raise ValueError(
-            f"Unsupported architecture: {type(model).__name__}. "
-            f"Could not find matching layer/norm/head pattern."
-        )
+            if hasattr(layers[0], norm_attr):
+                model.get_submodule(norm_path)
+                model.get_submodule(head_path)
+                return cls(
+                    post_attn_norm_attr=norm_attr,
+                    layers_path=layers_path,
+                    final_norm_path=norm_path,
+                    lm_head_path=head_path,
+                )
+        raise ValueError(f"Unsupported architecture: {type(model).__name__}")
 
     def get_layers(self, model: nn.Module) -> list[nn.Module]:
         """Get the list of decoder layers."""
-        return list(_resolve_path(model, self.layers_path))
+        return list(model.get_submodule(self.layers_path))
 
     def get_final_norm(self, model: nn.Module) -> nn.Module:
         """Get the final layer norm module."""
-        return _resolve_path(model, self.final_norm_path)
+        return model.get_submodule(self.final_norm_path)
 
     def get_lm_head(self, model: nn.Module) -> nn.Module:
         """Get the language model head."""
-        return _resolve_path(model, self.lm_head_path)
+        return model.get_submodule(self.lm_head_path)
 
     def get_post_attn_norm(self, layer: nn.Module) -> nn.Module:
         """Get the post-attention norm module from a layer."""
-        return getattr(layer, self.post_attn_norm_attr)
+        return layer.get_submodule(self.post_attn_norm_attr)

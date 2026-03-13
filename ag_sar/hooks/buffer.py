@@ -1,7 +1,5 @@
 """Ephemeral hidden state buffer for per-token signal computation."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from torch import Tensor
 
@@ -34,5 +32,5 @@ class EphemeralHiddenBuffer:
     def get_states(self) -> dict[int, LayerHiddenStates]:
         return self.layer_states
 
-    def clear(self):
+    def clear(self) -> None:
         self.layer_states.clear()

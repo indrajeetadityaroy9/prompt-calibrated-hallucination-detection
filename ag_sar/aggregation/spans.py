@@ -4,12 +4,10 @@ Span merger for grouping high-risk tokens into contiguous spans.
 Identifies risky spans (potential hallucinations) from token-level risks.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 import numpy as np
 
-from ..numerics import otsu_threshold, EPS
+from ..numerics import otsu_threshold
 
 
 @dataclass
@@ -39,14 +37,10 @@ class SpanMerger:
         n = len(token_risks)
         risks = np.array(token_risks)
 
-        total_var = float(np.var(risks))
-        if total_var <= EPS:
-            threshold = float(np.median(risks))
-        else:
-            threshold = otsu_threshold(risks)
+        threshold = otsu_threshold(risks)
 
         n_above = int(np.sum(risks >= threshold))
-        max_gap = max(1, n // max(1, n_above))
+        max_gap = n // n_above
 
         return cls(threshold=threshold, max_gap=max_gap)
 

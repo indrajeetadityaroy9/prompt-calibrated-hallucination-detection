@@ -10,7 +10,6 @@ evaluation:
   datasets: ["triviaqa", "squad"]
   n_samples: 200
   max_new_tokens: 64
-  f1_threshold: 0.3
   max_context_chars: 2000
   seed: 42
 

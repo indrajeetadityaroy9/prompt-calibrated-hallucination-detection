@@ -7,12 +7,11 @@ Full cross-signal covariance matrix captures joint signal geometry for
 precision-weighted fusion (Hartung, Knapp & Sinha, 2008).
 """
 
-from __future__ import annotations
-
 import math
 
 import numpy as np
 import torch
+from sklearn.covariance import ledoit_wolf
 
 from .numerics import EPS, effective_rank
 from .hooks import LayerHiddenStates
@@ -63,27 +62,18 @@ def self_calibrate(
             for li in tail_per_layer
         }
         final_layer = max(layer_states.keys())
-        h = layer_states[final_layer].h_resid_mlp
-        if h.dim() == 1:
-            h = h.unsqueeze(0).unsqueeze(0)
-        elif h.dim() == 2:
-            h = h.unsqueeze(0)
+        h = layer_states[final_layer].h_resid_mlp.unsqueeze(0).unsqueeze(0)
         with torch.no_grad():
             logits_t = lm_head(final_norm(h.to(dtype=lm_head_dtype))).squeeze()
         probs_t = torch.softmax(logits_t.float(), dim=-1)
         k = max(2, effective_rank(probs_t))
         cand = torch.topk(logits_t, min(k, len(logits_t))).indices
-        token_id = logits_t.argmax().item()
-        cand = torch.unique(torch.cat([cand, torch.tensor([token_id], device=logits_t.device)]))
         pos_values.append(jsd_signal.compute_pos(layer_states, cand))
     pos_arr = np.array(pos_values)
     stats["pos"] = {"sorted_vals": np.sort(pos_arr), "variance": float(np.var(pos_arr))}
 
-    # CUS: direct mode — no PIT normalization values available during calibration,
-    # but variance is now derived from the cross-signal covariance (see below).
-    # Retain peer-derived variance as a per-signal fallback.
-    peer_vars = [stats[s]["variance"] for s in stats]
-    stats["cus"] = {"mode": "direct", "variance": float(np.median(peer_vars))}
+    # CUS: direct mode — variance derived from peer signals (DPS, POS)
+    stats["cus"] = {"mode": "direct", "variance": float(np.median([stats[s]["variance"] for s in stats]))}
 
     # SPT + spectral gap: compute incrementally as window fills
     spt_signal.reset()
@@ -96,18 +86,8 @@ def self_calibrate(
             spt_values.append(spt_val)
             gap_values.append(gap_val)
 
-    all_peer_vars = [stats[s]["variance"] for s in stats if "variance" in stats[s]]
-    if len(spt_values) >= 2:
-        spt_var = float(np.var(spt_values))
-        gap_var = float(np.var(gap_values))
-        # Use intrinsic variance if meaningful, otherwise fall back to peer
-        spt_var = spt_var if spt_var > EPS else float(np.median(all_peer_vars))
-        gap_var = gap_var if gap_var > EPS else float(np.median(all_peer_vars))
-    else:
-        spt_var = float(np.median(all_peer_vars))
-        gap_var = spt_var
-    stats["spt"] = {"mode": "direct", "variance": spt_var}
-    stats["spectral_gap"] = {"mode": "direct", "variance": gap_var}
+    stats["spt"] = {"mode": "direct", "variance": float(np.var(spt_values))}
+    stats["spectral_gap"] = {"mode": "direct", "variance": float(np.var(gap_values))}
 
     # --- Cross-signal precision matrix ---
     # Build from the two signals with genuine per-position variation (DPS, POS).
@@ -126,25 +106,20 @@ def self_calibrate(
         stats["spectral_gap"]["variance"],
     ])
 
-    # Start from diagonal precision (safe baseline)
+    # Start from diagonal precision, then embed DPS-POS cross-correlation
     precision = np.diag(1.0 / np.maximum(diag_vars, EPS))
 
-    # Embed DPS-POS cross-correlation if we have enough tail samples
-    if n_tail >= 5:
-        dps_pos_matrix = np.column_stack([pos_arr, dps_arr])  # (n_tail, 2)
-        cov_2x2 = np.cov(dps_pos_matrix, rowvar=False)        # 2×2
-        # Tikhonov regularization scaled to typical variance magnitude
-        reg = max(float(np.mean(np.diag(cov_2x2))) * 0.01, EPS)
-        cov_2x2 += reg * np.eye(2)
-        try:
-            prec_2x2 = np.linalg.inv(cov_2x2)
-            # Embed into positions [1,1],[1,2],[2,1],[2,2] (POS=idx1, DPS=idx2)
-            precision[1, 1] = prec_2x2[0, 0]
-            precision[1, 2] = prec_2x2[0, 1]
-            precision[2, 1] = prec_2x2[1, 0]
-            precision[2, 2] = prec_2x2[1, 1]
-        except np.linalg.LinAlgError:
-            pass  # Keep diagonal fallback for POS/DPS
+    dps_pos_matrix = np.column_stack([pos_arr, dps_arr])  # (n_tail, 2)
+    # Ledoit-Wolf shrinkage: parameter-free optimal regularization for
+    # small-sample covariance estimation (Ledoit & Wolf, 2004).
+    # Analytically computes shrinkage intensity — no magic numbers.
+    cov_2x2, _ = ledoit_wolf(dps_pos_matrix)
+    prec_2x2 = np.linalg.inv(cov_2x2)
+    # Embed into positions [1,1],[1,2],[2,1],[2,2] (POS=idx1, DPS=idx2)
+    precision[1, 1] = prec_2x2[0, 0]
+    precision[1, 2] = prec_2x2[0, 1]
+    precision[2, 1] = prec_2x2[1, 0]
+    precision[2, 2] = prec_2x2[1, 1]
 
     stats["_cross_signal_precision"] = precision
 

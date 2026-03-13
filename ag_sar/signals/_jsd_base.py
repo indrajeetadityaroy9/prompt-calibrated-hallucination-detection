@@ -5,8 +5,6 @@ JSD between pre-MLP and post-MLP distributions restricted to adaptive candidate 
 JSD-weighted directional override across all layers — no threshold selection needed.
 """
 
-from __future__ import annotations
-
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -25,13 +23,9 @@ class CandidateJSDSignal:
         self._context_basis = None
 
     def _prepare_pair(self, h_attn: Tensor, h_mlp: Tensor):
-        """Ensure 2D and cast to lm_head dtype on cuda."""
-        if h_attn.dim() == 1:
-            h_attn = h_attn.unsqueeze(0)
-            h_mlp = h_mlp.unsqueeze(0)
+        """Cast to lm_head dtype on CUDA."""
         dtype = self.lm_head.weight.dtype
-        device = self.lm_head.weight.device
-        return h_attn.to(dtype=dtype, device=device), h_mlp.to(dtype=dtype, device=device)
+        return h_attn.to(dtype=dtype), h_mlp.to(dtype=dtype)
 
     def compute_layer_jsd(
         self,
@@ -74,7 +68,7 @@ class CandidateJSDSignal:
             delta = h_post - h_pre
             delta_norm = torch.norm(delta)
 
-            V = self._context_basis.to(dtype=torch.float32, device=delta.device)
+            V = self._context_basis.float()
             proj = V.T @ (V @ delta)
             context_ratio = torch.norm(proj) / (delta_norm + EPS)
 

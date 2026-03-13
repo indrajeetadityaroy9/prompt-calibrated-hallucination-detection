@@ -1,7 +1,5 @@
 """Experiment configuration schema — typed dataclasses loaded from YAML."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Literal
 
@@ -25,7 +23,6 @@ class EvaluationConfig:
     datasets: list[str]
     n_samples: int
     max_new_tokens: int
-    f1_threshold: float
     max_context_chars: int
     seed: int
 
@@ -53,23 +50,12 @@ class ExperimentConfig:
         with open(path) as f:
             raw = yaml.safe_load(f)
 
-        for key in ("run", "model", "evaluation", "output"):
-            if key not in raw:
-                raise ValueError(f"Missing required config section: {key!r} in {path}")
+        ablation = AblationConfig(**raw["ablation"]) if "ablation" in raw else None
 
-        ablation = None
-        if "ablation" in raw:
-            ablation = AblationConfig(**raw["ablation"])
-
-        config = cls(
+        return cls(
             run=RunConfig(**raw["run"]),
             model=ModelConfig(**raw["model"]),
             evaluation=EvaluationConfig(**raw["evaluation"]),
             output=OutputConfig(**raw["output"]),
             ablation=ablation,
         )
-
-        if config.run.mode == "ablation" and config.ablation is None:
-            raise ValueError("Config mode is 'ablation' but no 'ablation' section provided.")
-
-        return config

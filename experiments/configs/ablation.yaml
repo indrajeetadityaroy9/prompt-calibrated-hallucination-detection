@@ -10,12 +10,11 @@ evaluation:
   datasets: ["triviaqa"]
   n_samples: 100
   max_new_tokens: 64
-  f1_threshold: 0.3
   max_context_chars: 2000
   seed: 42
 
 ablation:
-  signals: ["cus", "pos", "dps", "spt"]
+  signals: ["cus", "pos", "dps", "spt", "spectral_gap"]
 
 output:
   dir: "results/ablation"

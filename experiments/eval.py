@@ -24,11 +24,9 @@ def main():
     if config.run.mode == "evaluation":
         from .run_eval import run_evaluation
         run_evaluation(model, tokenizer, config)
-    elif config.run.mode == "ablation":
+    else:
         from .run_ablation import run_ablation
         run_ablation(model, tokenizer, config)
-    else:
-        raise ValueError(f"Unknown run mode: {config.run.mode!r}. Expected 'evaluation' or 'ablation'.")
 
 
 if __name__ == "__main__":

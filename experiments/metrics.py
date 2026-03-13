@@ -4,8 +4,6 @@ Evaluation metrics for hallucination detection.
 Computes AUROC, AUPRC, TPR@FPR, Calibration (ECE/Brier), and Selective Prediction.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 import numpy as np
 from sklearn.metrics import (
@@ -43,26 +41,25 @@ def compute_tpr_at_fpr(scores: list[float], labels: list[int], target_fpr: float
 
 
 def compute_calibration_error(scores: list[float], labels: list[int], n_bins: int = 10) -> float:
-    """Compute Expected Calibration Error (ECE)."""
+    """Compute Expected Calibration Error (ECE). Vectorized via np.digitize + np.bincount."""
     scores_arr = np.array(scores)
     labels_arr = np.array(labels)
     n = len(scores_arr)
 
-    bin_boundaries = np.linspace(0, 1, n_bins + 1)
-    ece = 0.0
-    for i in range(n_bins):
-        if i == n_bins - 1:
-            in_bin = (scores_arr >= bin_boundaries[i]) & (scores_arr <= bin_boundaries[i + 1])
-        else:
-            in_bin = (scores_arr >= bin_boundaries[i]) & (scores_arr < bin_boundaries[i + 1])
+    bin_edges = np.linspace(0, 1, n_bins + 1)
+    bin_idx = np.clip(np.digitize(scores_arr, bin_edges[1:-1]), 0, n_bins - 1)
 
-        bin_size = np.sum(in_bin)
-        if bin_size > 0:
-            bin_accuracy = np.mean(labels_arr[in_bin])
-            bin_confidence = np.mean(scores_arr[in_bin])
-            ece += (bin_size / n) * np.abs(bin_accuracy - bin_confidence)
+    bin_counts = np.bincount(bin_idx, minlength=n_bins)
+    bin_acc_sums = np.bincount(bin_idx, weights=labels_arr, minlength=n_bins)
+    bin_conf_sums = np.bincount(bin_idx, weights=scores_arr, minlength=n_bins)
 
-    return float(ece)
+    nonempty = bin_counts > 0
+    bin_acc = np.zeros(n_bins)
+    bin_conf = np.zeros(n_bins)
+    np.divide(bin_acc_sums, bin_counts, out=bin_acc, where=nonempty)
+    np.divide(bin_conf_sums, bin_counts, out=bin_conf, where=nonempty)
+
+    return float(np.sum((bin_counts / n) * np.abs(bin_acc - bin_conf)))
 
 
 def compute_metrics(
@@ -71,11 +68,6 @@ def compute_metrics(
     threshold: float = 0.5,
 ) -> MetricsResult:
     """Compute all evaluation metrics."""
-    if len(set(labels)) < 2:
-        raise ValueError(
-            f"Cannot compute metrics with a single class (found only label={labels[0]}). "
-            "Need both positive and negative examples."
-        )
     auroc = float(roc_auc_score(labels, scores))
     auprc = float(average_precision_score(labels, scores))
     tpr_5 = compute_tpr_at_fpr(scores, labels, 0.05)
@@ -151,7 +143,7 @@ def compute_risk_at_coverage(
     sorted_indices = np.argsort(scores)
     sorted_labels = labels[sorted_indices]
 
-    k = min(max(1, int(target_coverage * n)), n)
+    k = int(target_coverage * n)
     return float(np.sum(sorted_labels[:k]) / k)
 
 
@@ -162,26 +154,21 @@ def bootstrap_auroc_ci(
     confidence: float = 0.95,
     seed: int = 42,
 ) -> tuple[float, float]:
-    """Compute bootstrap confidence interval for AUROC."""
-    scores = np.array(scores)
-    labels = np.array(labels)
-    n = len(scores)
+    """Compute BCa bootstrap confidence interval for AUROC via scipy."""
+    from scipy.stats import bootstrap
 
-    rng = np.random.default_rng(seed)
-    aurocs = []
+    scores_arr = np.array(scores)
+    labels_arr = np.array(labels)
 
-    for _ in range(n_bootstrap):
-        indices = rng.choice(n, size=n)
-        boot_scores = scores[indices]
-        boot_labels = labels[indices]
+    def auroc_statistic(indices):
+        return roc_auc_score(labels_arr[indices.astype(int)], scores_arr[indices.astype(int)])
 
-        if len(set(boot_labels)) < 2:
-            continue
-
-        aurocs.append(float(roc_auc_score(boot_labels, boot_scores)))
-
-    alpha = 1 - confidence
-    lower = np.percentile(aurocs, 100 * alpha / 2)
-    upper = np.percentile(aurocs, 100 * (1 - alpha / 2))
-
-    return (float(lower), float(upper))
+    result = bootstrap(
+        (np.arange(len(scores_arr)),),
+        auroc_statistic,
+        n_resamples=n_bootstrap,
+        confidence_level=confidence,
+        random_state=np.random.default_rng(seed),
+        method="BCa",
+    )
+    return (float(result.confidence_interval.low), float(result.confidence_interval.high))

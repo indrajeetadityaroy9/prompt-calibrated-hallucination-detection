@@ -1,7 +1,5 @@
 """2-point per-layer hook installation for hidden state capture."""
 
-from __future__ import annotations
-
 from torch import Tensor
 
 from .adapter import ModelAdapter

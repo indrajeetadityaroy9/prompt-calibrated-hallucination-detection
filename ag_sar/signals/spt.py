@@ -10,8 +10,6 @@ Also returns the spectral gap ratio lambda_2 / (lambda_1 + lambda_2),
 bounded in [0, 0.5], capturing directional coherence of the signal structure.
 """
 
-from __future__ import annotations
-
 from collections import deque
 
 import torch
@@ -34,7 +32,7 @@ class SpectralPhaseTransition:
 
         Returns:
             spt: 1 - F_{TW,1}(z_TW).  Range (0, 1), higher = riskier.
-            spectral_gap: lambda_1 / lambda_2.  Larger = more coherent signal.
+            spectral_gap: lambda_2 / (lambda_1 + lambda_2).  Near 0 = coherent, near 0.5 = degenerate.
         """
         H = torch.stack(list(self._window))
         H = H - H.mean(dim=0, keepdim=True)
@@ -63,8 +61,8 @@ class SpectralPhaseTransition:
 
         # Spectral gap ratio: lambda_2 / (lambda_1 + lambda_2)
         # Maps to [0, 0.5]: near 0 = clean spike separation (low risk),
-        # near 0.5 = degenerate/no gap (high risk). Bounded for fusion.
-        lambda_2 = float(eigs[1].item()) if len(eigs) > 1 else 0.0
+        # near 0.5 = degenerate/no gap (high risk).
+        lambda_2 = float(eigs[1].item())
         spectral_gap = lambda_2 / (lambda_1 + lambda_2 + EPS)
 
         return spt, spectral_gap

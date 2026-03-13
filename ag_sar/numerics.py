@@ -6,12 +6,20 @@ import torch
 from scipy.stats import norm
 from torch import Tensor
 
-EPS = 1e-10
+# Numerical stability constant derived from float32 machine precision.
+# float32 eps ≈ 1.19e-7; squaring gives a value that is:
+#   (a) negligible relative to any float32 computation (eps² << eps)
+#   (b) safely invertible within float32 range (1/eps² ≈ 7e13 << 3.4e38)
+EPS = float(torch.finfo(torch.float32).eps ** 2)
 
-# Tracy-Widom beta=1 exact moments (Tracy & Widom 1994, Bornemann 2010)
+# Tracy-Widom beta=1 exact moments (Tracy & Widom 1994, Bornemann 2010).
+# These are mathematical constants of the TW₁ distribution, not parameters.
 _TW1_MU = -1.2065335745820
 _TW1_SIGMA = 1.2680340580149
 _TW1_SKEW = 0.29346452408
+
+# Nats-to-bits conversion factor: 1 / ln(2).
+_BITS_PER_NAT = 1.0 / math.log(2)
 
 
 def tracy_widom_cdf(s: float) -> float:
@@ -24,17 +32,22 @@ def tracy_widom_cdf(s: float) -> float:
     Johnstone (2001): (lambda_max - mu_n) / sigma_n  ->  TW_1
     """
     z = (s - _TW1_MU) / _TW1_SIGMA
-    # Cornish-Fisher correction for positive skewness (Cornish & Fisher, 1938)
-    z_cf = z - (_TW1_SKEW / 6.0) * (z * z - 1.0)
+    # Cornish-Fisher third-cumulant correction (Cornish & Fisher, 1938):
+    # z_cf = z - (skew / 3!) * (z² - 1)
+    z_cf = z - (_TW1_SKEW / math.factorial(3)) * (z * z - 1.0)
     return float(norm.cdf(z_cf))
 
 
 def jsd(p: Tensor, q: Tensor) -> float:
-    """JSD(P||Q) in bits, [0, 1]. M = 0.5*(P+Q)."""
+    """Jensen-Shannon divergence in bits, range [0, 1].
+
+    JSD(P‖Q) = ½·KL(P‖M) + ½·KL(Q‖M),  M = ½·(P+Q)
+    Symmetric, bounded, and well-defined even when supports differ.
+    """
     m = 0.5 * (p + q)
     kl_pm = (torch.xlogy(p, p) - torch.xlogy(p, m)).sum()
     kl_qm = (torch.xlogy(q, q) - torch.xlogy(q, m)).sum()
-    return float((0.5 * kl_pm + 0.5 * kl_qm).item() / math.log(2))
+    return float((0.5 * kl_pm + 0.5 * kl_qm).item() * _BITS_PER_NAT)
 
 
 def effective_rank(S: Tensor) -> int:
@@ -46,32 +59,37 @@ def effective_rank(S: Tensor) -> int:
     S = S.float().clamp(min=EPS)
     p = S / S.sum()
     H = -(p * p.log()).sum()
-    return max(1, round(H.exp().item()))
+    return round(H.exp().item())
 
 
-def otsu_threshold(values: np.ndarray | list) -> float:
-    """Optimal bimodal threshold: argmax sigma_b^2(t). Otsu (1979). O(n)."""
-    values = np.asarray(values, dtype=float)
+def _otsu_internals(values: np.ndarray) -> tuple[int, np.ndarray, np.ndarray, float]:
+    """Shared Otsu computation: returns (best_idx, sorted_vals, between_var, total_var)."""
     sorted_vals = np.sort(values)
     n = len(sorted_vals)
-    if n < 2:
-        return float(sorted_vals[0]) if n == 1 else 0.0
 
     cumsum = np.cumsum(sorted_vals)
     total_sum = cumsum[-1]
 
-    best_threshold = sorted_vals[0]
-    best_variance = -1.0
+    indices = np.arange(1, n)
+    w0 = indices / n
+    w1 = 1.0 - w0
+    mu0 = cumsum[:-1] / indices
+    mu1 = (total_sum - cumsum[:-1]) / (n - indices)
+    between_var = w0 * w1 * (mu0 - mu1) ** 2
 
-    for i in range(1, n):
-        w0 = i / n
-        w1 = 1.0 - w0
-        mu0 = cumsum[i - 1] / i
-        mu1 = (total_sum - cumsum[i - 1]) / (n - i)
-        variance = w0 * w1 * (mu0 - mu1) ** 2
+    best_idx = int(np.argmax(between_var))
+    return best_idx, sorted_vals, between_var, float(np.var(values))
 
-        if variance > best_variance:
-            best_variance = variance
-            best_threshold = 0.5 * (sorted_vals[i - 1] + sorted_vals[i])
 
-    return float(best_threshold)
+def otsu_threshold(values: np.ndarray | list) -> float:
+    """Optimal bimodal threshold: argmax sigma_b^2(t). Otsu (1979). Vectorized."""
+    values = np.asarray(values, dtype=float)
+    best_idx, sorted_vals, _, _ = _otsu_internals(values)
+    return float(0.5 * (sorted_vals[best_idx] + sorted_vals[best_idx + 1]))
+
+
+def otsu_coefficient(values: np.ndarray | list) -> float:
+    """Otsu bimodality coefficient: max(sigma_b^2) / sigma_total^2. Range [0, 1]."""
+    values = np.asarray(values, dtype=float)
+    best_idx, _, between_var, total_var = _otsu_internals(values)
+    return float(between_var[best_idx] / (total_var + EPS))

@@ -11,8 +11,6 @@ AG-SAR Hallucination Detector.
 Fusion: Cross-signal precision-coupled entropy-gated weighted mean.
 """
 
-from __future__ import annotations
-
 import numpy as np
 import torch
 from torch import Tensor
@@ -48,14 +46,12 @@ class Detector:
     def __init__(self, model: nn.Module, tokenizer) -> None:
         self.model = model
         self.tokenizer = tokenizer
-        self.device = next(model.parameters()).device
 
         self.adapter = ModelAdapter.from_model(model)
         self.lm_head = self.adapter.get_lm_head(model)
         self.final_norm = self.adapter.get_final_norm(model)
         self._layers = self.adapter.get_layers(model)
         self.num_layers = len(self._layers)
-        self._hookable_layers = list(range(self.num_layers))
 
         self.dps_signal = DualSubspaceGrounding(lm_head_weight=self.lm_head.weight)
         self.jsd_signal = CandidateJSDSignal(self.lm_head, self.final_norm)
@@ -73,14 +69,11 @@ class Detector:
         prompt_len: int,
     ) -> tuple:
         """Run prefill: compute context SVD, prompt center, magnitude tau, prompt stats."""
-        context_mask = context_mask.to(self.device)
+        context_mask = context_mask.to("cuda")
         window_size = adaptive_window(prompt_len)
 
-        self.model.config._attn_implementation = "eager"
-        self.model.config.output_attentions = True
-
         # Install 2-point layer hooks (persist through generation)
-        for layer_idx in self._hookable_layers:
+        for layer_idx in range(self.num_layers):
             hook = LayerHooks(layer_idx, self.hidden_buffer, adapter=self.adapter)
             hook.install(self._layers[layer_idx])
             self._hooks.append(hook)
@@ -97,7 +90,7 @@ class Detector:
         def capture_hidden(module, input, output):
             prefill_hidden_buf.append(output[0].detach())
 
-        final_layer = self._layers[max(self._hookable_layers)]
+        final_layer = self._layers[-1]
         capture_handle = final_layer.register_forward_hook(capture_hidden)
 
         # Per-layer tail capture for calibration (2-point: h_resid_attn + h_resid_mlp)
@@ -119,7 +112,7 @@ class Detector:
             return fn
 
         tail_handles = []
-        for layer_idx in self._hookable_layers:
+        for layer_idx in range(self.num_layers):
             post_attn_norm = self.adapter.get_post_attn_norm(self._layers[layer_idx])
             h1 = post_attn_norm.register_forward_pre_hook(
                 _make_tail_pre_hook(layer_idx, cal_tail_start, prompt_len, _tail_attn_tmp)
@@ -164,11 +157,7 @@ class Detector:
 
         # Prompt center (non-context tokens)
         non_context_mask = ~context_mask[:prompt_len]
-        non_context_hidden = prefill_hidden[0, non_context_mask, :]
-        if non_context_hidden.shape[0] == 0:
-            self.dps_signal.set_prompt_center(prefill_hidden[0, context_mask[:prompt_len], :])
-        else:
-            self.dps_signal.set_prompt_center(non_context_hidden)
+        self.dps_signal.set_prompt_center(prefill_hidden[0, non_context_mask, :])
 
         # Magnitude tau
         self.dps_signal.set_magnitude_tau(prefill_hidden[0], self.dps_signal._context_center)
@@ -209,7 +198,7 @@ class Detector:
         probs = torch.softmax(logits.float(), dim=-1)
         k = max(2, effective_rank(probs))
         cand = torch.topk(logits, min(k, len(logits))).indices
-        cand = torch.unique(torch.cat([cand, torch.tensor([emitted_token_id], device=logits.device)]))
+        cand = torch.unique(torch.cat([cand, torch.tensor([emitted_token_id], device="cuda")]))
 
         # DPS — all-layer mean
         dps_hidden = {idx: states.h_resid_mlp for idx, states in layer_states.items()}
@@ -223,7 +212,7 @@ class Detector:
         if attentions is not None:
             attn_slices = {
                 layer_idx: attentions[layer_idx][0, :, -1, :]
-                for layer_idx in self._hookable_layers
+                for layer_idx in range(self.num_layers)
             }
             cus = compute_cus(attn_slices, self._cus_prompt_len)
 
@@ -267,7 +256,7 @@ class Detector:
         context_mask = torch.zeros(len(tokens), dtype=torch.bool)
         context_mask[ctx_start:ctx_end] = True
 
-        input_ids = torch.tensor([tokens], dtype=torch.long, device=self.device)
+        input_ids = torch.tensor([tokens], dtype=torch.long, device="cuda")
         return input_ids, context_mask, len(tokens)
 
     def _aggregate_results(
@@ -337,13 +326,13 @@ class Detector:
         )
         token_results.append(signals)
 
-        next_token = torch.tensor([[token_id]], device=self.device)
+        next_token = torch.tensor([[token_id]], device="cuda")
         all_ids = torch.cat([all_ids, next_token], dim=1)
         attention_mask = torch.cat([
             attention_mask,
-            torch.ones((1, 1), device=self.device, dtype=attention_mask.dtype)
+            torch.ones((1, 1), device="cuda", dtype=attention_mask.dtype)
         ], dim=1)
-        cache_position = torch.tensor([prompt_len], device=self.device)
+        cache_position = torch.tensor([prompt_len], device="cuda")
 
         # Remaining tokens
         for step in range(1, n_steps):
@@ -357,7 +346,7 @@ class Detector:
             )
 
             with torch.no_grad():
-                outputs = self.model(**model_inputs, return_dict=True)
+                outputs = self.model(**model_inputs, output_attentions=True, return_dict=True)
 
             past_key_values = outputs.past_key_values
             logits = outputs.logits[:, -1, :]
@@ -372,11 +361,11 @@ class Detector:
             )
             token_results.append(signals)
 
-            next_token = torch.tensor([[token_id]], device=self.device)
+            next_token = torch.tensor([[token_id]], device="cuda")
             all_ids = torch.cat([all_ids, next_token], dim=1)
             attention_mask = torch.cat([
                 attention_mask,
-                torch.ones((1, 1), device=self.device, dtype=attention_mask.dtype)
+                torch.ones((1, 1), device="cuda", dtype=attention_mask.dtype)
             ], dim=1)
 
             if response_ids is None and token_id == self.tokenizer.eos_token_id:
@@ -394,16 +383,16 @@ class Detector:
         """Format-agnostic detection from pre-tokenized input + context mask."""
         return self._generation_loop(input_ids, context_mask, max_new_tokens=max_new_tokens)
 
+    _DEFAULT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+
     def detect(
         self,
         question: str,
         context: str,
         max_new_tokens: int = 256,
-        prompt_template: str = None,
+        prompt_template: str = _DEFAULT_TEMPLATE,
     ) -> DetectionResult:
         """Generate text with hallucination detection."""
-        if prompt_template is None:
-            prompt_template = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
         input_ids, context_mask, _ = self._build_input_with_mask(
             context, question, prompt_template
         )
@@ -424,18 +413,12 @@ class Detector:
 
         ctx_ids = self.tokenizer.encode(context_text, add_special_tokens=False)
         ctx_start = next(
-            (i for i in range(len(prompt_tokens) - len(ctx_ids) + 1)
-             if prompt_tokens[i:i + len(ctx_ids)] == ctx_ids),
-            -1,
+            i for i in range(len(prompt_tokens) - len(ctx_ids) + 1)
+            if prompt_tokens[i:i + len(ctx_ids)] == ctx_ids
         )
-        if ctx_start < 0:
-            raise ValueError(
-                "Context text not found in prompt tokens. "
-                "Ensure context_text appears verbatim in the prompt."
-            )
 
         context_mask = torch.zeros(prompt_len, dtype=torch.bool)
         context_mask[ctx_start:ctx_start + len(ctx_ids)] = True
 
-        input_ids = torch.tensor([prompt_tokens], dtype=torch.long, device=self.device)
+        input_ids = torch.tensor([prompt_tokens], dtype=torch.long, device="cuda")
         return self._generation_loop(input_ids, context_mask, response_ids=response_ids)

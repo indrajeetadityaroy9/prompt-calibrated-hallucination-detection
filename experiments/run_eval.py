@@ -1,7 +1,5 @@
 """Evaluation orchestration — runs AG-SAR detection on QA benchmarks."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass, asdict
 
 import numpy as np
@@ -52,21 +50,18 @@ def _run_dataset(
         generated = result.generated_text.strip()
         f1 = max_f1_score(generated, sample["answers"])
 
-        if result.token_signals:
-            mean_cus = float(np.mean([s.cus for s in result.token_signals]))
-            mean_pos = float(np.mean([s.pos for s in result.token_signals]))
-            mean_dps = float(np.mean([s.dps for s in result.token_signals]))
-            mean_spt = float(np.mean([s.spt for s in result.token_signals]))
-            mean_gap = float(np.mean([s.spectral_gap for s in result.token_signals]))
-        else:
-            mean_cus = mean_pos = mean_dps = mean_spt = mean_gap = 0.5
+        mean_cus = float(np.mean([s.cus for s in result.token_signals]))
+        mean_pos = float(np.mean([s.pos for s in result.token_signals]))
+        mean_dps = float(np.mean([s.dps for s in result.token_signals]))
+        mean_spt = float(np.mean([s.spt for s in result.token_signals]))
+        mean_gap = float(np.mean([s.spectral_gap for s in result.token_signals]))
 
         results.append(SampleResult(
             question=sample["question"],
             generated_answer=generated,
             ground_truths=sample["answers"],
             f1=f1,
-            is_hallucination=f1 < config.evaluation.f1_threshold,
+            is_hallucination=False,  # set by adaptive Otsu below
             response_risk=result.response_risk,
             mean_cus=mean_cus,
             mean_pos=mean_pos,
@@ -78,17 +73,15 @@ def _run_dataset(
         ))
 
         if (i + 1) % print_interval == 0:
-            n_hall = sum(1 for r in results if r.is_hallucination)
-            print(f"  [{i+1}/{len(samples)}] hall_rate={n_hall/len(results):.2%}, "
+            print(f"  [{i+1}/{len(samples)}] "
                   f"avg_risk={np.mean([r.response_risk for r in results]):.3f}")
 
-    # Adaptive F1 threshold via Otsu, then re-label
+    # Adaptive F1 threshold via Otsu — parameter-free hallucination labeling
     f1_scores = [r.f1 for r in results]
     adaptive_threshold = compute_adaptive_f1_threshold(f1_scores)
-    if abs(adaptive_threshold - config.evaluation.f1_threshold) > 1e-6:
-        print(f"  Adaptive F1 threshold: {adaptive_threshold:.3f} (was {config.evaluation.f1_threshold:.3f})")
-        for r in results:
-            r.is_hallucination = r.f1 < adaptive_threshold
+    print(f"  Adaptive F1 threshold: {adaptive_threshold:.3f}")
+    for r in results:
+        r.is_hallucination = r.f1 < adaptive_threshold
 
     labels = [int(r.is_hallucination) for r in results]
     scores = [r.response_risk for r in results]
@@ -107,7 +100,7 @@ def _run_dataset(
 
     summary = {
         "dataset": samples[0]["dataset"],
-        "f1_threshold": adaptive_threshold if adaptive_threshold != config.evaluation.f1_threshold else config.evaluation.f1_threshold,
+        "f1_threshold": adaptive_threshold,
         "n_samples": len(results),
         "n_hallucinations": n_pos,
         "n_correct": n_neg,
@@ -135,13 +128,13 @@ def _run_dataset(
 def _print_results(summary: dict):
     """Print formatted evaluation results."""
     print(f"\n{'='*65}")
-    print(f"  AG-SAR Evaluation Results: {summary.get('dataset', 'unknown').upper()}")
+    print(f"  AG-SAR Evaluation Results: {summary['dataset'].upper()}")
     print(f"{'='*65}")
     print(f"  Samples:           {summary['n_samples']}")
     print(f"  Hallucinations:    {summary['n_hallucinations']} ({summary['hallucination_rate']:.1%})")
     print()
     print(f"  ---- Detection Performance ----")
-    ci = summary.get('auroc_ci_95', [0, 0])
+    ci = summary['auroc_ci_95']
     print(f"  AUROC:             {summary['auroc']:.4f}  (95% CI: [{ci[0]:.4f}, {ci[1]:.4f}])")
     print(f"  AUPRC:             {summary['auprc']:.4f}")
     print(f"  TPR@5%FPR:         {summary['tpr_at_5_fpr']:.4f}")
@@ -157,7 +150,7 @@ def _print_results(summary: dict):
     print(f"  Brier:             {summary['brier']:.4f}")
     print()
     print(f"  ---- Per-Signal AUROC ----")
-    for sig, auroc in summary.get('signal_aurocs', {}).items():
+    for sig, auroc in summary['signal_aurocs'].items():
         print(f"  {sig:20s} {auroc:.4f}")
     print()
     print(f"  ---- Confusion Matrix (t=0.5) ----")

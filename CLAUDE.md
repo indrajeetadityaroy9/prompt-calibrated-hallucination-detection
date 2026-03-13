@@ -32,9 +32,9 @@ No test suite, linting, or formatting tools are configured. Validation is done v
 
 Entry point: `Detector` in `ag_sar/detector.py`.
 
-1. **Prefill** (once per input): `ModelAdapter` auto-detects architecture (LLaMA/Mistral/Qwen/Gemma, Phi, GPT-2/Neo, Falcon, GPT-NeoX via dot-path traversal). Context capture at midpoint layer. Context subspace (SVD + effective rank), reasoning subspace (bottom SVD of lm_head + effective rank), prompt center, magnitude tau (DPS gate), SPT window size (effective rank of context singular values), prompt statistics (PIT reference values) from tail window sqrt(prompt_len). Hidden states in bfloat16.
+1. **Prefill** (once per input): `ModelAdapter` auto-detects architecture via `nn.Module.get_submodule()` (LLaMA/Mistral/Qwen/Gemma, Phi, GPT-2/Neo, Falcon, GPT-NeoX). Context capture at midpoint layer. Context subspace (SVD + effective rank), reasoning subspace (bottom SVD of lm_head + effective rank), prompt center, magnitude tau (DPS gate), SPT window size (effective rank of context singular values), prompt statistics (PIT reference values) from tail window sqrt(prompt_len). Hidden states in bfloat16. Attention backend set at model load time (`attn_implementation` in `from_pretrained()`).
 
-2. **Generation** (per token): 5 signals → PIT or direct normalization → cross-signal precision-coupled entropy-gated fusion → response risk → Otsu-adaptive spans.
+2. **Generation** (per token): 5 signals → PIT or direct normalization → cross-signal precision-coupled entropy-gated fusion → response risk → Otsu-adaptive spans. `output_attentions=True` passed as forward kwarg per generation step (not set on config).
 
 ### Three Entry Points
 
@@ -53,18 +53,18 @@ Entry point: `Detector` in `ag_sar/detector.py`.
 ### Hook System (`ag_sar/hooks/`)
 
 2-point capture per layer: h_resid_attn, h_resid_mlp.
-- `adapter.py`: ModelAdapter — auto-detects architecture via dot-path traversal across 5 model families
+- `adapter.py`: ModelAdapter — auto-detects architecture via `nn.Module.get_submodule()` across 5 model families
 - `buffer.py`: EphemeralHiddenBuffer — bfloat16, cleared per token
 - `layer_hooks.py`: LayerHooks — 2 hooks per layer
 - `prefill_hooks.py`: PrefillContextHook (boolean context_mask)
 
 ### Calibration (`ag_sar/calibration.py`)
 
-`self_calibrate()`: prompt-anchored PIT reference values + variance for DPS and POS. CUS, SPT, and spectral gap use direct mode. SPT/gap variance computed incrementally from prompt-tail evaluations. Computes DPS-POS 2×2 precision block embedded in 5×5 diagonal precision matrix to capture their cross-correlation. `adaptive_window()`: sqrt(prompt_len).
+`self_calibrate()`: prompt-anchored PIT reference values + variance for DPS and POS. CUS, SPT, and spectral gap use direct mode. SPT/gap variance computed incrementally from prompt-tail evaluations. Computes DPS-POS 2×2 covariance via Ledoit-Wolf shrinkage (parameter-free optimal regularization), inverted and embedded in 5×5 diagonal precision matrix. `adaptive_window()`: sqrt(prompt_len).
 
 ### Aggregation (`ag_sar/aggregation/`)
 
-- `fusion.py`: w_i = Σ_j Ω_ij × (1-H_j)^κ — cross-signal precision-coupled entropy-gated fusion (generalized DerSimonian & Laird). Token-level + response-level (signal-first). 5 signals: {cus, pos, dps, spt, spectral_gap}. Falls back to diagonal inverse-variance when precision matrix unavailable.
+- `fusion.py`: w_i = Σ_j Ω_ij × (1-H_j)^κ — cross-signal precision-coupled entropy-gated fusion (generalized DerSimonian & Laird). Token-level + response-level (signal-first). 5 signals: {cus, pos, dps, spt, spectral_gap}. Precision matrix always computed during calibration.
 - `spans.py`: Otsu-adaptive threshold. Expected-gap merging.
 
 ### Data Structures (`ag_sar/config.py`)
@@ -87,7 +87,7 @@ Entry point: `Detector` in `ag_sar/detector.py`.
 
 ### Numerics (`ag_sar/numerics.py`)
 
-`jsd` (bits, [0,1]), `effective_rank` (parameter-free via singular value entropy), `otsu_threshold`, `tracy_widom_cdf` (TW β=1 CDF via Cornish-Fisher expansion with exact moments). Single named constant: EPS.
+`jsd` (bits, [0,1]), `effective_rank` (parameter-free via singular value entropy), `otsu_threshold`, `otsu_coefficient`, `tracy_widom_cdf` (TW β=1 CDF via Cornish-Fisher expansion with exact moments). Single named constant: EPS.
 
 ### Public API (`ag_sar/__init__.py`)
 
@@ -97,7 +97,7 @@ Three exports: `Detector`, `TokenSignals`, `DetectionResult`.
 
 - **Zero-parameter**: Otsu, effective rank, PIT. No learned weights, no magic numbers.
 - **Prompt-anchored**: PIT normalization against prefill-tail empirical CDF.
-- **Cross-signal precision fusion**: Full Ω = Σ⁻¹ from prompt-tail covariance captures inter-signal dependencies. Entropy-gated: p=0.5 → weight=0. Generalizes DerSimonian & Laird (1986) to correlated estimators (Hartung, Knapp & Sinha, 2008).
+- **Cross-signal precision fusion**: Full Ω = Σ⁻¹ from prompt-tail covariance (Ledoit-Wolf shrinkage) captures inter-signal dependencies. Entropy-gated: p=0.5 → weight=0. Generalizes DerSimonian & Laird (1986) to correlated estimators (Hartung, Knapp & Sinha, 2008).
 - **Tracy-Widom spectral calibration**: SPT uses TW₁ CDF for proper finite-sample phase transition probability. No binary clamp.
 - **Architecture portability**: ModelAdapter auto-detects via dot-path traversal (5 model families).
 - **Format-agnostic**: Boolean context_mask supports any prompt format and disjoint multi-document contexts.

@@ -1,7 +1,5 @@
 """Prefill-phase hook for context capture."""
 
-from __future__ import annotations
-
 from torch import Tensor
 
 
@@ -21,6 +19,5 @@ class PrefillContextHook:
         self.buffer_ref.append(context_hidden.detach().bfloat16())
 
     def remove(self):
-        if self._handle is not None:
-            self._handle.remove()
-            self._handle = None
+        self._handle.remove()
+        self._handle = None

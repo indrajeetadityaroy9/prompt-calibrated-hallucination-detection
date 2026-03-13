@@ -8,15 +8,15 @@ version = "0.1.0"
 description = "Aggregated Signal Architecture for Risk — zero-shot, training-free hallucination detection via 5 mechanistic signals"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.5.1",
-    "transformers>=4.57.0",
-    "accelerate>=1.12.0",
-    "numpy>=2.0.0",
-    "scipy>=1.11.0",
-    "scikit-learn>=1.4.0",
-    "datasets>=4.0.0",
-    "tqdm>=4.65.0",
-    "pyyaml>=6.0",
+    "torch==2.5.1",
+    "transformers==4.57.0",
+    "accelerate==1.12.0",
+    "numpy==2.0.0",
+    "scipy==1.14.1",
+    "scikit-learn==1.5.2",
+    "datasets==4.0.0",
+    "tqdm==4.65.0",
+    "pyyaml==6.0.2",
 ]
 
 [project.scripts]

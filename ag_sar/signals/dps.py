@@ -5,8 +5,6 @@ DPS(t) = s_rsn / (s_ctx + s_rsn + eps), range [0,1], higher = riskier.
 Magnitude-gated: DPS blends toward 0.5 when ||h_centered|| is small.
 """
 
-from __future__ import annotations
-
 import math
 
 import torch
@@ -33,7 +31,7 @@ class DualSubspaceGrounding:
             _, S, Vh = torch.linalg.svd(w, full_matrices=False)
             k_r = effective_rank(S.flip(0))
             V_rsn = Vh[-k_r:]
-        return V_rsn.to(lm_head_weight.device)
+        return V_rsn
 
     def set_context_basis(self, context_hidden: Tensor) -> None:
         """SVD of centered context hidden states -> V_ctx with effective rank."""
@@ -57,9 +55,9 @@ class DualSubspaceGrounding:
 
     def dps_from_hidden(self, h: Tensor) -> float:
         """DPS = gate * (s_rsn/(s_ctx+s_rsn)) + (1-gate) * 0.5."""
-        V_ctx = self._context_basis.to(dtype=torch.float32)
-        V_rsn = self._reasoning_basis.to(dtype=torch.float32)
-        mu = self._context_center.squeeze(0).to(dtype=torch.float32)
+        V_ctx = self._context_basis.float()
+        V_rsn = self._reasoning_basis.float()
+        mu = self._context_center.squeeze(0).float()
 
         h = h.float().squeeze()
         h_centered = h - mu
@@ -70,8 +68,6 @@ class DualSubspaceGrounding:
         s_rsn = torch.norm(V_rsn @ h_centered).item() / h_norm
 
         dps_raw = s_rsn / (s_ctx + s_rsn + EPS)
-        if self._tau < EPS:
-            return 0.5
         gate = 1.0 - math.exp(-(mag ** 2) / (self._tau ** 2))
         return 0.5 + (dps_raw - 0.5) * gate
 

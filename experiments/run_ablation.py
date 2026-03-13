@@ -1,7 +1,5 @@
 """Ablation orchestration — leave-one-out signal ablation study."""
 
-from __future__ import annotations
-
 import copy
 
 import numpy as np

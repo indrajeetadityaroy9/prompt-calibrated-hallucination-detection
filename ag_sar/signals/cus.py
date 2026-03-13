@@ -5,12 +5,10 @@ CUS = 1 - Otsu coefficient of lookback ratio vector.
 Range [0,1], higher = more unimodal = riskier.
 """
 
-from __future__ import annotations
-
 import numpy as np
 from torch import Tensor
 
-from ..numerics import otsu_threshold, EPS
+from ..numerics import otsu_coefficient
 
 
 def compute_cus(attention_slices: dict[int, Tensor], prompt_len: int) -> float:
@@ -24,12 +22,4 @@ def compute_cus(attention_slices: dict[int, Tensor], prompt_len: int) -> float:
         for h in range(attn.shape[0]):
             lr_values.append(attn[h, :prompt_len].float().sum().item())
 
-    lr = np.array(lr_values)
-    total_var = float(np.var(lr))
-    threshold = otsu_threshold(lr)
-    mask_low = lr <= threshold
-    mask_high = lr > threshold
-    w1 = float(mask_low.mean())
-    w2 = float(mask_high.mean())
-    inter_var = w1 * w2 * (float(lr[mask_low].mean()) - float(lr[mask_high].mean())) ** 2
-    return float(np.clip(1.0 - inter_var / (total_var + EPS), 0.0, 1.0))
+    return float(np.clip(1.0 - otsu_coefficient(lr_values), 0.0, 1.0))
