@@ -1,13 +1,13 @@
-"""Signal computation: CUS, POS, DPS, SPT."""
+"""Signal computation: ENT, MLP, PSP, SPT."""
 
-from .cus import compute_cus
-from .dps import DualSubspaceGrounding
+from .ent import compute_ent
+from .psp import PromptSubspaceProjection
 from ._jsd_base import CandidateJSDSignal
 from .spt import SpectralPhaseTransition
 
 __all__ = [
-    "compute_cus",
-    "DualSubspaceGrounding",
+    "compute_ent",
+    "PromptSubspaceProjection",
     "CandidateJSDSignal",
     "SpectralPhaseTransition",
 ]

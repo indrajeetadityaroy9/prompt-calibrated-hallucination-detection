@@ -14,6 +14,9 @@ from .schema import ExperimentConfig
 from .common import load_dataset, save_results
 
 
+_PROMPT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+
+
 def _generate_baseline(
     detector: Detector,
     samples: list[dict],
@@ -24,9 +27,11 @@ def _generate_baseline(
     cached = []
 
     for sample in tqdm(samples, desc="Generating baseline"):
+        prompt = _PROMPT_TEMPLATE.format(
+            context=sample["context"], question=sample["question"]
+        )
         result = detector.detect(
-            question=sample["question"],
-            context=sample["context"],
+            prompt=prompt,
             max_new_tokens=config.evaluation.max_new_tokens,
         )
 

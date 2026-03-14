@@ -1,7 +1,7 @@
 """
 Prompt-anchored signal aggregation with cross-signal precision fusion.
 
-Direct (CUS/SPT/spectral_gap) or PIT (POS/DPS) normalization.
+Direct (ENT/SPT/spectral_gap) or PIT (MLP/PSP) normalization.
 Fusion: w_i = Σ_j Ω_ij * (1-H_j)^kappa — generalized DerSimonian & Laird (1986)
 with full cross-signal precision matrix Ω = Σ⁻¹ (Hartung, Knapp & Sinha, 2008).
 kappa = 1 + median(prompt decisiveness) in [1, 2].
@@ -28,7 +28,7 @@ class AggregationResult:
 
 
 # Canonical signal ordering and index mapping for precision matrix
-_SIGNAL_ORDER = ["cus", "pos", "dps", "spt", "spectral_gap"]
+_SIGNAL_ORDER = ["ent", "mlp", "psp", "spt", "spectral_gap"]
 _SIGNAL_INDEX = {sig: i for i, sig in enumerate(_SIGNAL_ORDER)}
 _SIGNAL_SET = set(_SIGNAL_ORDER)
 

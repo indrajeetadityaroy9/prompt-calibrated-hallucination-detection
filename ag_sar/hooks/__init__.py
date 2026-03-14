@@ -9,12 +9,10 @@ Hook system for capturing hidden states during generation.
 from .adapter import ModelAdapter
 from .buffer import LayerHiddenStates, EphemeralHiddenBuffer
 from .layer_hooks import LayerHooks
-from .prefill_hooks import PrefillContextHook
 
 __all__ = [
     "ModelAdapter",
     "LayerHiddenStates",
     "EphemeralHiddenBuffer",
     "LayerHooks",
-    "PrefillContextHook",
 ]

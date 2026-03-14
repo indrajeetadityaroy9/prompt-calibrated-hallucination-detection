@@ -1,31 +1,26 @@
 """
-Candidate-set JSD: POS (parametric override) signal.
+Candidate-set JSD: MLP transformation magnitude signal.
 
 JSD between pre-MLP and post-MLP distributions restricted to adaptive candidate set.
-JSD-weighted directional override across all layers — no threshold selection needed.
+All-layer mean JSD — no threshold selection needed.
 """
 
+import numpy as np
 import torch
 from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
 from ..hooks import LayerHiddenStates
-from ..numerics import jsd, EPS
+from ..numerics import jsd
 
 
 class CandidateJSDSignal:
-    """JSD(softmax(W_U·norm(h_pre)[cand]), softmax(W_U·norm(h_post)[cand])) for POS."""
+    """JSD(softmax(W_U·norm(h_pre)[cand]), softmax(W_U·norm(h_post)[cand])) for MLP signal."""
 
     def __init__(self, lm_head: nn.Linear, final_norm: nn.Module):
         self.lm_head = lm_head
         self.final_norm = final_norm
-        self._context_basis = None
-
-    def _prepare_pair(self, h_attn: Tensor, h_mlp: Tensor):
-        """Cast to lm_head dtype on CUDA."""
-        dtype = self.lm_head.weight.dtype
-        return h_attn.to(dtype=dtype), h_mlp.to(dtype=dtype)
 
     def compute_layer_jsd(
         self,
@@ -33,8 +28,10 @@ class CandidateJSDSignal:
         h_resid_mlp: Tensor,
         candidate_set: Tensor,
     ) -> float:
-        """Candidate-set JSD for MLP-induced shift."""
-        h_resid_attn, h_resid_mlp = self._prepare_pair(h_resid_attn, h_resid_mlp)
+        """Candidate-set JSD for MLP-induced shift at a single layer."""
+        dtype = self.lm_head.weight.dtype
+        h_resid_attn = h_resid_attn.to(dtype=dtype)
+        h_resid_mlp = h_resid_mlp.to(dtype=dtype)
 
         with torch.no_grad():
             h_pre_norm = self.final_norm(h_resid_attn)
@@ -49,52 +46,13 @@ class CandidateJSDSignal:
 
         return jsd(p_pre_cand, p_post_cand)
 
-    def set_context_basis(self, V_ctx: Tensor) -> None:
-        """Store context subspace basis for directional decomposition."""
-        self._context_basis = V_ctx
-
-    def compute_directional_override(
-        self,
-        h_resid_attn: Tensor,
-        h_resid_mlp: Tensor,
-    ) -> float:
-        """Override = clamp(1 - context_ratio / expected_ratio, 0, 1)."""
-        h_resid_attn, h_resid_mlp = self._prepare_pair(h_resid_attn, h_resid_mlp)
-
-        with torch.no_grad():
-            h_pre = self.final_norm(h_resid_attn).float().squeeze(0)
-            h_post = self.final_norm(h_resid_mlp).float().squeeze(0)
-
-            delta = h_post - h_pre
-            delta_norm = torch.norm(delta)
-
-            V = self._context_basis.float()
-            proj = V.T @ (V @ delta)
-            context_ratio = torch.norm(proj) / (delta_norm + EPS)
-
-            k = V.shape[0]
-            d = V.shape[1]
-            expected_ratio = (k / d) ** 0.5
-
-            override = 1.0 - context_ratio / (expected_ratio + EPS)
-
-        return float(override.clamp(0, 1).item())
-
-    def compute_pos(
+    def compute_mlp_jsd(
         self,
         layer_states: dict[int, LayerHiddenStates],
         candidate_set: Tensor,
     ) -> float:
-        """POS: JSD-weighted mean of directional override across all layers."""
-        weighted_sum = 0.0
-        weight_sum = 0.0
-        for layer_idx, states in layer_states.items():
-            jsd_val = self.compute_layer_jsd(
-                states.h_resid_attn, states.h_resid_mlp, candidate_set,
-            )
-            override = self.compute_directional_override(
-                states.h_resid_attn, states.h_resid_mlp,
-            )
-            weighted_sum += jsd_val * override
-            weight_sum += jsd_val
-        return float(weighted_sum / (weight_sum + EPS))
+        """MLP signal: mean JSD across all layers."""
+        return float(np.mean([
+            self.compute_layer_jsd(s.h_resid_attn, s.h_resid_mlp, candidate_set)
+            for s in layer_states.values()
+        ]))

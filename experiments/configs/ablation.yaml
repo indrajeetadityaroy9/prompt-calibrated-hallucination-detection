@@ -14,7 +14,7 @@ evaluation:
   seed: 42
 
 ablation:
-  signals: ["cus", "pos", "dps", "spt", "spectral_gap"]
+  signals: ["ent", "mlp", "psp", "spt", "spectral_gap"]
 
 output:
   dir: "results/ablation"

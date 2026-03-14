@@ -10,9 +10,9 @@ from dataclasses import dataclass
 @dataclass
 class TokenSignals:
     """Per-token signals for AG-SAR detector."""
-    cus: float
-    pos: float
-    dps: float
+    ent: float
+    mlp: float
+    psp: float
     spt: float
     spectral_gap: float
 

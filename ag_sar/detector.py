@@ -2,11 +2,11 @@
 AG-SAR Hallucination Detector.
 
 5-signal decomposition of hallucination risk:
-- CUS: Lookback ratio bimodality — is the model looking at context? (attention)
-- POS: Parametric override — is the FFN overriding what attention found? (transformation)
-- DPS: Dual-subspace projection — does the representation live in context or reasoning space? (geometry)
-- SPT: Tracy-Widom calibrated spectral phase-transition — has the manifold collapsed toward noise? (spectral)
-- Spectral Gap: λ₂/(λ₁+λ₂) — is the signal structure directionally coherent? (spectral)
+- ENT: Attention entropy dispersion — head specialization bimodality (attention)
+- MLP: MLP transformation magnitude — parametric intervention strength (transformation)
+- PSP: Prompt subspace projection — drift from prompt conditioning (geometry)
+- SPT: Tracy-Widom calibrated spectral phase-transition — manifold collapse (spectral)
+- Spectral Gap: λ₂/(λ₁+λ₂) — directional coherence (spectral)
 
 Fusion: Cross-signal precision-coupled entropy-gated weighted mean.
 """
@@ -21,11 +21,10 @@ from .hooks import (
     EphemeralHiddenBuffer,
     LayerHooks,
     ModelAdapter,
-    PrefillContextHook,
 )
-from .signals.dps import DualSubspaceGrounding
+from .signals.psp import PromptSubspaceProjection
 from .signals._jsd_base import CandidateJSDSignal
-from .signals.cus import compute_cus
+from .signals.ent import compute_ent
 from .signals.spt import SpectralPhaseTransition
 from .aggregation.fusion import PromptAnchoredAggregator
 from .aggregation.spans import SpanMerger
@@ -38,9 +37,9 @@ class Detector:
     AG-SAR hallucination detector.
 
     Pipeline:
-    1. __init__: Precompute reasoning subspace SVD (once per model load)
-    2. prefill: Compute context SVD, prompt stats, prompt center, magnitude tau, SPT window
-    3. detect/score: CUS + POS + DPS + SPT -> Entropy-Gated fusion -> spans
+    1. __init__: Setup signal objects (once per model load)
+    2. prefill: Compute prompt SVD, prompt stats, prompt center, magnitude tau, SPT window
+    3. detect/score: ENT + MLP + PSP + SPT -> Entropy-Gated fusion -> spans
     """
 
     def __init__(self, model: nn.Module, tokenizer) -> None:
@@ -53,23 +52,20 @@ class Detector:
         self._layers = self.adapter.get_layers(model)
         self.num_layers = len(self._layers)
 
-        self.dps_signal = DualSubspaceGrounding(lm_head_weight=self.lm_head.weight)
+        self.psp_signal = PromptSubspaceProjection()
         self.jsd_signal = CandidateJSDSignal(self.lm_head, self.final_norm)
         self.aggregator = PromptAnchoredAggregator()
         self.hidden_buffer = EphemeralHiddenBuffer()
 
         self.prompt_stats: dict | None = None
-        self._cus_prompt_len: int = 0
         self._hooks: list[LayerHooks] = []
 
     def _prefill(
         self,
         input_ids: Tensor,
-        context_mask: Tensor,
         prompt_len: int,
     ) -> tuple:
-        """Run prefill: compute context SVD, prompt center, magnitude tau, prompt stats."""
-        context_mask = context_mask.to("cuda")
+        """Run prefill: compute prompt SVD, prompt center, magnitude tau, prompt stats."""
         window_size = adaptive_window(prompt_len)
 
         # Install 2-point layer hooks (persist through generation)
@@ -78,20 +74,14 @@ class Detector:
             hook.install(self._layers[layer_idx])
             self._hooks.append(hook)
 
-        # Context hook on midpoint layer
-        ctx_layer_idx = self.num_layers // 2
-        ctx_buf = []
-        ctx_hook = PrefillContextHook(context_mask, ctx_buf)
-        ctx_hook.install(self._layers[ctx_layer_idx])
+        # Capture prompt hidden states at midpoint layer for PSP calibration
+        mid_layer_idx = self.num_layers // 2
+        prompt_hidden_buf = []
 
-        # Prefill hidden capture (final layer, for prompt center + magnitude tau)
-        prefill_hidden_buf = []
+        def capture_prompt_hidden(module, input, output):
+            prompt_hidden_buf.append(output[0][0, :prompt_len, :].detach())
 
-        def capture_hidden(module, input, output):
-            prefill_hidden_buf.append(output[0].detach())
-
-        final_layer = self._layers[-1]
-        capture_handle = final_layer.register_forward_hook(capture_hidden)
+        mid_handle = self._layers[mid_layer_idx].register_forward_hook(capture_prompt_hidden)
 
         # Per-layer tail capture for calibration (2-point: h_resid_attn + h_resid_mlp)
         cal_tail_start = max(0, prompt_len - window_size)
@@ -136,50 +126,35 @@ class Detector:
         past_key_values = outputs.past_key_values
         last_logits = outputs.logits[:, -1, :]
 
-        # Capture prefill hidden, remove temporary hooks
-        prefill_hidden = prefill_hidden_buf[0]
-        capture_handle.remove()
+        # Remove temporary hooks
+        mid_handle.remove()
         for h in tail_handles:
             h.remove()
 
-        # Context basis from midpoint layer
-        self.dps_signal.set_context_basis(ctx_buf[0])
-        self.jsd_signal.set_context_basis(self.dps_signal.context_basis)
-        ctx_hook.remove()
+        # PSP calibration from midpoint layer prompt hidden states
+        prompt_hidden = prompt_hidden_buf[0]
+        prompt_S = self.psp_signal.calibrate(prompt_hidden)
 
-        # SPT: window size from context spectral structure
-        ctx_hidden = ctx_buf[0].float()
-        ctx_centered = ctx_hidden - ctx_hidden.mean(dim=0, keepdim=True)
-        ctx_S = torch.linalg.svdvals(ctx_centered)
-        spt_window = effective_rank(ctx_S)
-        hidden_dim = ctx_hidden.shape[-1]
+        # SPT: window size from prompt spectral structure
+        spt_window = effective_rank(prompt_S)
+        hidden_dim = prompt_hidden.shape[-1]
         self.spt_signal = SpectralPhaseTransition(hidden_dim, spt_window)
-
-        # Prompt center (non-context tokens)
-        non_context_mask = ~context_mask[:prompt_len]
-        self.dps_signal.set_prompt_center(prefill_hidden[0, non_context_mask, :])
-
-        # Magnitude tau
-        self.dps_signal.set_magnitude_tau(prefill_hidden[0], self.dps_signal._context_center)
-
-        # CUS prompt length (needed during generation)
-        self._cus_prompt_len = prompt_len
 
         # Self-calibrate
         self.prompt_stats = self_calibrate(
-            dps_signal=self.dps_signal,
+            psp_signal=self.psp_signal,
             jsd_signal=self.jsd_signal,
             spt_signal=self.spt_signal,
             lm_head=self.lm_head,
             final_norm=self.final_norm,
             prompt_len=prompt_len,
             tail_per_layer=tail_per_layer,
-            ctx_layer_idx=ctx_layer_idx,
+            mid_layer_idx=mid_layer_idx,
         )
 
         # Seed SPT generation window from tail
         self.spt_signal.reset()
-        tail_states = tail_per_layer[ctx_layer_idx]["h_resid_mlp"]
+        tail_states = tail_per_layer[mid_layer_idx]["h_resid_mlp"]
         for t in range(tail_states.shape[0]):
             self.spt_signal.push(tail_states[t])
 
@@ -190,6 +165,7 @@ class Detector:
         logits: Tensor,
         emitted_token_id: int,
         attentions: tuple | None = None,
+        seq_len: int = 0,
     ) -> TokenSignals:
         """Compute all 5 signals for a single generation token."""
         layer_states = self.hidden_buffer.get_states()
@@ -200,21 +176,21 @@ class Detector:
         cand = torch.topk(logits, min(k, len(logits))).indices
         cand = torch.unique(torch.cat([cand, torch.tensor([emitted_token_id], device="cuda")]))
 
-        # DPS — all-layer mean
-        dps_hidden = {idx: states.h_resid_mlp for idx, states in layer_states.items()}
-        dps = self.dps_signal.compute_dps(dps_hidden)
-
-        # POS — JSD-weighted directional override
-        pos = self.jsd_signal.compute_pos(layer_states, cand)
-
-        # CUS — lookback ratio bimodality
-        cus = 0.5
+        # ENT — attention entropy dispersion
+        ent = 0.5
         if attentions is not None:
             attn_slices = {
                 layer_idx: attentions[layer_idx][0, :, -1, :]
                 for layer_idx in range(self.num_layers)
             }
-            cus = compute_cus(attn_slices, self._cus_prompt_len)
+            ent = compute_ent(attn_slices, seq_len)
+
+        # MLP — transformation magnitude (all-layer JSD)
+        mlp = self.jsd_signal.compute_mlp_jsd(layer_states, cand)
+
+        # PSP — prompt subspace projection (all-layer mean)
+        psp_hidden = {idx: states.h_resid_mlp for idx, states in layer_states.items()}
+        psp = self.psp_signal.compute_psp(psp_hidden)
 
         # SPT — spectral phase-transition (midpoint layer) + spectral gap
         mid_layer = self.num_layers // 2
@@ -222,42 +198,12 @@ class Detector:
         spt, spectral_gap = self.spt_signal.compute_spt()
 
         self.hidden_buffer.clear()
-        return TokenSignals(cus=cus, pos=pos, dps=dps, spt=spt, spectral_gap=spectral_gap)
+        return TokenSignals(ent=ent, mlp=mlp, psp=psp, spt=spt, spectral_gap=spectral_gap)
 
     def _cleanup(self):
         for h in self._hooks:
             h.remove()
         self._hooks.clear()
-
-    def _build_input_with_mask(
-        self,
-        context: str,
-        question: str,
-        template: str,
-    ) -> tuple[Tensor, Tensor, int]:
-        """Build input_ids + context_mask from template segments."""
-        parts = template.split("{context}")
-        prefix_str = parts[0]
-        rest = parts[1].split("{question}")
-        middle_str = rest[0]
-        suffix_str = rest[1]
-
-        bos = [self.tokenizer.bos_token_id] if self.tokenizer.bos_token_id is not None else []
-        prefix = self.tokenizer.encode(prefix_str, add_special_tokens=False)
-        ctx_tokens = self.tokenizer.encode(context, add_special_tokens=False)
-        middle = self.tokenizer.encode(middle_str, add_special_tokens=False)
-        q_tokens = self.tokenizer.encode(question, add_special_tokens=False)
-        suffix = self.tokenizer.encode(suffix_str, add_special_tokens=False)
-
-        ctx_start = len(bos) + len(prefix)
-        ctx_end = ctx_start + len(ctx_tokens)
-        tokens = bos + prefix + ctx_tokens + middle + q_tokens + suffix
-
-        context_mask = torch.zeros(len(tokens), dtype=torch.bool)
-        context_mask[ctx_start:ctx_end] = True
-
-        input_ids = torch.tensor([tokens], dtype=torch.long, device="cuda")
-        return input_ids, context_mask, len(tokens)
 
     def _aggregate_results(
         self,
@@ -270,9 +216,9 @@ class Detector:
         )
 
         response_signals = {
-            "cus": np.array([s.cus for s in token_results]),
-            "pos": np.array([s.pos for s in token_results]),
-            "dps": np.array([s.dps for s in token_results]),
+            "ent": np.array([s.ent for s in token_results]),
+            "mlp": np.array([s.mlp for s in token_results]),
+            "psp": np.array([s.psp for s in token_results]),
             "spt": np.array([s.spt for s in token_results]),
             "spectral_gap": np.array([s.spectral_gap for s in token_results]),
         }
@@ -299,7 +245,6 @@ class Detector:
     def _generation_loop(
         self,
         input_ids: Tensor,
-        context_mask: Tensor,
         response_ids: list[int] | None = None,
         max_new_tokens: int = 256,
     ) -> DetectionResult:
@@ -307,7 +252,7 @@ class Detector:
         prompt_len = input_ids.shape[1]
         attention_mask = torch.ones_like(input_ids)
 
-        past_key_values, next_logits = self._prefill(input_ids, context_mask, prompt_len)
+        past_key_values, next_logits = self._prefill(input_ids, prompt_len)
 
         all_ids = input_ids.clone()
         token_results: list[TokenSignals] = []
@@ -315,14 +260,14 @@ class Detector:
         # Determine total steps
         n_steps = len(response_ids) if response_ids is not None else max_new_tokens
 
-        # First token
+        # First token (no attentions from prefill)
         if response_ids is not None:
             token_id = response_ids[0]
         else:
             token_id = next_logits.argmax(dim=-1).item()
 
         signals = self.compute_token_signals(
-            next_logits.squeeze(0), token_id, attentions=None
+            next_logits.squeeze(0), token_id, attentions=None, seq_len=prompt_len + 1
         )
         token_results.append(signals)
 
@@ -337,6 +282,7 @@ class Detector:
         # Remaining tokens
         for step in range(1, n_steps):
             cache_position = cache_position + 1
+            seq_len = prompt_len + step + 1
             model_inputs = self.model.prepare_inputs_for_generation(
                 input_ids=next_token,
                 past_key_values=past_key_values,
@@ -357,7 +303,7 @@ class Detector:
                 token_id = logits.argmax(dim=-1).item()
 
             signals = self.compute_token_signals(
-                logits.squeeze(0), token_id, attentions=outputs.attentions,
+                logits.squeeze(0), token_id, attentions=outputs.attentions, seq_len=seq_len,
             )
             token_results.append(signals)
 
@@ -377,32 +323,27 @@ class Detector:
     def detect_from_tokens(
         self,
         input_ids: Tensor,
-        context_mask: Tensor,
         max_new_tokens: int = 256,
     ) -> DetectionResult:
-        """Format-agnostic detection from pre-tokenized input + context mask."""
-        return self._generation_loop(input_ids, context_mask, max_new_tokens=max_new_tokens)
-
-    _DEFAULT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+        """Detection from pre-tokenized input."""
+        return self._generation_loop(input_ids, max_new_tokens=max_new_tokens)
 
     def detect(
         self,
-        question: str,
-        context: str,
+        prompt: str,
         max_new_tokens: int = 256,
-        prompt_template: str = _DEFAULT_TEMPLATE,
     ) -> DetectionResult:
         """Generate text with hallucination detection."""
-        input_ids, context_mask, _ = self._build_input_with_mask(
-            context, question, prompt_template
+        input_ids = torch.tensor(
+            [self.tokenizer.encode(prompt, add_special_tokens=True)],
+            dtype=torch.long, device="cuda",
         )
-        return self.detect_from_tokens(input_ids, context_mask, max_new_tokens)
+        return self._generation_loop(input_ids, max_new_tokens=max_new_tokens)
 
     def score(
         self,
         prompt: str,
         response_text: str,
-        context_text: str,
     ) -> DetectionResult:
         """Score pre-existing text via teacher-forced decode."""
         full_text = prompt + response_text
@@ -411,14 +352,5 @@ class Detector:
         prompt_len = len(prompt_tokens)
         response_ids = full_tokens[prompt_len:]
 
-        ctx_ids = self.tokenizer.encode(context_text, add_special_tokens=False)
-        ctx_start = next(
-            i for i in range(len(prompt_tokens) - len(ctx_ids) + 1)
-            if prompt_tokens[i:i + len(ctx_ids)] == ctx_ids
-        )
-
-        context_mask = torch.zeros(prompt_len, dtype=torch.bool)
-        context_mask[ctx_start:ctx_start + len(ctx_ids)] = True
-
         input_ids = torch.tensor([prompt_tokens], dtype=torch.long, device="cuda")
-        return self._generation_loop(input_ids, context_mask, response_ids=response_ids)
+        return self._generation_loop(input_ids, response_ids=response_ids)

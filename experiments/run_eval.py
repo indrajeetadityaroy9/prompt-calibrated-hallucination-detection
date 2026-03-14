@@ -14,6 +14,9 @@ from .schema import ExperimentConfig
 from .common import load_dataset, save_results
 
 
+_PROMPT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+
+
 @dataclass
 class SampleResult:
     question: str
@@ -22,9 +25,9 @@ class SampleResult:
     f1: float
     is_hallucination: bool
     response_risk: float
-    mean_cus: float
-    mean_pos: float
-    mean_dps: float
+    mean_ent: float
+    mean_mlp: float
+    mean_psp: float
     mean_spt: float
     mean_spectral_gap: float
     n_tokens: int
@@ -41,18 +44,20 @@ def _run_dataset(
     print_interval = max(1, config.evaluation.n_samples // 4)
 
     for i, sample in enumerate(tqdm(samples, desc=f"Eval ({samples[0]['dataset']})")):
+        prompt = _PROMPT_TEMPLATE.format(
+            context=sample["context"], question=sample["question"]
+        )
         result = detector.detect(
-            question=sample["question"],
-            context=sample["context"],
+            prompt=prompt,
             max_new_tokens=config.evaluation.max_new_tokens,
         )
 
         generated = result.generated_text.strip()
         f1 = max_f1_score(generated, sample["answers"])
 
-        mean_cus = float(np.mean([s.cus for s in result.token_signals]))
-        mean_pos = float(np.mean([s.pos for s in result.token_signals]))
-        mean_dps = float(np.mean([s.dps for s in result.token_signals]))
+        mean_ent = float(np.mean([s.ent for s in result.token_signals]))
+        mean_mlp = float(np.mean([s.mlp for s in result.token_signals]))
+        mean_psp = float(np.mean([s.psp for s in result.token_signals]))
         mean_spt = float(np.mean([s.spt for s in result.token_signals]))
         mean_gap = float(np.mean([s.spectral_gap for s in result.token_signals]))
 
@@ -63,9 +68,9 @@ def _run_dataset(
             f1=f1,
             is_hallucination=False,  # set by adaptive Otsu below
             response_risk=result.response_risk,
-            mean_cus=mean_cus,
-            mean_pos=mean_pos,
-            mean_dps=mean_dps,
+            mean_ent=mean_ent,
+            mean_mlp=mean_mlp,
+            mean_psp=mean_psp,
             mean_spt=mean_spt,
             mean_spectral_gap=mean_gap,
             n_tokens=result.num_tokens,
@@ -89,7 +94,7 @@ def _run_dataset(
     metrics = compute_metrics(scores, labels)
 
     signal_aurocs = {}
-    for sig_name in ["mean_cus", "mean_pos", "mean_dps", "mean_spt", "mean_spectral_gap", "response_risk"]:
+    for sig_name in ["mean_ent", "mean_mlp", "mean_psp", "mean_spt", "mean_spectral_gap", "response_risk"]:
         vals = [getattr(r, sig_name) for r in results]
         signal_aurocs[sig_name] = float(roc_auc_score(labels, vals))
 
