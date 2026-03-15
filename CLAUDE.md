@@ -44,10 +44,10 @@ Entry point: `Detector` in `ag_sar/detector.py`.
 
 ### Five Signals
 
-- **ENT** — `signals/ent.py`: Attention entropy dispersion. ENT = 1 - Otsu coefficient of per-head normalized entropies. Measures head specialization bimodality. Direct mode (no PIT).
-- **MLP** — `signals/_jsd_base.py`: MLP transformation magnitude. All-layer mean of JSD(pre-MLP logits, post-MLP logits) on candidate set. PIT normalized.
-- **PSP** — `signals/psp.py`: Prompt subspace projection. PSP = 1 - ||V_prompt @ h_centered|| / ||h_centered||, magnitude-gated via Rayleigh survival function. All-layer mean. PIT normalized.
-- **SPT** — `signals/spt.py`: Tracy-Widom calibrated spectral phase-transition. SPT = 1 - F_{TW,1}((λ₁ - μ_TW)/σ_TW) where μ_TW = σ²(1+√γ)² is the MP upper edge and σ_TW is the finite-sample TW scaling rate. Direct mode.
+- **ENT** — `signals/ent.py`: Attention entropy dispersion. ENT = 1 - Otsu coefficient of per-head normalized entropies. Fully vectorized: stacked (n_layers, n_heads, seq) tensor, zero Python loops. Direct mode (no PIT).
+- **MLP** — `signals/_jsd_base.py`: MLP transformation magnitude. Batched all-layer JSD(pre-MLP logits, post-MLP logits) on candidate set via stacked tensor ops. PIT normalized.
+- **PSP** — `signals/psp.py`: Prompt subspace projection. PSP = 1 - ||V_prompt @ h_centered|| / ||h_centered||, magnitude-gated via Rayleigh survival function. Batched all-layer mean via stacked matmul. PIT normalized.
+- **SPT** — `signals/spt.py`: Tracy-Widom calibrated spectral phase-transition. SPT = 1 - F_{TW,1}((λ₁ - μ_TW)/σ_TW) where μ_TW = σ²(1+√γ)² is the MP upper edge and σ_TW is the finite-sample TW scaling rate. Pre-allocated ring buffer (no deque/list/stack overhead). Direct mode.
 - **Spectral Gap** — `signals/spt.py`: λ₂/(λ₁+λ₂) ∈ [0, 0.5] capturing directional coherence. Near 0 = clean spike (low risk), near 0.5 = degenerate (high risk). Computed from same SVD as SPT. Direct mode.
 
 ### Hook System (`ag_sar/hooks/`)
@@ -59,12 +59,12 @@ Entry point: `Detector` in `ag_sar/detector.py`.
 
 ### Calibration (`ag_sar/calibration.py`)
 
-`self_calibrate()`: prompt-anchored PIT reference values + variance for PSP and MLP. ENT, SPT, and spectral gap use direct mode. SPT/gap variance computed incrementally from prompt-tail evaluations. Computes PSP-MLP 2×2 covariance via Ledoit-Wolf shrinkage (parameter-free optimal regularization), inverted and embedded in 5×5 diagonal precision matrix. `adaptive_window()`: sqrt(prompt_len).
+`self_calibrate()`: prompt-anchored PIT reference values + variance for PSP and MLP. PSP calibration batched across all tail positions × all layers in a single tensor operation. MLP logits batched in one forward pass. ENT, SPT, and spectral gap use direct mode. SPT/gap variance computed incrementally from prompt-tail evaluations. Computes PSP-MLP 2×2 covariance via Ledoit-Wolf shrinkage (parameter-free optimal regularization), inverted and embedded in 5×5 diagonal precision matrix. `adaptive_window()`: sqrt(prompt_len).
 
 ### Aggregation (`ag_sar/aggregation/`)
 
-- `fusion.py`: w_i = Σ_j Ω_ij × (1-H_j)^κ — cross-signal precision-coupled entropy-gated fusion (generalized DerSimonian & Laird). Token-level + response-level (signal-first). 5 signals: {ent, mlp, psp, spt, spectral_gap}. Precision matrix always computed during calibration.
-- `spans.py`: Otsu-adaptive threshold. Expected-gap merging.
+- `fusion.py`: w_i = Σ_j Ω_ij × (1-H_j)^κ — cross-signal precision-coupled entropy-gated fusion (generalized DerSimonian & Laird). Matrix form: (n_tokens, 5) probability matrix × precision submatrix in single numpy matmul. Token-level + response-level (signal-first). 5 signals: {ent, mlp, psp, spt, spectral_gap}.
+- `spans.py`: Otsu-adaptive threshold. Vectorized span detection via np.diff/np.split. Expected-gap merging.
 
 ### Data Structures (`ag_sar/config.py`)
 
@@ -86,7 +86,7 @@ Entry point: `Detector` in `ag_sar/detector.py`.
 
 ### Numerics (`ag_sar/numerics.py`)
 
-`jsd` (bits, [0,1]), `effective_rank` (parameter-free via singular value entropy), `otsu_threshold`, `otsu_coefficient`, `tracy_widom_cdf` (TW β=1 CDF via Cornish-Fisher expansion with exact moments). Single named constant: EPS.
+`effective_rank` (parameter-free via singular value entropy), `otsu_threshold`, `otsu_coefficient`, `tracy_widom_cdf` (TW β=1 CDF via Cornish-Fisher expansion with exact moments). Single named constant: EPS. JSD computation is inlined as batched tensor ops in `_jsd_base.py`.
 
 ### Public API (`ag_sar/__init__.py`)
 

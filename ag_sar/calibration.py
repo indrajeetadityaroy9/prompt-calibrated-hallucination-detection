@@ -41,33 +41,53 @@ def self_calibrate(
     stats = {}
     first_key = next(iter(tail_per_layer))
     n_tail = tail_per_layer[first_key]["h_resid_mlp"].shape[0]
+    layer_keys = sorted(tail_per_layer.keys())
+    n_layers = len(layer_keys)
 
-    # PSP: all-layer mean per tail position
-    psp_values = []
-    for t in range(n_tail):
-        h_dict = {li: tail_per_layer[li]["h_resid_mlp"][t] for li in tail_per_layer}
-        psp_values.append(psp_signal.compute_psp(h_dict))
-    psp_arr = np.array(psp_values)
+    # --- PSP: batched across all tail positions × all layers ---
+    # Build (n_tail, n_layers, d) tensor
+    H_all = torch.stack(
+        [tail_per_layer[li]["h_resid_mlp"] for li in layer_keys], dim=1
+    ).float()
+    d = H_all.shape[-1]
+
+    V = psp_signal._prompt_basis.float()
+    center = psp_signal._prompt_center
+    tau = psp_signal._tau
+
+    H_flat = H_all.reshape(-1, d)
+    H_centered = H_flat - center
+    mags = torch.norm(H_centered, dim=-1)
+    proj_norms = torch.norm(H_centered @ V.T, dim=-1)
+    s_prompt = proj_norms / (mags + EPS)
+    psp_raw = 1.0 - s_prompt
+    gates = 1.0 - torch.exp(-mags.square() / (tau ** 2))
+    psp_flat = 0.5 + (psp_raw - 0.5) * gates
+    psp_arr = psp_flat.reshape(n_tail, n_layers).mean(dim=1).cpu().numpy()
     stats["psp"] = {"sorted_vals": np.sort(psp_arr), "variance": float(np.var(psp_arr))}
 
-    # MLP: JSD per tail position
-    mlp_values = []
+    # --- MLP: batch logits computation, per-position JSD ---
     lm_head_dtype = lm_head.weight.dtype
+    final_layer = max(layer_keys)
+    h_final_tail = tail_per_layer[final_layer]["h_resid_mlp"]  # (n_tail, d)
+
+    with torch.no_grad():
+        all_logits = lm_head(
+            final_norm(h_final_tail.unsqueeze(0).to(dtype=lm_head_dtype))
+        ).squeeze(0)  # (n_tail, vocab)
+    all_probs = torch.softmax(all_logits.float(), dim=-1)
+
+    mlp_values = []
     for t in range(n_tail):
+        k = max(2, effective_rank(all_probs[t]))
+        cand = torch.topk(all_logits[t], k).indices
         layer_states = {
             li: LayerHiddenStates(
                 h_resid_attn=tail_per_layer[li]["h_resid_attn"][t],
                 h_resid_mlp=tail_per_layer[li]["h_resid_mlp"][t],
             )
-            for li in tail_per_layer
+            for li in layer_keys
         }
-        final_layer = max(layer_states.keys())
-        h = layer_states[final_layer].h_resid_mlp.unsqueeze(0).unsqueeze(0)
-        with torch.no_grad():
-            logits_t = lm_head(final_norm(h.to(dtype=lm_head_dtype))).squeeze()
-        probs_t = torch.softmax(logits_t.float(), dim=-1)
-        k = max(2, effective_rank(probs_t))
-        cand = torch.topk(logits_t, min(k, len(logits_t))).indices
         mlp_values.append(jsd_signal.compute_mlp_jsd(layer_states, cand))
     mlp_arr = np.array(mlp_values)
     stats["mlp"] = {"sorted_vals": np.sort(mlp_arr), "variance": float(np.var(mlp_arr))}
@@ -90,12 +110,6 @@ def self_calibrate(
     stats["spectral_gap"] = {"mode": "direct", "variance": float(np.var(gap_values))}
 
     # --- Cross-signal precision matrix ---
-    # Build from the two signals with genuine per-position variation (PSP, MLP).
-    # ENT, SPT, and spectral_gap lack per-position tail samples.
-    # Strategy: compute the 2×2 PSP-MLP covariance to capture their coupling,
-    # then embed into a 5×5 diagonal precision with the 2×2 off-diagonal block
-    # for the PSP-MLP subspace.
-
     diag_vars = np.array([
         stats["ent"]["variance"],
         stats["mlp"]["variance"],
@@ -104,7 +118,6 @@ def self_calibrate(
         stats["spectral_gap"]["variance"],
     ])
 
-    # Start from diagonal precision, then embed PSP-MLP cross-correlation
     precision = np.diag(1.0 / np.maximum(diag_vars, EPS))
 
     psp_mlp_matrix = np.column_stack([mlp_arr, psp_arr])  # (n_tail, 2)
@@ -112,10 +125,7 @@ def self_calibrate(
     cov_2x2, _ = ledoit_wolf(psp_mlp_matrix)
     prec_2x2 = np.linalg.inv(cov_2x2)
     # Embed into positions [1,1],[1,2],[2,1],[2,2] (MLP=idx1, PSP=idx2)
-    precision[1, 1] = prec_2x2[0, 0]
-    precision[1, 2] = prec_2x2[0, 1]
-    precision[2, 1] = prec_2x2[1, 0]
-    precision[2, 2] = prec_2x2[1, 1]
+    precision[1:3, 1:3] = prec_2x2
 
     stats["_cross_signal_precision"] = precision
 

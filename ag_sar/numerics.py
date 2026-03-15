@@ -1,6 +1,5 @@
-"""Numerical utilities: JSD, effective rank, Otsu threshold, Tracy-Widom CDF."""
+"""Numerical utilities: effective rank, Otsu threshold, Tracy-Widom CDF."""
 
-import math
 import numpy as np
 import torch
 from scipy.stats import norm
@@ -18,9 +17,6 @@ _TW1_MU = -1.2065335745820
 _TW1_SIGMA = 1.2680340580149
 _TW1_SKEW = 0.29346452408
 
-# Nats-to-bits conversion factor: 1 / ln(2).
-_BITS_PER_NAT = 1.0 / math.log(2)
-
 
 def tracy_widom_cdf(s: float) -> float:
     """CDF of the Tracy-Widom beta=1 distribution via Cornish-Fisher expansion.
@@ -34,20 +30,8 @@ def tracy_widom_cdf(s: float) -> float:
     z = (s - _TW1_MU) / _TW1_SIGMA
     # Cornish-Fisher third-cumulant correction (Cornish & Fisher, 1938):
     # z_cf = z - (skew / 3!) * (z² - 1)
-    z_cf = z - (_TW1_SKEW / math.factorial(3)) * (z * z - 1.0)
+    z_cf = z - (_TW1_SKEW / 6) * (z * z - 1.0)
     return float(norm.cdf(z_cf))
-
-
-def jsd(p: Tensor, q: Tensor) -> float:
-    """Jensen-Shannon divergence in bits, range [0, 1].
-
-    JSD(P‖Q) = ½·KL(P‖M) + ½·KL(Q‖M),  M = ½·(P+Q)
-    Symmetric, bounded, and well-defined even when supports differ.
-    """
-    m = 0.5 * (p + q)
-    kl_pm = (torch.xlogy(p, p) - torch.xlogy(p, m)).sum()
-    kl_qm = (torch.xlogy(q, q) - torch.xlogy(q, m)).sum()
-    return float((0.5 * kl_pm + 0.5 * kl_qm).item() * _BITS_PER_NAT)
 
 
 def effective_rank(S: Tensor) -> int:

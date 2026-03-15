@@ -5,10 +5,7 @@ PSP(t) = 1 - ||V_prompt @ h_centered|| / ||h_centered||, range [0,1], higher = r
 Magnitude-gated: PSP blends toward 0.5 when ||h_centered|| is small.
 """
 
-import math
-
 import torch
-import numpy as np
 from torch import Tensor
 
 from ..numerics import EPS, effective_rank
@@ -33,18 +30,15 @@ class PromptSubspaceProjection:
         self._tau = float(norms.median().item())
         return S
 
-    def psp_from_hidden(self, h: Tensor) -> float:
-        """PSP = gate * (1 - s_prompt) + (1-gate) * 0.5."""
-        V = self._prompt_basis.float()
-        h = h.float().squeeze()
-        h_centered = h - self._prompt_center
-        mag = torch.norm(h_centered).item()
-
-        s_prompt = torch.norm(V @ h_centered).item() / (mag + EPS)
-        psp_raw = 1.0 - s_prompt
-        gate = 1.0 - math.exp(-(mag ** 2) / (self._tau ** 2))
-        return 0.5 + (psp_raw - 0.5) * gate
-
     def compute_psp(self, layer_hidden_states: dict[int, Tensor]) -> float:
-        """Mean PSP over all layers."""
-        return float(np.mean([self.psp_from_hidden(h) for h in layer_hidden_states.values()]))
+        """Batched PSP over all layers."""
+        V = self._prompt_basis.float()
+        H = torch.stack([h.float().squeeze() for h in layer_hidden_states.values()])
+        H_centered = H - self._prompt_center
+        mags = torch.norm(H_centered, dim=-1)
+        proj_norms = torch.norm(H_centered @ V.T, dim=-1)
+        s_prompt = proj_norms / (mags + EPS)
+        psp_raw = 1.0 - s_prompt
+        gates = 1.0 - torch.exp(-mags.square() / (self._tau ** 2))
+        psp = 0.5 + (psp_raw - 0.5) * gates
+        return float(psp.mean().item())

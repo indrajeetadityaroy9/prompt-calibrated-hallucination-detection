@@ -32,49 +32,39 @@ class SpanMerger:
         self.max_gap = max_gap
 
     @classmethod
-    def adaptive(cls, token_risks: list[float]) -> SpanMerger:
+    def adaptive(cls, token_risks: list[float]) -> "SpanMerger":
         """Otsu-based adaptive threshold with expected-gap merging."""
-        n = len(token_risks)
-        risks = np.array(token_risks)
+        risks = np.asarray(token_risks)
 
         threshold = otsu_threshold(risks)
 
         n_above = int(np.sum(risks >= threshold))
-        max_gap = n // n_above
+        max_gap = len(risks) // n_above
 
         return cls(threshold=threshold, max_gap=max_gap)
 
     def find_spans(self, token_risks: list[float]) -> list[RiskySpan]:
         """Find contiguous spans above threshold, merge with gap tolerance."""
-        high_risk_indices = [
-            i for i, r in enumerate(token_risks) if r >= self.threshold
-        ]
+        risks = np.asarray(token_risks)
+        high_risk_indices = np.nonzero(risks >= self.threshold)[0]
 
-        if not high_risk_indices:
+        if len(high_risk_indices) == 0:
             return []
 
+        # Split into groups by gap tolerance
+        gaps = np.diff(high_risk_indices)
+        split_points = np.nonzero(gaps > self.max_gap)[0] + 1
+        groups = np.split(high_risk_indices, split_points)
+
         spans = []
-        current_start = high_risk_indices[0]
-        current_end = high_risk_indices[0] + 1
-
-        for i in range(1, len(high_risk_indices)):
-            idx = high_risk_indices[i]
-            if idx <= current_end + self.max_gap:
-                current_end = idx + 1
-            else:
-                spans.append((current_start, current_end))
-                current_start = idx
-                current_end = idx + 1
-
-        spans.append((current_start, current_end))
-
-        return [
-            RiskySpan(
+        for g in groups:
+            start, end = int(g[0]), int(g[-1]) + 1
+            span_risks = risks[start:end]
+            spans.append(RiskySpan(
                 start=start,
                 end=end,
-                token_risks=token_risks[start:end],
-                max_risk=max(token_risks[start:end]),
-                mean_risk=sum(token_risks[start:end]) / (end - start),
-            )
-            for start, end in spans
-        ]
+                token_risks=span_risks.tolist(),
+                max_risk=float(span_risks.max()),
+                mean_risk=float(span_risks.mean()),
+            ))
+        return spans

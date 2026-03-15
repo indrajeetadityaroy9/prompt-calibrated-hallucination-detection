@@ -154,9 +154,7 @@ class Detector:
 
         # Seed SPT generation window from tail
         self.spt_signal.reset()
-        tail_states = tail_per_layer[mid_layer_idx]["h_resid_mlp"]
-        for t in range(tail_states.shape[0]):
-            self.spt_signal.push(tail_states[t])
+        self.spt_signal.seed(tail_per_layer[mid_layer_idx]["h_resid_mlp"])
 
         return past_key_values, last_logits
 
@@ -173,17 +171,14 @@ class Detector:
         # Candidate set via effective rank
         probs = torch.softmax(logits.float(), dim=-1)
         k = max(2, effective_rank(probs))
-        cand = torch.topk(logits, min(k, len(logits))).indices
+        cand = torch.topk(logits, k).indices
         cand = torch.unique(torch.cat([cand, torch.tensor([emitted_token_id], device="cuda")]))
 
         # ENT — attention entropy dispersion
         ent = 0.5
         if attentions is not None:
-            attn_slices = {
-                layer_idx: attentions[layer_idx][0, :, -1, :]
-                for layer_idx in range(self.num_layers)
-            }
-            ent = compute_ent(attn_slices, seq_len)
+            attn_tensor = torch.stack(attentions)[:, 0, :, -1, :]
+            ent = compute_ent(attn_tensor, seq_len)
 
         # MLP — transformation magnitude (all-layer JSD)
         mlp = self.jsd_signal.compute_mlp_jsd(layer_states, cand)
@@ -215,13 +210,12 @@ class Detector:
             all_ids[0, prompt_len:], skip_special_tokens=True
         )
 
-        response_signals = {
-            "ent": np.array([s.ent for s in token_results]),
-            "mlp": np.array([s.mlp for s in token_results]),
-            "psp": np.array([s.psp for s in token_results]),
-            "spt": np.array([s.spt for s in token_results]),
-            "spectral_gap": np.array([s.spectral_gap for s in token_results]),
-        }
+        _SIG_NAMES = ("ent", "mlp", "psp", "spt", "spectral_gap")
+        n = len(token_results)
+        signals_matrix = np.empty((n, 5))
+        for i, s in enumerate(token_results):
+            signals_matrix[i] = (s.ent, s.mlp, s.psp, s.spt, s.spectral_gap)
+        response_signals = {name: signals_matrix[:, j] for j, name in enumerate(_SIG_NAMES)}
 
         agg_result = self.aggregator.compute_risk(self.prompt_stats, response_signals)
         token_risks = agg_result.token_risks.tolist()
