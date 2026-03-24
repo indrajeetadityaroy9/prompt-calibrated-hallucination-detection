@@ -1,5 +1,3 @@
-"""Evaluation orchestration — runs AG-SAR detection on QA benchmarks."""
-
 from dataclasses import dataclass, asdict
 
 import numpy as np
@@ -39,7 +37,6 @@ def _run_dataset(
     samples: list[dict],
     config: ExperimentConfig,
 ) -> tuple[list[SampleResult], dict]:
-    """Evaluate a single dataset."""
     results: list[SampleResult] = []
     print_interval = max(1, config.evaluation.n_samples // 4)
 
@@ -66,7 +63,7 @@ def _run_dataset(
             generated_answer=generated,
             ground_truths=sample["answers"],
             f1=f1,
-            is_hallucination=False,  # set by adaptive Otsu below
+            is_hallucination=False,
             response_risk=result.response_risk,
             mean_ent=mean_ent,
             mean_mlp=mean_mlp,
@@ -81,7 +78,6 @@ def _run_dataset(
             print(f"  [{i+1}/{len(samples)}] "
                   f"avg_risk={np.mean([r.response_risk for r in results]):.3f}")
 
-    # Adaptive F1 threshold via Otsu — parameter-free hallucination labeling
     f1_scores = [r.f1 for r in results]
     adaptive_threshold = compute_adaptive_f1_threshold(f1_scores)
     print(f"  Adaptive F1 threshold: {adaptive_threshold:.3f}")
@@ -131,7 +127,6 @@ def _run_dataset(
 
 
 def _print_results(summary: dict):
-    """Print formatted evaluation results."""
     print(f"\n{'='*65}")
     print(f"  AG-SAR Evaluation Results: {summary['dataset'].upper()}")
     print(f"{'='*65}")
@@ -165,7 +160,6 @@ def _print_results(summary: dict):
 
 
 def run_evaluation(model, tokenizer, config: ExperimentConfig) -> dict:
-    """Run evaluation across all configured datasets."""
     import time
 
     detector = Detector(model, tokenizer)

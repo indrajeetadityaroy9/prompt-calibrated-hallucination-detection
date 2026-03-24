@@ -1,5 +1,3 @@
-"""Ablation orchestration — leave-one-out signal ablation study."""
-
 import copy
 
 import numpy as np
@@ -22,7 +20,6 @@ def _generate_baseline(
     samples: list[dict],
     config: ExperimentConfig,
 ) -> list[dict]:
-    """Generate baseline once per sample. Cache signals and prompt stats for re-aggregation."""
     signals = config.ablation.signals
     cached = []
 
@@ -58,7 +55,6 @@ def _evaluate_condition(
     labels: list[int],
     disabled_signals: set[str],
 ) -> dict:
-    """Re-aggregate from cached signals with optional signal disabling."""
     aggregator = PromptAnchoredAggregator()
     scores = []
 
@@ -78,7 +74,6 @@ def _evaluate_condition(
 
 
 def run_ablation(model, tokenizer, config: ExperimentConfig) -> dict:
-    """Run leave-one-out signal ablation study."""
     detector = Detector(model, tokenizer)
     model_short = config.model.name.split("/")[-1]
     signals_to_ablate = config.ablation.signals
@@ -90,17 +85,14 @@ def run_ablation(model, tokenizer, config: ExperimentConfig) -> dict:
         config.evaluation.max_context_chars,
     )
 
-    # Phase 1: Generate baseline
     print(f"\n{'='*65}")
     print("Generating baseline (all signals, single pass)...")
     cached = _generate_baseline(detector, samples, config)
 
-    # Compute labels via adaptive Otsu threshold
     f1_values = [c["f1"] for c in cached]
     threshold = compute_adaptive_f1_threshold(f1_values)
     labels = [int(f < threshold) for f in f1_values]
 
-    # Phase 2: Evaluate each condition
     baseline = _evaluate_condition(cached, labels, disabled_signals=set())
     baseline_auroc = baseline["auroc"]
     print(f"Baseline AUROC: {baseline_auroc:.4f}")
@@ -111,7 +103,6 @@ def run_ablation(model, tokenizer, config: ExperimentConfig) -> dict:
         result = _evaluate_condition(cached, labels, disabled_signals={signal})
         ablation_results[f"without_{signal}"] = result
 
-    # Print summary table
     print(f"\n{'='*65}")
     print(f"  AG-SAR Leave-One-Out Signal Ablation: {dataset_name.upper()}")
     print(f"{'='*65}")
@@ -127,7 +118,6 @@ def run_ablation(model, tokenizer, config: ExperimentConfig) -> dict:
 
     print(f"{'='*65}\n")
 
-    # Save results
     out_path = f"{config.output.dir}/ablation_{dataset_name}_{model_short}.json"
     save_results(ablation_results, out_path)
 

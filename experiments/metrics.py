@@ -1,9 +1,3 @@
-"""
-Evaluation metrics for hallucination detection.
-
-Computes AUROC, AUPRC, TPR@FPR, Calibration (ECE/Brier), and Selective Prediction.
-"""
-
 from dataclasses import dataclass
 import numpy as np
 from sklearn.metrics import (
@@ -18,7 +12,6 @@ from sklearn.metrics import (
 
 @dataclass
 class MetricsResult:
-    """Container for evaluation metrics."""
     auroc: float
     auprc: float
     f1: float
@@ -35,13 +28,11 @@ class MetricsResult:
 
 
 def compute_tpr_at_fpr(scores: list[float], labels: list[int], target_fpr: float = 0.05) -> float:
-    """Compute TPR at a specific FPR threshold via linear interpolation."""
     fpr, tpr, _ = roc_curve(labels, scores)
     return float(np.interp(target_fpr, fpr, tpr))
 
 
 def compute_calibration_error(scores: list[float], labels: list[int], n_bins: int = 10) -> float:
-    """Compute Expected Calibration Error (ECE). Vectorized via np.digitize + np.bincount."""
     scores_arr = np.array(scores)
     labels_arr = np.array(labels)
     n = len(scores_arr)
@@ -67,7 +58,6 @@ def compute_metrics(
     labels: list[int],
     threshold: float = 0.5,
 ) -> MetricsResult:
-    """Compute all evaluation metrics."""
     auroc = float(roc_auc_score(labels, scores))
     auprc = float(average_precision_score(labels, scores))
     tpr_5 = compute_tpr_at_fpr(scores, labels, 0.05)
@@ -100,7 +90,6 @@ def compute_metrics(
 
 
 def compute_aurc(scores: list[float], labels: list[int]) -> float:
-    """Area Under Risk-Coverage curve (AURC). Geifman & El-Yaniv (2017)."""
     scores = np.array(scores)
     labels = np.array(labels)
     n = len(scores)
@@ -116,7 +105,6 @@ def compute_aurc(scores: list[float], labels: list[int]) -> float:
 
 
 def compute_e_aurc(scores: list[float], labels: list[int]) -> float:
-    """Excess AURC (E-AURC = AURC - AURC_optimal)."""
     labels = np.array(labels)
     n = len(labels)
     n_errors = int(np.sum(labels))
@@ -135,7 +123,6 @@ def compute_risk_at_coverage(
     labels: list[int],
     target_coverage: float = 0.9,
 ) -> float:
-    """Compute risk (error rate) at a specific coverage level."""
     scores = np.array(scores)
     labels = np.array(labels)
     n = len(scores)
@@ -154,7 +141,6 @@ def bootstrap_auroc_ci(
     confidence: float = 0.95,
     seed: int = 42,
 ) -> tuple[float, float]:
-    """Compute BCa bootstrap confidence interval for AUROC via scipy."""
     from scipy.stats import bootstrap
 
     scores_arr = np.array(scores)

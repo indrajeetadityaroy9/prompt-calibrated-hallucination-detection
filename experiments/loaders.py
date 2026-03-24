@@ -1,5 +1,3 @@
-"""Dataset loaders for QA benchmarks."""
-
 def load_triviaqa(n_samples: int, max_context_chars: int) -> list[dict]:
     from datasets import load_dataset
     print("Loading TriviaQA...")

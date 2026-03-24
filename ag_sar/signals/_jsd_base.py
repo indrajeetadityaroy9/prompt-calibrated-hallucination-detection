@@ -1,10 +1,3 @@
-"""
-Candidate-set JSD: MLP transformation magnitude signal.
-
-JSD between pre-MLP and post-MLP distributions restricted to adaptive candidate set.
-All-layer mean JSD — no threshold selection needed.
-"""
-
 import math
 
 import torch
@@ -16,7 +9,6 @@ from ..hooks import LayerHiddenStates
 
 
 class CandidateJSDSignal:
-    """JSD(softmax(W_U·norm(h_pre)[cand]), softmax(W_U·norm(h_post)[cand])) for MLP signal."""
 
     def __init__(self, lm_head: nn.Linear, final_norm: nn.Module):
         self.lm_head = lm_head
@@ -27,7 +19,6 @@ class CandidateJSDSignal:
         layer_states: dict[int, LayerHiddenStates],
         candidate_set: Tensor,
     ) -> float:
-        """MLP signal: batched mean JSD across all layers."""
         dtype = self.lm_head.weight.dtype
 
         attn_stack = torch.stack([s.h_resid_attn for s in layer_states.values()]).to(dtype=dtype)

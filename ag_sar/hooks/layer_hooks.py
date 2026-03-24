@@ -1,5 +1,3 @@
-"""2-point per-layer hook installation for hidden state capture."""
-
 from torch import Tensor
 
 from .adapter import ModelAdapter
@@ -7,12 +5,6 @@ from .buffer import EphemeralHiddenBuffer
 
 
 class LayerHooks:
-    """
-    Install hooks to capture 2 points for a single layer.
-
-    - pre_hook on post_attention_layernorm: capture input (h_resid_attn)
-    - forward_hook on decoder layer: capture output (h_resid_mlp)
-    """
 
     def __init__(self, layer_idx: int, buffer: EphemeralHiddenBuffer, adapter: ModelAdapter):
         self.layer_idx = layer_idx

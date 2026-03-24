@@ -1,5 +1,3 @@
-"""Experiment configuration schema — typed dataclasses loaded from YAML."""
-
 from dataclasses import dataclass
 from typing import Literal
 
@@ -46,7 +44,7 @@ class ExperimentConfig:
     ablation: AblationConfig | None = None
 
     @classmethod
-    def from_yaml(cls, path: str) -> ExperimentConfig:
+    def from_yaml(cls, path: str) -> "ExperimentConfig":
         with open(path) as f:
             raw = yaml.safe_load(f)
 

@@ -1,12 +1,3 @@
-"""
-Self-calibrating prompt statistics for AG-SAR with cross-signal precision.
-
-Computes PIT reference distributions from prompt tail for PSP and MLP signals.
-ENT, SPT, and spectral gap use direct mode.
-Full cross-signal covariance matrix captures joint signal geometry for
-precision-weighted fusion (Hartung, Knapp & Sinha, 2008).
-"""
-
 import math
 
 import numpy as np
@@ -18,7 +9,6 @@ from .hooks import LayerHiddenStates
 
 
 def adaptive_window(prompt_len: int) -> int:
-    """Adaptive tail window: sqrt(prompt_len), capped at prompt_len."""
     return min(int(math.ceil(math.sqrt(prompt_len))), prompt_len)
 
 
@@ -33,19 +23,12 @@ def self_calibrate(
     tail_per_layer: dict[int, dict],
     mid_layer_idx: int,
 ) -> dict[str, dict]:
-    """Self-calibrating prompt statistics with cross-signal precision matrix.
-
-    Returns per-signal stats (sorted_vals, variance, mode) plus a shared
-    '_cross_signal_precision' entry containing the full inverse covariance matrix.
-    """
     stats = {}
     first_key = next(iter(tail_per_layer))
     n_tail = tail_per_layer[first_key]["h_resid_mlp"].shape[0]
     layer_keys = sorted(tail_per_layer.keys())
     n_layers = len(layer_keys)
 
-    # --- PSP: batched across all tail positions × all layers ---
-    # Build (n_tail, n_layers, d) tensor
     H_all = torch.stack(
         [tail_per_layer[li]["h_resid_mlp"] for li in layer_keys], dim=1
     ).float()
@@ -66,15 +49,14 @@ def self_calibrate(
     psp_arr = psp_flat.reshape(n_tail, n_layers).mean(dim=1).cpu().numpy()
     stats["psp"] = {"sorted_vals": np.sort(psp_arr), "variance": float(np.var(psp_arr))}
 
-    # --- MLP: batch logits computation, per-position JSD ---
     lm_head_dtype = lm_head.weight.dtype
     final_layer = max(layer_keys)
-    h_final_tail = tail_per_layer[final_layer]["h_resid_mlp"]  # (n_tail, d)
+    h_final_tail = tail_per_layer[final_layer]["h_resid_mlp"]
 
     with torch.no_grad():
         all_logits = lm_head(
             final_norm(h_final_tail.unsqueeze(0).to(dtype=lm_head_dtype))
-        ).squeeze(0)  # (n_tail, vocab)
+        ).squeeze(0)
     all_probs = torch.softmax(all_logits.float(), dim=-1)
 
     mlp_values = []
@@ -92,10 +74,8 @@ def self_calibrate(
     mlp_arr = np.array(mlp_values)
     stats["mlp"] = {"sorted_vals": np.sort(mlp_arr), "variance": float(np.var(mlp_arr))}
 
-    # ENT: direct mode — variance derived from peer signals (PSP, MLP)
     stats["ent"] = {"mode": "direct", "variance": float(np.median([stats[s]["variance"] for s in stats]))}
 
-    # SPT + spectral gap: compute incrementally as window fills
     spt_signal.reset()
     spt_values = []
     gap_values = []
@@ -109,7 +89,6 @@ def self_calibrate(
     stats["spt"] = {"mode": "direct", "variance": float(np.var(spt_values))}
     stats["spectral_gap"] = {"mode": "direct", "variance": float(np.var(gap_values))}
 
-    # --- Cross-signal precision matrix ---
     diag_vars = np.array([
         stats["ent"]["variance"],
         stats["mlp"]["variance"],
@@ -120,11 +99,9 @@ def self_calibrate(
 
     precision = np.diag(1.0 / np.maximum(diag_vars, EPS))
 
-    psp_mlp_matrix = np.column_stack([mlp_arr, psp_arr])  # (n_tail, 2)
-    # Ledoit-Wolf shrinkage: parameter-free optimal regularization (Ledoit & Wolf, 2004).
+    psp_mlp_matrix = np.column_stack([mlp_arr, psp_arr])
     cov_2x2, _ = ledoit_wolf(psp_mlp_matrix)
     prec_2x2 = np.linalg.inv(cov_2x2)
-    # Embed into positions [1,1],[1,2],[2,1],[2,2] (MLP=idx1, PSP=idx2)
     precision[1:3, 1:3] = prec_2x2
 
     stats["_cross_signal_precision"] = precision

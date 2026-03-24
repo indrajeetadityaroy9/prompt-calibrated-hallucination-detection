@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""
-AG-SAR Experiment Entrypoint.
-
-Single config-only CLI:
-    python -m experiments.eval --config experiments/configs/main.yaml
-    python -m experiments.eval --config experiments/configs/ablation.yaml
-"""
-
 import argparse
 
 from .schema import ExperimentConfig

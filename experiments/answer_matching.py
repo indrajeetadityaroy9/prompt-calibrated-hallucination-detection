@@ -1,16 +1,9 @@
-"""
-Answer matching utilities for QA evaluation.
-
-Standard SQuAD-style F1 matching with answer extraction for verbose model responses.
-"""
-
 import re
 import string
 from collections import Counter
 
 
 def normalize_answer(s: str) -> str:
-    """Lower text and remove punctuation, articles and extra whitespace."""
     def remove_articles(text):
         return re.sub(r'\b(a|an|the)\b', ' ', text)
     def white_space_fix(text):
@@ -33,11 +26,6 @@ def compute_f1(prediction: str, ground_truth: str) -> float:
 
 
 def extract_short_answer(text: str) -> str:
-    """Extract the core answer from a verbose model response.
-
-    Chat models often generate 'Answer\\n\\nExplanation: ...' or repeat the question.
-    Extract just the first meaningful line/sentence.
-    """
     text = text.strip()
     for sep in ["\n\n", "\nExplanation:", "\nQuestion:", "\nNote:", "\nContext:"]:
         if sep in text:
@@ -51,7 +39,6 @@ def extract_short_answer(text: str) -> str:
 
 
 def compute_adaptive_f1_threshold(f1_scores: list[float]) -> float:
-    """Otsu threshold on F1 scores to separate correct from hallucinated."""
     from ag_sar.numerics import otsu_threshold
     return otsu_threshold(f1_scores)
 
