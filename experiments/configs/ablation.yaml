@@ -14,7 +14,7 @@ evaluation:
   seed: 42
 
 ablation:
-  signals: ["ent", "mlp", "psp", "spt", "spectral_gap"]
+  signals: ["rho", "phi", "spf", "mlp", "ent"]
 
 output:
   dir: "results/ablation"

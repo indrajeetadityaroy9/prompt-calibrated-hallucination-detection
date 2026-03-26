@@ -1,19 +1,19 @@
 import numpy as np
 import torch
-from scipy.stats import norm
 from torch import Tensor
 
 EPS = float(torch.finfo(torch.float32).eps ** 2)
 
-_TW1_MU = -1.2065335745820
-_TW1_SIGMA = 1.2680340580149
-_TW1_SKEW = 0.29346452408
+
+def marchenko_pastur_edge(sigma2: float, gamma: float) -> float:
+    return sigma2 * (1.0 + gamma ** 0.5) ** 2
 
 
-def tracy_widom_cdf(s: float) -> float:
-    z = (s - _TW1_MU) / _TW1_SIGMA
-    z_cf = z - (_TW1_SKEW / 6) * (z * z - 1.0)
-    return float(norm.cdf(z_cf))
+def information_flow_regularity(fi_profile: Tensor) -> float:
+    fi = fi_profile.float().clamp(min=EPS)
+    l1 = fi.sum()
+    tv = (fi[1:] - fi[:-1]).abs().sum()
+    return float(l1 / (l1 + tv))
 
 
 def effective_rank(S: Tensor) -> int:
@@ -39,12 +39,6 @@ def _otsu_internals(values: np.ndarray) -> tuple[int, np.ndarray, np.ndarray, fl
 
     best_idx = int(np.argmax(between_var))
     return best_idx, sorted_vals, between_var, float(np.var(values))
-
-
-def otsu_threshold(values: np.ndarray | list) -> float:
-    values = np.asarray(values, dtype=float)
-    best_idx, sorted_vals, _, _ = _otsu_internals(values)
-    return float(0.5 * (sorted_vals[best_idx] + sorted_vals[best_idx + 1]))
 
 
 def otsu_coefficient(values: np.ndarray | list) -> float:

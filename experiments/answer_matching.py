@@ -39,8 +39,11 @@ def extract_short_answer(text: str) -> str:
 
 
 def compute_adaptive_f1_threshold(f1_scores: list[float]) -> float:
-    from ag_sar.numerics import otsu_threshold
-    return otsu_threshold(f1_scores)
+    from ag_sar.numerics import _otsu_internals
+    import numpy as np
+    values = np.asarray(f1_scores, dtype=float)
+    best_idx, sorted_vals, _, _ = _otsu_internals(values)
+    return float(0.5 * (sorted_vals[best_idx] + sorted_vals[best_idx + 1]))
 
 
 def max_f1_score(prediction: str, ground_truths: list[str]) -> float:

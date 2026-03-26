@@ -1,109 +1,66 @@
-import math
-
 import numpy as np
 import torch
-from sklearn.covariance import ledoit_wolf
 
-from .numerics import EPS, effective_rank
+from .numerics import EPS, effective_rank, information_flow_regularity
 from .hooks import LayerHiddenStates
-
-
-def adaptive_window(prompt_len: int) -> int:
-    return min(int(math.ceil(math.sqrt(prompt_len))), prompt_len)
+from .signals.ent import compute_ent
+from .aggregation.fusion import CalibrationStats, calibrate_cusum
 
 
 def self_calibrate(
     *,
-    psp_signal,
+    spectral_analyzer,
     jsd_signal,
-    spt_signal,
     lm_head,
     final_norm,
-    prompt_len: int,
     tail_per_layer: dict[int, dict],
-    mid_layer_idx: int,
-) -> dict[str, dict]:
-    stats = {}
-    first_key = next(iter(tail_per_layer))
-    n_tail = tail_per_layer[first_key]["h_resid_mlp"].shape[0]
+    prefill_attentions: tuple,
+    cal_tail_start: int,
+) -> CalibrationStats:
     layer_keys = sorted(tail_per_layer.keys())
-    n_layers = len(layer_keys)
+    n_tail = tail_per_layer[layer_keys[0]]["h_resid_mlp"].shape[0]
 
     H_all = torch.stack(
-        [tail_per_layer[li]["h_resid_mlp"] for li in layer_keys], dim=1
+        [tail_per_layer[li]["h_resid_mlp"] for li in layer_keys], dim=1,
     ).float()
-    d = H_all.shape[-1]
 
-    V = psp_signal._prompt_basis.float()
-    center = psp_signal._prompt_center
-    tau = psp_signal._tau
+    rho_vals, spf_vals, phi_vals = [], [], []
+    for t in range(n_tail):
+        rho, spf = spectral_analyzer.compute(H_all[t])
+        rho_vals.append(rho)
+        spf_vals.append(spf)
 
-    H_flat = H_all.reshape(-1, d)
-    H_centered = H_flat - center
-    mags = torch.norm(H_centered, dim=-1)
-    proj_norms = torch.norm(H_centered @ V.T, dim=-1)
-    s_prompt = proj_norms / (mags + EPS)
-    psp_raw = 1.0 - s_prompt
-    gates = 1.0 - torch.exp(-mags.square() / (tau ** 2))
-    psp_flat = 0.5 + (psp_raw - 0.5) * gates
-    psp_arr = psp_flat.reshape(n_tail, n_layers).mean(dim=1).cpu().numpy()
-    stats["psp"] = {"sorted_vals": np.sort(psp_arr), "variance": float(np.var(psp_arr))}
+        fi = []
+        for i in range(1, len(layer_keys)):
+            prev, curr = H_all[t, i - 1], H_all[t, i]
+            fi.append(float(((curr - prev).norm() ** 2 / (prev.norm() ** 2 + EPS)).item()))
+        phi_vals.append(information_flow_regularity(torch.tensor(fi)))
 
-    lm_head_dtype = lm_head.weight.dtype
-    final_layer = max(layer_keys)
-    h_final_tail = tail_per_layer[final_layer]["h_resid_mlp"]
-
+    h_final = tail_per_layer[max(layer_keys)]["h_resid_mlp"]
     with torch.no_grad():
         all_logits = lm_head(
-            final_norm(h_final_tail.unsqueeze(0).to(dtype=lm_head_dtype))
+            final_norm(h_final.unsqueeze(0).to(dtype=lm_head.weight.dtype))
         ).squeeze(0)
     all_probs = torch.softmax(all_logits.float(), dim=-1)
 
-    mlp_values = []
+    mlp_vals = []
     for t in range(n_tail):
         k = max(2, effective_rank(all_probs[t]))
         cand = torch.topk(all_logits[t], k).indices
-        layer_states = {
+        states = {
             li: LayerHiddenStates(
                 h_resid_attn=tail_per_layer[li]["h_resid_attn"][t],
                 h_resid_mlp=tail_per_layer[li]["h_resid_mlp"][t],
             )
             for li in layer_keys
         }
-        mlp_values.append(jsd_signal.compute_mlp_jsd(layer_states, cand))
-    mlp_arr = np.array(mlp_values)
-    stats["mlp"] = {"sorted_vals": np.sort(mlp_arr), "variance": float(np.var(mlp_arr))}
+        mlp_vals.append(jsd_signal.compute_mlp_jsd(states, cand))
 
-    stats["ent"] = {"mode": "direct", "variance": float(np.median([stats[s]["variance"] for s in stats]))}
-
-    spt_signal.reset()
-    spt_values = []
-    gap_values = []
+    ent_vals = []
     for t in range(n_tail):
-        spt_signal.push(tail_per_layer[mid_layer_idx]["h_resid_mlp"][t])
-        if spt_signal.window_len >= 2:
-            spt_val, gap_val = spt_signal.compute_spt()
-            spt_values.append(spt_val)
-            gap_values.append(gap_val)
+        t_abs = cal_tail_start + t
+        attn_t = torch.stack([a[0, :, t_abs, :t_abs + 1] for a in prefill_attentions])
+        ent_vals.append(compute_ent(attn_t, t_abs + 1))
 
-    stats["spt"] = {"mode": "direct", "variance": float(np.var(spt_values))}
-    stats["spectral_gap"] = {"mode": "direct", "variance": float(np.var(gap_values))}
-
-    diag_vars = np.array([
-        stats["ent"]["variance"],
-        stats["mlp"]["variance"],
-        stats["psp"]["variance"],
-        stats["spt"]["variance"],
-        stats["spectral_gap"]["variance"],
-    ])
-
-    precision = np.diag(1.0 / np.maximum(diag_vars, EPS))
-
-    psp_mlp_matrix = np.column_stack([mlp_arr, psp_arr])
-    cov_2x2, _ = ledoit_wolf(psp_mlp_matrix)
-    prec_2x2 = np.linalg.inv(cov_2x2)
-    precision[1:3, 1:3] = prec_2x2
-
-    stats["_cross_signal_precision"] = precision
-
-    return stats
+    signal_matrix = np.column_stack([rho_vals, phi_vals, spf_vals, mlp_vals, ent_vals])
+    return calibrate_cusum(signal_matrix)

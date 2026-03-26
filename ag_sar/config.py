@@ -3,11 +3,18 @@ from dataclasses import dataclass
 
 @dataclass
 class TokenSignals:
-    ent: float
+    rho: float
+    phi: float
+    spf: float
     mlp: float
-    psp: float
-    spt: float
-    spectral_gap: float
+    ent: float
+
+
+@dataclass
+class RiskySpan:
+    start: int
+    end: int
+    peak_cusum: float
 
 
 @dataclass
@@ -15,7 +22,8 @@ class DetectionResult:
     generated_text: str
     token_signals: list[TokenSignals]
     token_risks: list[float]
-    risky_spans: list
+    cusum_values: list[float]
+    risky_spans: list[RiskySpan]
     response_risk: float
     is_flagged: bool
     num_tokens: int

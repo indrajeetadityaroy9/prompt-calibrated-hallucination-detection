@@ -23,11 +23,11 @@ class SampleResult:
     f1: float
     is_hallucination: bool
     response_risk: float
-    mean_ent: float
+    mean_rho: float
+    mean_phi: float
+    mean_spf: float
     mean_mlp: float
-    mean_psp: float
-    mean_spt: float
-    mean_spectral_gap: float
+    mean_ent: float
     n_tokens: int
     is_flagged: bool
 
@@ -52,11 +52,11 @@ def _run_dataset(
         generated = result.generated_text.strip()
         f1 = max_f1_score(generated, sample["answers"])
 
-        mean_ent = float(np.mean([s.ent for s in result.token_signals]))
+        mean_rho = float(np.mean([s.rho for s in result.token_signals]))
+        mean_phi = float(np.mean([s.phi for s in result.token_signals]))
+        mean_spf = float(np.mean([s.spf for s in result.token_signals]))
         mean_mlp = float(np.mean([s.mlp for s in result.token_signals]))
-        mean_psp = float(np.mean([s.psp for s in result.token_signals]))
-        mean_spt = float(np.mean([s.spt for s in result.token_signals]))
-        mean_gap = float(np.mean([s.spectral_gap for s in result.token_signals]))
+        mean_ent = float(np.mean([s.ent for s in result.token_signals]))
 
         results.append(SampleResult(
             question=sample["question"],
@@ -65,11 +65,11 @@ def _run_dataset(
             f1=f1,
             is_hallucination=False,
             response_risk=result.response_risk,
-            mean_ent=mean_ent,
+            mean_rho=mean_rho,
+            mean_phi=mean_phi,
+            mean_spf=mean_spf,
             mean_mlp=mean_mlp,
-            mean_psp=mean_psp,
-            mean_spt=mean_spt,
-            mean_spectral_gap=mean_gap,
+            mean_ent=mean_ent,
             n_tokens=result.num_tokens,
             is_flagged=result.is_flagged,
         ))
@@ -90,7 +90,7 @@ def _run_dataset(
     metrics = compute_metrics(scores, labels)
 
     signal_aurocs = {}
-    for sig_name in ["mean_ent", "mean_mlp", "mean_psp", "mean_spt", "mean_spectral_gap", "response_risk"]:
+    for sig_name in ["mean_rho", "mean_phi", "mean_spf", "mean_mlp", "mean_ent", "response_risk"]:
         vals = [getattr(r, sig_name) for r in results]
         signal_aurocs[sig_name] = float(roc_auc_score(labels, vals))
 

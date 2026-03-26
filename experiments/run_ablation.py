@@ -4,7 +4,7 @@ import numpy as np
 from tqdm import tqdm
 
 from ag_sar.detector import Detector
-from ag_sar.aggregation.fusion import PromptAnchoredAggregator
+from ag_sar.aggregation.fusion import compute_cusum_risks
 from .answer_matching import max_f1_score, compute_adaptive_f1_threshold
 from .metrics import compute_metrics
 
@@ -14,13 +14,14 @@ from .common import load_dataset, save_results
 
 _PROMPT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
 
+_SIGNAL_ORDER = ["rho", "phi", "spf", "mlp", "ent"]
+
 
 def _generate_baseline(
     detector: Detector,
     samples: list[dict],
     config: ExperimentConfig,
 ) -> list[dict]:
-    signals = config.ablation.signals
     cached = []
 
     for sample in tqdm(samples, desc="Generating baseline"):
@@ -34,7 +35,7 @@ def _generate_baseline(
 
         response_signals = {
             sig: np.array([getattr(s, sig) for s in result.token_signals])
-            for sig in signals
+            for sig in _SIGNAL_ORDER
         }
 
         generated = result.generated_text.strip()
@@ -55,19 +56,20 @@ def _evaluate_condition(
     labels: list[int],
     disabled_signals: set[str],
 ) -> dict:
-    aggregator = PromptAnchoredAggregator()
     scores = []
 
     for c in cached:
         if not disabled_signals:
             scores.append(c["response_risk"])
         else:
-            agg = aggregator.compute_risk(
-                c["prompt_stats"],
-                c["response_signals"],
-                disabled_signals=disabled_signals,
-            )
-            scores.append(agg.risk)
+            signal_matrix = np.column_stack([
+                c["response_signals"][sig] for sig in _SIGNAL_ORDER
+            ])
+            for i, sig in enumerate(_SIGNAL_ORDER):
+                if sig in disabled_signals:
+                    signal_matrix[:, i] = c["prompt_stats"].mu[i]
+            _, _, risk, _, _ = compute_cusum_risks(signal_matrix, c["prompt_stats"])
+            scores.append(risk)
 
     metrics = compute_metrics(scores, labels)
     return {"auroc": metrics.auroc, "auprc": metrics.auprc}

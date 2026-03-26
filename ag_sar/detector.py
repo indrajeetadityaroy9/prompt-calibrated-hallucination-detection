@@ -9,14 +9,12 @@ from .hooks import (
     LayerHooks,
     ModelAdapter,
 )
-from .signals.psp import PromptSubspaceProjection
+from .signals.spectral import SpectralAnalyzer
 from .signals._jsd_base import CandidateJSDSignal
 from .signals.ent import compute_ent
-from .signals.spt import SpectralPhaseTransition
-from .aggregation.fusion import PromptAnchoredAggregator
-from .aggregation.spans import SpanMerger
-from .calibration import adaptive_window, self_calibrate
-from .numerics import effective_rank
+from .aggregation.fusion import CalibrationStats, compute_cusum_risks
+from .calibration import self_calibrate
+from .numerics import EPS, effective_rank, information_flow_regularity
 
 
 class Detector:
@@ -31,12 +29,11 @@ class Detector:
         self._layers = self.adapter.get_layers(model)
         self.num_layers = len(self._layers)
 
-        self.psp_signal = PromptSubspaceProjection()
+        self.spectral_analyzer = SpectralAnalyzer()
         self.jsd_signal = CandidateJSDSignal(self.lm_head, self.final_norm)
-        self.aggregator = PromptAnchoredAggregator()
         self.hidden_buffer = EphemeralHiddenBuffer()
 
-        self.prompt_stats: dict | None = None
+        self.prompt_stats: CalibrationStats | None = None
         self._hooks: list[LayerHooks] = []
 
     def _prefill(
@@ -44,20 +41,12 @@ class Detector:
         input_ids: Tensor,
         prompt_len: int,
     ) -> tuple:
-        window_size = adaptive_window(prompt_len)
+        window_size = min(self.num_layers, prompt_len)
 
         for layer_idx in range(self.num_layers):
             hook = LayerHooks(layer_idx, self.hidden_buffer, adapter=self.adapter)
             hook.install(self._layers[layer_idx])
             self._hooks.append(hook)
-
-        mid_layer_idx = self.num_layers // 2
-        prompt_hidden_buf = []
-
-        def capture_prompt_hidden(module, input, output):
-            prompt_hidden_buf.append(output[0][0, :prompt_len, :].detach())
-
-        mid_handle = self._layers[mid_layer_idx].register_forward_hook(capture_prompt_hidden)
 
         cal_tail_start = max(0, prompt_len - window_size)
         tail_per_layer = {}
@@ -95,37 +84,32 @@ class Detector:
                 attention_mask=attention_mask,
                 use_cache=True,
                 return_dict=True,
+                output_attentions=True,
             )
 
         past_key_values = outputs.past_key_values
         last_logits = outputs.logits[:, -1, :]
 
-        mid_handle.remove()
         for h in tail_handles:
             h.remove()
 
-        prompt_hidden = prompt_hidden_buf[0]
-        prompt_S = self.psp_signal.calibrate(prompt_hidden)
-
-        spt_window = effective_rank(prompt_S)
-        hidden_dim = prompt_hidden.shape[-1]
-        self.spt_signal = SpectralPhaseTransition(hidden_dim, spt_window)
+        layer_keys = sorted(tail_per_layer.keys())
+        H_all = torch.stack(
+            [tail_per_layer[li]["h_resid_mlp"] for li in layer_keys], dim=1,
+        ).float()
+        self.spectral_analyzer.calibrate(H_all)
 
         self.prompt_stats = self_calibrate(
-            psp_signal=self.psp_signal,
+            spectral_analyzer=self.spectral_analyzer,
             jsd_signal=self.jsd_signal,
-            spt_signal=self.spt_signal,
             lm_head=self.lm_head,
             final_norm=self.final_norm,
-            prompt_len=prompt_len,
             tail_per_layer=tail_per_layer,
-            mid_layer_idx=mid_layer_idx,
+            prefill_attentions=outputs.attentions,
+            cal_tail_start=cal_tail_start,
         )
 
-        self.spt_signal.reset()
-        self.spt_signal.seed(tail_per_layer[mid_layer_idx]["h_resid_mlp"])
-
-        return past_key_values, last_logits
+        return past_key_values, last_logits, outputs.attentions
 
     def compute_token_signals(
         self,
@@ -135,28 +119,31 @@ class Detector:
         seq_len: int = 0,
     ) -> TokenSignals:
         layer_states = self.hidden_buffer.get_states()
+        sorted_keys = sorted(layer_states.keys())
+
+        H_token = torch.stack([layer_states[k].h_resid_mlp.float().squeeze() for k in sorted_keys])
+        rho, spf = self.spectral_analyzer.compute(H_token)
+
+        fi = []
+        for i in range(1, len(sorted_keys)):
+            prev = layer_states[sorted_keys[i - 1]].h_resid_mlp.float().squeeze()
+            curr = layer_states[sorted_keys[i]].h_resid_mlp.float().squeeze()
+            fi.append((curr - prev).norm() ** 2 / (prev.norm() ** 2 + EPS))
+        phi = information_flow_regularity(torch.stack(fi))
 
         probs = torch.softmax(logits.float(), dim=-1)
         k = max(2, effective_rank(probs))
         cand = torch.topk(logits, k).indices
         cand = torch.unique(torch.cat([cand, torch.tensor([emitted_token_id], device="cuda")]))
+        mlp = self.jsd_signal.compute_mlp_jsd(layer_states, cand)
 
         ent = 0.5
         if attentions is not None:
             attn_tensor = torch.stack(attentions)[:, 0, :, -1, :]
             ent = compute_ent(attn_tensor, seq_len)
 
-        mlp = self.jsd_signal.compute_mlp_jsd(layer_states, cand)
-
-        psp_hidden = {idx: states.h_resid_mlp for idx, states in layer_states.items()}
-        psp = self.psp_signal.compute_psp(psp_hidden)
-
-        mid_layer = self.num_layers // 2
-        self.spt_signal.push(layer_states[mid_layer].h_resid_mlp)
-        spt, spectral_gap = self.spt_signal.compute_spt()
-
         self.hidden_buffer.clear()
-        return TokenSignals(ent=ent, mlp=mlp, psp=psp, spt=spt, spectral_gap=spectral_gap)
+        return TokenSignals(rho=rho, phi=phi, spf=spf, mlp=mlp, ent=ent)
 
     def _cleanup(self):
         for h in self._hooks:
@@ -173,26 +160,24 @@ class Detector:
             all_ids[0, prompt_len:], skip_special_tokens=True
         )
 
-        _SIG_NAMES = ("ent", "mlp", "psp", "spt", "spectral_gap")
-        n = len(token_results)
-        signals_matrix = np.empty((n, 5))
-        for i, s in enumerate(token_results):
-            signals_matrix[i] = (s.ent, s.mlp, s.psp, s.spt, s.spectral_gap)
-        response_signals = {name: signals_matrix[:, j] for j, name in enumerate(_SIG_NAMES)}
+        signal_matrix = np.column_stack([
+            [s.rho for s in token_results],
+            [s.phi for s in token_results],
+            [s.spf for s in token_results],
+            [s.mlp for s in token_results],
+            [s.ent for s in token_results],
+        ])
 
-        agg_result = self.aggregator.compute_risk(self.prompt_stats, response_signals)
-        token_risks = agg_result.token_risks.tolist()
-        response_risk = agg_result.risk
-
-        merger = SpanMerger.adaptive(token_risks)
-        risky_spans = merger.find_spans(token_risks)
-        is_flagged = response_risk >= merger.threshold
+        token_risks, cusum_values, response_risk, is_flagged, spans = compute_cusum_risks(
+            signal_matrix, self.prompt_stats,
+        )
 
         return DetectionResult(
             generated_text=generated_text,
             token_signals=token_results,
             token_risks=token_risks,
-            risky_spans=risky_spans,
+            cusum_values=cusum_values,
+            risky_spans=spans,
             response_risk=response_risk,
             is_flagged=is_flagged,
             num_tokens=len(token_results),
@@ -208,7 +193,7 @@ class Detector:
         prompt_len = input_ids.shape[1]
         attention_mask = torch.ones_like(input_ids)
 
-        past_key_values, next_logits = self._prefill(input_ids, prompt_len)
+        past_key_values, next_logits, prefill_attentions = self._prefill(input_ids, prompt_len)
 
         all_ids = input_ids.clone()
         token_results: list[TokenSignals] = []
@@ -221,9 +206,10 @@ class Detector:
             token_id = next_logits.argmax(dim=-1).item()
 
         signals = self.compute_token_signals(
-            next_logits.squeeze(0), token_id, attentions=None, seq_len=prompt_len + 1
+            next_logits.squeeze(0), token_id, attentions=prefill_attentions, seq_len=prompt_len + 1
         )
         token_results.append(signals)
+        del prefill_attentions
 
         next_token = torch.tensor([[token_id]], device="cuda")
         all_ids = torch.cat([all_ids, next_token], dim=1)
