@@ -1,4 +1,4 @@
-# AG-SAR: Aggregated Signal Architecture for Risk
+# AG-SAR: Prompt-Anchored Spectral Signals for Zero-Shot Hallucination Detection in Language Models
 
 AG-SAR hooks into transformer internals during autoregressive generation, extracts five spectral signals from layer-wise hidden states, and fuses them with a CUSUM change-point detector calibrated from the prompt itself.
 
