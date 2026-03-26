@@ -107,18 +107,14 @@ def _run_dataset(
         "auroc": metrics.auroc,
         "auroc_ci_95": [ci_low, ci_high],
         "auprc": metrics.auprc,
-        "tpr_at_5_fpr": metrics.tpr_at_5_fpr,
-        "f1": metrics.f1,
+        "fpr_at_95_tpr": metrics.fpr_at_95_tpr,
+        "f1_optimal": metrics.f1_optimal,
+        "optimal_threshold": metrics.optimal_threshold,
         "aurc": metrics.aurc,
         "e_aurc": metrics.e_aurc,
-        "risk_at_90_coverage": metrics.risk_at_90_coverage,
         "ece": metrics.expected_calibration_error,
         "brier": metrics.brier_score,
         "signal_aurocs": signal_aurocs,
-        "tp": metrics.true_positives,
-        "fp": metrics.false_positives,
-        "tn": metrics.true_negatives,
-        "fn": metrics.false_negatives,
     }
 
     return results, summary
@@ -131,17 +127,16 @@ def _print_results(summary: dict):
     print(f"  Samples:           {summary['n_samples']}")
     print(f"  Hallucinations:    {summary['n_hallucinations']} ({summary['hallucination_rate']:.1%})")
     print()
-    print(f"  ---- Detection Performance ----")
+    print(f"  ---- Detection ----")
     ci = summary['auroc_ci_95']
     print(f"  AUROC:             {summary['auroc']:.4f}  (95% CI: [{ci[0]:.4f}, {ci[1]:.4f}])")
     print(f"  AUPRC:             {summary['auprc']:.4f}")
-    print(f"  TPR@5%FPR:         {summary['tpr_at_5_fpr']:.4f}")
-    print(f"  F1 (at t=0.5):     {summary['f1']:.4f}")
+    print(f"  FPR@95%TPR:        {summary['fpr_at_95_tpr']:.4f}")
+    print(f"  F1 (Youden):       {summary['f1_optimal']:.4f}  (t={summary['optimal_threshold']:.3f})")
     print()
     print(f"  ---- Selective Prediction ----")
     print(f"  AURC:              {summary['aurc']:.4f}")
     print(f"  E-AURC:            {summary['e_aurc']:.4f}")
-    print(f"  Risk@90%:          {summary['risk_at_90_coverage']:.4f}")
     print()
     print(f"  ---- Calibration ----")
     print(f"  ECE:               {summary['ece']:.4f}")
@@ -150,10 +145,6 @@ def _print_results(summary: dict):
     print(f"  ---- Per-Signal AUROC ----")
     for sig, auroc in summary['signal_aurocs'].items():
         print(f"  {sig:20s} {auroc:.4f}")
-    print()
-    print(f"  ---- Confusion Matrix (t=0.5) ----")
-    print(f"  TP={summary['tp']:4d}  FP={summary['fp']:4d}")
-    print(f"  FN={summary['fn']:4d}  TN={summary['tn']:4d}")
     print(f"{'='*65}\n")
 
 
@@ -193,10 +184,10 @@ def run_evaluation(model, tokenizer, config: ExperimentConfig) -> dict:
         print(f"\n{'#'*65}")
         print("# CROSS-DATASET SUMMARY")
         print(f"{'#'*65}")
-        print(f"{'Dataset':<15} {'AUROC':>8} {'AUPRC':>8} {'TPR@5':>8} {'AURC':>8} {'E-AURC':>8} {'Hall%':>8}")
+        print(f"{'Dataset':<15} {'AUROC':>8} {'AUPRC':>8} {'FPR@95':>8} {'AURC':>8} {'E-AURC':>8} {'Hall%':>8}")
         print("-" * 65)
         for name, s in all_summaries.items():
-            print(f"{name:<15} {s['auroc']:>8.4f} {s['auprc']:>8.4f} {s['tpr_at_5_fpr']:>8.4f} "
+            print(f"{name:<15} {s['auroc']:>8.4f} {s['auprc']:>8.4f} {s['fpr_at_95_tpr']:>8.4f} "
                   f"{s['aurc']:>8.4f} {s['e_aurc']:>8.4f} {s['hallucination_rate']:>7.1%}")
 
     return all_summaries
