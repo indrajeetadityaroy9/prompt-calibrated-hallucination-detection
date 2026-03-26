@@ -5,14 +5,9 @@ import yaml
 
 
 @dataclass
-class RunConfig:
-    mode: Literal["evaluation", "ablation"]
-
-
-@dataclass
 class ModelConfig:
     name: str
-    torch_dtype: str
+    dtype: str
     attn_implementation: str
 
 
@@ -26,34 +21,21 @@ class EvaluationConfig:
 
 
 @dataclass
-class AblationConfig:
-    signals: list[str]
-
-
-@dataclass
-class OutputConfig:
-    dir: str
-
-
-@dataclass
 class ExperimentConfig:
-    run: RunConfig
+    mode: Literal["evaluation", "ablation"]
     model: ModelConfig
     evaluation: EvaluationConfig
-    output: OutputConfig
-    ablation: AblationConfig | None = None
+    output_dir: str
+    ablation_signals: list[str] | None = None
 
     @classmethod
     def from_yaml(cls, path: str) -> "ExperimentConfig":
         with open(path) as f:
             raw = yaml.safe_load(f)
-
-        ablation = AblationConfig(**raw["ablation"]) if "ablation" in raw else None
-
         return cls(
-            run=RunConfig(**raw["run"]),
+            mode=raw["run"]["mode"],
             model=ModelConfig(**raw["model"]),
             evaluation=EvaluationConfig(**raw["evaluation"]),
-            output=OutputConfig(**raw["output"]),
-            ablation=ablation,
+            output_dir=raw["output"]["dir"],
+            ablation_signals=raw["ablation"]["signals"] if "ablation" in raw else None,
         )

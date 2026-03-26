@@ -1,5 +1,7 @@
+from datasets import load_dataset
+
+
 def load_triviaqa(n_samples: int, max_context_chars: int) -> list[dict]:
-    from datasets import load_dataset
     print("Loading TriviaQA...")
     dataset = load_dataset("trivia_qa", "rc", split="validation")
 
@@ -29,8 +31,7 @@ def load_triviaqa(n_samples: int, max_context_chars: int) -> list[dict]:
     return samples
 
 
-def load_squad(n_samples: int, max_context_chars: int = 0) -> list[dict]:
-    from datasets import load_dataset
+def load_squad(n_samples: int, *, max_context_chars: int = 0) -> list[dict]:
     print("Loading SQuAD v2...")
     dataset = load_dataset("squad_v2", split="validation")
 

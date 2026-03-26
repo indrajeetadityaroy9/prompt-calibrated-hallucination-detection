@@ -6,8 +6,10 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .loaders import load_triviaqa, load_squad
-from .schema import ModelConfig
+from experiments.loaders import load_triviaqa, load_squad
+from experiments.schema import ModelConfig
+
+PROMPT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
 
 DATASET_LOADERS = {
     "triviaqa": load_triviaqa,
@@ -24,7 +26,7 @@ def load_model(config: ModelConfig, seed: int) -> tuple[AutoModelForCausalLM, Au
     torch.backends.cudnn.benchmark = False
 
     token = os.environ.get("HF_TOKEN")
-    torch_dtype = getattr(torch, config.torch_dtype)
+    dtype = getattr(torch, config.dtype)
 
     print(f"Loading model: {config.name}")
     t0 = time.time()
@@ -34,7 +36,7 @@ def load_model(config: ModelConfig, seed: int) -> tuple[AutoModelForCausalLM, Au
 
     model = AutoModelForCausalLM.from_pretrained(
         config.name,
-        torch_dtype=torch_dtype,
+        dtype=dtype,
         device_map="auto",
         token=token,
         attn_implementation=config.attn_implementation,

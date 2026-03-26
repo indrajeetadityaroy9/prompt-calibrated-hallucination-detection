@@ -3,16 +3,13 @@ import copy
 import numpy as np
 from tqdm import tqdm
 
+from ag_sar.fusion import compute_cusum_risks
 from ag_sar.detector import Detector
-from ag_sar.aggregation.fusion import compute_cusum_risks
-from .answer_matching import max_f1_score, compute_adaptive_f1_threshold
-from .metrics import compute_metrics
 
-from .schema import ExperimentConfig
-from .common import load_dataset, save_results
-
-
-_PROMPT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+from experiments.answer_matching import compute_adaptive_f1_threshold, max_f1_score
+from experiments.common import PROMPT_TEMPLATE, load_dataset, save_results
+from experiments.metrics import compute_metrics
+from experiments.schema import ExperimentConfig
 
 _SIGNAL_ORDER = ["rho", "phi", "spf", "mlp", "ent"]
 
@@ -25,7 +22,7 @@ def _generate_baseline(
     cached = []
 
     for sample in tqdm(samples, desc="Generating baseline"):
-        prompt = _PROMPT_TEMPLATE.format(
+        prompt = PROMPT_TEMPLATE.format(
             context=sample["context"], question=sample["question"]
         )
         result = detector.detect(
@@ -78,7 +75,7 @@ def _evaluate_condition(
 def run_ablation(model, tokenizer, config: ExperimentConfig) -> dict:
     detector = Detector(model, tokenizer)
     model_short = config.model.name.split("/")[-1]
-    signals_to_ablate = config.ablation.signals
+    signals_to_ablate = config.ablation_signals
 
     dataset_name = config.evaluation.datasets[0]
     samples = load_dataset(
@@ -120,7 +117,7 @@ def run_ablation(model, tokenizer, config: ExperimentConfig) -> dict:
 
     print(f"{'='*65}\n")
 
-    out_path = f"{config.output.dir}/ablation_{dataset_name}_{model_short}.json"
+    out_path = f"{config.output_dir}/ablation_{dataset_name}_{model_short}.json"
     save_results(ablation_results, out_path)
 
     return ablation_results

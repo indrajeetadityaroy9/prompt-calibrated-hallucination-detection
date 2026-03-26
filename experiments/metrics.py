@@ -1,5 +1,7 @@
 from dataclasses import dataclass
+
 import numpy as np
+from scipy.stats import bootstrap
 from sklearn.metrics import (
     roc_auc_score,
     average_precision_score,
@@ -27,12 +29,12 @@ class MetricsResult:
     risk_at_90_coverage: float = 0.0
 
 
-def compute_tpr_at_fpr(scores: list[float], labels: list[int], target_fpr: float = 0.05) -> float:
+def compute_tpr_at_fpr(scores: list[float], labels: list[int], *, target_fpr: float = 0.05) -> float:
     fpr, tpr, _ = roc_curve(labels, scores)
     return float(np.interp(target_fpr, fpr, tpr))
 
 
-def compute_calibration_error(scores: list[float], labels: list[int], n_bins: int = 10) -> float:
+def compute_calibration_error(scores: list[float], labels: list[int], *, n_bins: int = 10) -> float:
     scores_arr = np.array(scores)
     labels_arr = np.array(labels)
     n = len(scores_arr)
@@ -141,8 +143,6 @@ def bootstrap_auroc_ci(
     confidence: float = 0.95,
     seed: int = 42,
 ) -> tuple[float, float]:
-    from scipy.stats import bootstrap
-
     scores_arr = np.array(scores)
     labels_arr = np.array(labels)
 

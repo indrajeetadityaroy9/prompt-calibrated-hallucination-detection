@@ -1,78 +1,52 @@
 # AG-SAR: Aggregated Signal Architecture for Risk
 
-**Training-free, zero-shot hallucination detection for large language models via spectral information flow analysis and sequential change-point detection.**
+AG-SAR hooks into transformer internals during autoregressive generation, extracts five spectral signals from layer-wise hidden states, and fuses them with a CUSUM change-point detector calibrated from the prompt itself.
 
-Large language models hallucinate.Existing detection methods require labeled training data, multiple sampling passes, or external NLI models. AG-SAR operates within a single forward pass without prior supervision by intercepting transformer internals during autoregressive generation to extract five spectral signals and fusing them through a CUSUM (Cumulative Sum) change-point detector calibrated entirely from the input prompt.
+Hallucination is a phase transition in the spectral structure of cross-layer representations. We model each token's hidden states as a spiked random matrix, use the Marchenko-Pastur law to separate signal from noise eigenvalues, and run sequential hypothesis testing to detect when generation departs from the prompt baseline.
 
-The core theoretical insight is that hallucination manifests as a **phase transition in the spectral structure of layer-wise hidden representations** — detectable online via cumulative divergence from a prompt-calibrated reference distribution. AG-SAR models each token's cross-layer hidden states as a spiked random matrix, using the Marchenko-Pastur law to separate semantic signal eigenvalues from noise, and applies sequential hypothesis testing to detect when the spectral structure departs from the prompt-established baseline.
+### Signals
 
-## Method
+For each token, stack hidden states across L layers into H in R^{L x d}. Compute the dual covariance C = (1/d) H H^T in R^{L x L}. This handles the d >> L regime (e.g., L=32, d=4096) where standard covariance is ill-conditioned.
 
-### Spectral Signal Extraction
+| Signal | What it measures | How |
+|--------|-----------------|-----|
+| **rho** (spike excess) | Semantic signal strength above noise floor | (lambda_1 - MP edge) / MP edge; BBP phase transition |
+| **phi** (info flow regularity) | Smoothness of layer-wise updates | L1 / (L1 + TV) on Fisher information profile |
+| **spf** (spectral projection fidelity) | Alignment with prompt's spectral structure | Variance fraction along prompt eigenvectors |
+| **mlp** (MLP divergence) | How much MLP revises attention output | Mean JSD between pre/post-MLP logits across layers |
+| **ent** (attention entropy) | Head specialization vs diffusion | Otsu coefficient on per-head normalized entropies |
 
-For each generated token, hidden states are stacked across all L transformer layers to form a matrix H ∈ R^{L×d}. The **dual covariance** C = (1/d) H H^T ∈ R^{L×L} is analyzed spectrally. This formulation operates correctly in the d >> L regime typical of modern LLMs (e.g., L=32, d=4096) where standard covariance methods would be ill-conditioned.
+### Fusion
+The 5 signals form a multivariate time series. Instead of scoring tokens independently, CUSUM accumulates evidence of distributional shift:
 
-Five signals, each grounded in a distinct theoretical framework:
-
-| Signal | Definition | Theoretical basis |
-|--------|-----------|-------------------|
-| **Spike Excess** (rho) | Largest eigenvalue exceedance above the Marchenko-Pastur edge, normalized | Spiked covariance model; BBP phase transition (Baik, Ben Arous & Peche, 2005) |
-| **Info Flow Regularity** (phi) | Smoothness of the layer-wise Fisher information profile: L1 / (L1 + TV) | Fisher information flow in neural networks (Weimar et al., PRX 2025) |
-| **Spectral Projection Fidelity** (spf) | Fraction of token's dual covariance variance captured by prompt eigenvectors | Spectral subspace alignment; EigenShield (Ettori, 2025) |
-| **MLP Divergence** (mlp) | All-layer mean Jensen-Shannon divergence between pre-MLP and post-MLP logit distributions | Information-theoretic transformation analysis |
-| **Attention Entropy** (ent) | Bimodality of per-head normalized attention entropies via Otsu coefficient | Attention head specialization analysis |
-
-### CUSUM Sequential Fusion
-
-Rather than fusing signals independently per token, AG-SAR treats the 5-dimensional signal vector as a multivariate time series and applies a **CUSUM change-point detector** to identify hallucination onset.
-
-**Calibration** (prompt tail, all parameters data-derived):
 ```
-mu    = mean of signal vectors over calibration window
-Omega = inverse of Ledoit-Wolf shrinkage covariance (5x5 precision matrix)
-tau   = mean Mahalanobis distance under the null (drift allowance)
-h     = maximum CUSUM excursion on calibration data (detection threshold)
+d(t) = (s(t) - mu)^T Omega (s(t) - mu)    
+C(t) = max(0, C(t-1) + d(t) - tau)         
+risk(t) = C(t) / (C(t) + h)         
 ```
 
-**Per-token detection**:
-```
-d(t) = (s(t) - mu)^T Omega (s(t) - mu)       Mahalanobis distance from null
-C(t) = max(0, C(t-1) + d(t) - tau)            CUSUM accumulator
-risk(t) = C(t) / (C(t) + h)                   Risk score in [0, 1)
-```
+### Calibration
 
-The CUSUM statistic accumulates evidence of distributional shift over tokens. Hallucination spans are contiguous regions where C(t) exceeds the threshold h. This provides minimax-optimal detection delay (Lorden, 1971) and replaces ad-hoc per-token thresholding with a principled sequential test.
-
-### Prompt-Anchored Self-Calibration
-
-All normalization uses only the input prompt — no external data or learned parameters:
-
-- **Calibration window**: min(num_layers, prompt_length) tokens from the prompt tail. This is the natural scale for the L×L dual covariance analysis.
-- **Spectral reference**: Prompt-tail eigenvectors above the BBP phase transition threshold define the "expected" spectral structure.
-- **Signal covariance**: Full 5×5 Ledoit-Wolf shrinkage estimate from prompt-tail signal vectors, inverted to obtain the precision matrix for Mahalanobis scoring.
-- **CUSUM parameters**: tau (drift allowance) and h (detection threshold) derived from running the CUSUM on the calibration window itself.
+Everything is prompt-anchored. No external data, no learned parameters:
+- **Window**: min(num_layers, prompt_length) tail tokens
+- **Reference spectrum**: Prompt eigenvectors above BBP threshold
+- **Precision matrix**: 5x5 Ledoit-Wolf shrinkage inverse covariance
+- **CUSUM thresholds**: tau = mean calibration distance, h = max calibration excursion
 
 ## Pipeline
 
 ```
-Prefill (once per input)
-  Register hooks on all transformer layers
-  Forward pass with output_attentions=True
-  Capture tail hidden states across all layers
-  Calibrate spectral analyzer (prompt dual covariance eigenvectors above MP edge)
-  Compute all 5 signals over prompt tail
-  Fit CUSUM null distribution (mu, precision, tau, h)
+Prefill
+  Hook all layers, forward pass, capture tail hidden states
+  Calibrate spectral analyzer + fit CUSUM null distribution
 
 Generation (per token)
-  Capture layer-wise hidden states via hooks
-  Compute dual covariance eigendecomposition → rho, spf
-  Compute layer-wise Fisher information profile → phi
-  Compute pre/post-MLP JSD across all layers → mlp
-  Compute attention head entropy bimodality → ent
-  Accumulate Mahalanobis distance into CUSUM statistic
+  Dual covariance eigendecomposition -> rho, spf
+  Fisher information profile -> phi
+  Pre/post-MLP JSD -> mlp
+  Attention entropy bimodality -> ent
+  Accumulate Mahalanobis distance into CUSUM
 
 Post-processing
-  Map CUSUM values to risk scores
-  Extract hallucination spans from CUSUM threshold crossings
-  Flag response if max CUSUM exceeds calibrated threshold
+  Map CUSUM to risk scores, extract spans, flag response
 ```

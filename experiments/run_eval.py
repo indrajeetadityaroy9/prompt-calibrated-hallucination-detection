@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass, asdict
 
 import numpy as np
@@ -5,14 +6,11 @@ from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
 from ag_sar.detector import Detector
-from .answer_matching import max_f1_score, compute_adaptive_f1_threshold
-from .metrics import compute_metrics, bootstrap_auroc_ci
 
-from .schema import ExperimentConfig
-from .common import load_dataset, save_results
-
-
-_PROMPT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+from experiments.answer_matching import compute_adaptive_f1_threshold, max_f1_score
+from experiments.common import PROMPT_TEMPLATE, load_dataset, save_results
+from experiments.metrics import bootstrap_auroc_ci, compute_metrics
+from experiments.schema import ExperimentConfig
 
 
 @dataclass
@@ -41,7 +39,7 @@ def _run_dataset(
     print_interval = max(1, config.evaluation.n_samples // 4)
 
     for i, sample in enumerate(tqdm(samples, desc=f"Eval ({samples[0]['dataset']})")):
-        prompt = _PROMPT_TEMPLATE.format(
+        prompt = PROMPT_TEMPLATE.format(
             context=sample["context"], question=sample["question"]
         )
         result = detector.detect(
@@ -160,7 +158,6 @@ def _print_results(summary: dict):
 
 
 def run_evaluation(model, tokenizer, config: ExperimentConfig) -> dict:
-    import time
 
     detector = Detector(model, tokenizer)
     model_short = config.model.name.split("/")[-1]
@@ -187,7 +184,7 @@ def run_evaluation(model, tokenizer, config: ExperimentConfig) -> dict:
 
         _print_results(summary)
 
-        out_path = f"{config.output.dir}/eval_{dataset_name}_{model_short}.json"
+        out_path = f"{config.output_dir}/eval_{dataset_name}_{model_short}.json"
         save_results({"summary": summary, "samples": [asdict(r) for r in results]}, out_path)
 
         all_summaries[dataset_name] = summary

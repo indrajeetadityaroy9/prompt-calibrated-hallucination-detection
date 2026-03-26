@@ -1,16 +1,15 @@
 import numpy as np
 import torch
 
-from .numerics import EPS, effective_rank, information_flow_regularity
-from .hooks import LayerHiddenStates
-from .signals.ent import compute_ent
-from .aggregation.fusion import CalibrationStats, calibrate_cusum
+from ag_sar.config import LayerHiddenStates
+from ag_sar.fusion import CalibrationStats, calibrate_cusum
+from ag_sar.numerics import EPS, effective_rank, information_flow_regularity
+from ag_sar.signals import compute_ent, compute_mlp_jsd
 
 
 def self_calibrate(
     *,
     spectral_analyzer,
-    jsd_signal,
     lm_head,
     final_norm,
     tail_per_layer: dict[int, dict],
@@ -45,7 +44,7 @@ def self_calibrate(
 
     mlp_vals = []
     for t in range(n_tail):
-        k = max(2, effective_rank(all_probs[t]))
+        k = effective_rank(all_probs[t])
         cand = torch.topk(all_logits[t], k).indices
         states = {
             li: LayerHiddenStates(
@@ -54,7 +53,7 @@ def self_calibrate(
             )
             for li in layer_keys
         }
-        mlp_vals.append(jsd_signal.compute_mlp_jsd(states, cand))
+        mlp_vals.append(compute_mlp_jsd(states, cand, lm_head, final_norm))
 
     ent_vals = []
     for t in range(n_tail):

@@ -1,5 +1,13 @@
 from dataclasses import dataclass
 
+from torch import Tensor
+
+
+@dataclass
+class LayerHiddenStates:
+    h_resid_attn: Tensor
+    h_resid_mlp: Tensor
+
 
 @dataclass
 class TokenSignals:
