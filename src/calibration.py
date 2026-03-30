@@ -1,21 +1,13 @@
 import numpy as np
 import torch
 
-from ag_sar.config import LayerHiddenStates
-from ag_sar.fusion import CalibrationStats, calibrate_cusum
-from ag_sar.numerics import EPS, effective_rank, information_flow_regularity
-from ag_sar.signals import compute_ent, compute_mlp_jsd
+from src.config import LayerHiddenStates
+from src.fusion import CalibrationStats, calibrate_cusum
+from src.numerics import EPS, effective_rank, information_flow_regularity
+from src.signals import compute_ent, compute_mlp_jsd
 
 
-def self_calibrate(
-    *,
-    spectral_analyzer,
-    lm_head,
-    final_norm,
-    tail_per_layer: dict[int, dict],
-    prefill_attentions: tuple,
-    cal_tail_start: int,
-) -> CalibrationStats:
+def self_calibrate(*, spectral_analyzer, lm_head, final_norm, tail_per_layer: dict[int, dict], prefill_attentions: tuple, cal_tail_start: int) -> CalibrationStats:
     layer_keys = sorted(tail_per_layer.keys())
     n_tail = tail_per_layer[layer_keys[0]]["h_resid_mlp"].shape[0]
 

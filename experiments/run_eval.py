@@ -5,7 +5,7 @@ import numpy as np
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
-from ag_sar.detector import Detector
+from src.detector import Detector
 
 from experiments.answer_matching import compute_adaptive_f1_threshold, max_f1_score
 from experiments.common import PROMPT_TEMPLATE, load_dataset, save_results
@@ -30,11 +30,7 @@ class SampleResult:
     is_flagged: bool
 
 
-def _run_dataset(
-    detector: Detector,
-    samples: list[dict],
-    config: ExperimentConfig,
-) -> tuple[list[SampleResult], dict]:
+def _run_dataset(detector: Detector, samples: list[dict], config: ExperimentConfig) -> tuple[list[SampleResult], dict]:
     results: list[SampleResult] = []
     print_interval = max(1, config.evaluation.n_samples // 4)
 
@@ -122,7 +118,7 @@ def _run_dataset(
 
 def _print_results(summary: dict):
     print(f"\n{'='*65}")
-    print(f"  AG-SAR Evaluation Results: {summary['dataset'].upper()}")
+    print(f"  Evaluation Results: {summary['dataset'].upper()}")
     print(f"{'='*65}")
     print(f"  Samples:           {summary['n_samples']}")
     print(f"  Hallucinations:    {summary['n_hallucinations']} ({summary['hallucination_rate']:.1%})")

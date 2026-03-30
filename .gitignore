@@ -101,11 +101,11 @@ outputs/
 temp/
 tmp/
 
-# AG-SAR internal documents (not part of submission)
+# Internal documents (not part of submission)
 audit_report.md
 mechanism_review.md
 
-# AG-SAR specific data/artifacts
+# Data/artifacts
 *.json.gz
 *.csv.gz
 eval_results/

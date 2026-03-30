@@ -4,7 +4,7 @@ from collections import Counter
 
 import numpy as np
 
-from ag_sar.numerics import _otsu_internals
+from src.numerics import _otsu_internals
 
 
 def normalize_answer(s: str) -> str:

@@ -5,8 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from ag_sar.config import LayerHiddenStates
-from ag_sar.numerics import EPS, marchenko_pastur_edge, otsu_coefficient
+from src.config import LayerHiddenStates
+from src.numerics import EPS, marchenko_pastur_edge, otsu_coefficient
 
 
 class SpectralAnalyzer:
@@ -23,7 +23,7 @@ class SpectralAnalyzer:
         eigvals, eigvecs = eigvals.flip(0), eigvecs.flip(1)
         sigma2 = float(eigvals.median().item())
         lam_plus = marchenko_pastur_edge(sigma2, L / d)
-        k = int((eigvals > lam_plus).sum().item())
+        k = max(1, int((eigvals > lam_plus).sum().item()))
         self._prompt_eigvecs = eigvecs[:, :k].T
 
     def compute(self, H_token: Tensor) -> tuple[float, float]:
@@ -42,12 +42,7 @@ class SpectralAnalyzer:
         return rho, spf
 
 
-def compute_mlp_jsd(
-    layer_states: dict[int, LayerHiddenStates],
-    candidate_set: Tensor,
-    lm_head: nn.Linear,
-    final_norm: nn.Module,
-) -> float:
+def compute_mlp_jsd(layer_states: dict[int, LayerHiddenStates], candidate_set: Tensor, lm_head: nn.Linear, final_norm: nn.Module) -> float:
     dtype = lm_head.weight.dtype
 
     attn_stack = torch.stack([s.h_resid_attn for s in layer_states.values()]).to(dtype=dtype)

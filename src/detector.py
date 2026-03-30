@@ -3,12 +3,12 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 
-from ag_sar.calibration import self_calibrate
-from ag_sar.config import LayerHiddenStates, TokenSignals, DetectionResult
-from ag_sar.fusion import CalibrationStats, compute_cusum_risks
-from ag_sar.hooks import LayerHooks, ModelAdapter
-from ag_sar.numerics import EPS, effective_rank, information_flow_regularity
-from ag_sar.signals import SpectralAnalyzer, compute_ent, compute_mlp_jsd
+from src.calibration import self_calibrate
+from src.config import LayerHiddenStates, TokenSignals, DetectionResult
+from src.fusion import CalibrationStats, compute_cusum_risks
+from src.hooks import LayerHooks, ModelAdapter
+from src.numerics import EPS, effective_rank, information_flow_regularity
+from src.signals import SpectralAnalyzer, compute_ent, compute_mlp_jsd
 
 
 class Detector:
@@ -30,11 +30,7 @@ class Detector:
         self.prompt_stats: CalibrationStats | None = None
         self._hooks: list[LayerHooks] = []
 
-    def _prefill(
-        self,
-        input_ids: Tensor,
-        prompt_len: int,
-    ) -> tuple:
+    def _prefill(self, input_ids: Tensor, prompt_len: int) -> tuple:
         window_size = min(self.num_layers, prompt_len)
 
         for layer_idx in range(self.num_layers):
@@ -104,13 +100,7 @@ class Detector:
 
         return past_key_values, last_logits, outputs.attentions
 
-    def compute_token_signals(
-        self,
-        logits: Tensor,
-        emitted_token_id: int,
-        attentions: tuple,
-        seq_len: int = 0,
-    ) -> TokenSignals:
+    def compute_token_signals(self, logits: Tensor, emitted_token_id: int, attentions: tuple, seq_len: int = 0) -> TokenSignals:
         layer_states = self._layer_states
         sorted_keys = sorted(layer_states.keys())
 
@@ -141,12 +131,7 @@ class Detector:
             h.remove()
         self._hooks.clear()
 
-    def _aggregate_results(
-        self,
-        token_results: list[TokenSignals],
-        all_ids: Tensor,
-        prompt_len: int,
-    ) -> DetectionResult:
+    def _aggregate_results(self, token_results: list[TokenSignals], all_ids: Tensor, prompt_len: int) -> DetectionResult:
         generated_text = self.tokenizer.decode(
             all_ids[0, prompt_len:], skip_special_tokens=True
         )
@@ -175,12 +160,7 @@ class Detector:
             prompt_length=prompt_len,
         )
 
-    def _generation_loop(
-        self,
-        input_ids: Tensor,
-        max_new_tokens: int,
-        response_ids: list[int] | None = None,
-    ) -> DetectionResult:
+    def _generation_loop(self, input_ids: Tensor, max_new_tokens: int, response_ids: list[int] | None = None) -> DetectionResult:
         prompt_len = input_ids.shape[1]
         attention_mask = torch.ones_like(input_ids)
 
@@ -250,27 +230,10 @@ class Detector:
         self._cleanup()
         return self._aggregate_results(token_results, all_ids, prompt_len)
 
-    def detect(
-        self,
-        prompt: str,
-        max_new_tokens: int,
-    ) -> DetectionResult:
+    def detect(self, prompt: str, max_new_tokens: int) -> DetectionResult:
         input_ids = torch.tensor(
             [self.tokenizer.encode(prompt, add_special_tokens=True)],
             dtype=torch.long, device=self.device,
         )
         return self._generation_loop(input_ids, max_new_tokens)
 
-    def score(
-        self,
-        prompt: str,
-        response_text: str,
-    ) -> DetectionResult:
-        full_text = prompt + response_text
-        prompt_tokens = self.tokenizer.encode(prompt, add_special_tokens=True)
-        full_tokens = self.tokenizer.encode(full_text, add_special_tokens=True)
-        prompt_len = len(prompt_tokens)
-        response_ids = full_tokens[prompt_len:]
-
-        input_ids = torch.tensor([prompt_tokens], dtype=torch.long, device=self.device)
-        return self._generation_loop(input_ids, len(response_ids), response_ids=response_ids)

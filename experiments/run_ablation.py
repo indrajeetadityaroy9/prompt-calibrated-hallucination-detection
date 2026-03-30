@@ -3,8 +3,8 @@ import copy
 import numpy as np
 from tqdm import tqdm
 
-from ag_sar.fusion import compute_cusum_risks
-from ag_sar.detector import Detector
+from src.fusion import compute_cusum_risks
+from src.detector import Detector
 
 from experiments.answer_matching import compute_adaptive_f1_threshold, max_f1_score
 from experiments.common import PROMPT_TEMPLATE, load_dataset, save_results
@@ -14,11 +14,7 @@ from experiments.schema import ExperimentConfig
 _SIGNAL_ORDER = ["rho", "phi", "spf", "mlp", "ent"]
 
 
-def _generate_baseline(
-    detector: Detector,
-    samples: list[dict],
-    config: ExperimentConfig,
-) -> list[dict]:
+def _generate_baseline(detector: Detector, samples: list[dict], config: ExperimentConfig) -> list[dict]:
     cached = []
 
     for sample in tqdm(samples, desc="Generating baseline"):
@@ -48,11 +44,7 @@ def _generate_baseline(
     return cached
 
 
-def _evaluate_condition(
-    cached: list[dict],
-    labels: list[int],
-    disabled_signals: set[str],
-) -> dict:
+def _evaluate_condition(cached: list[dict], labels: list[int], disabled_signals: set[str]) -> dict:
     scores = []
 
     for c in cached:
@@ -103,7 +95,7 @@ def run_ablation(model, tokenizer, config: ExperimentConfig) -> dict:
         ablation_results[f"without_{signal}"] = result
 
     print(f"\n{'='*65}")
-    print(f"  AG-SAR Leave-One-Out Signal Ablation: {dataset_name.upper()}")
+    print(f"  Leave-One-Out Signal Ablation: {dataset_name.upper()}")
     print(f"{'='*65}")
     print(f"  {'Condition':<25} {'AUROC':>8} {'Delta':>8}")
     print(f"  {'-'*41}")

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import torch.nn as nn
 from torch import Tensor
 
-from ag_sar.config import LayerHiddenStates
+from src.config import LayerHiddenStates
 
 
 def _is_norm(module: nn.Module) -> bool:

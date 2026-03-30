@@ -76,14 +76,7 @@ def compute_metrics(scores: list[float], labels: list[int]) -> MetricsResult:
     )
 
 
-def bootstrap_auroc_ci(
-    scores: list[float],
-    labels: list[int],
-    *,
-    n_bootstrap: int = 1000,
-    confidence: float = 0.95,
-    seed: int = 42,
-) -> tuple[float, float]:
+def bootstrap_auroc_ci(scores: list[float], labels: list[int], *, n_bootstrap: int = 1000, confidence: float = 0.95, seed: int = 42) -> tuple[float, float]:
     scores_arr = np.array(scores)
     labels_arr = np.array(labels)
 

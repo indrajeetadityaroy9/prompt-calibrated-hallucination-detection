@@ -1,52 +1,58 @@
-# AG-SAR: Prompt-Anchored Spectral Signals for Zero-Shot Hallucination Detection in Language Models
+# Prompt-Calibrated Spectral Signals for Zero-Shot Hallucination Detection in Language Models
 
-AG-SAR hooks into transformer internals during autoregressive generation, extracts five spectral signals from layer-wise hidden states, and fuses them with a CUSUM change-point detector calibrated from the prompt itself.
+LLM's hallucinate -- generating fluent text that is unfaithful to the provided context. Existing detection methods require either supervised training on labeled hallucination data or access to external knowledge bases, limiting their applicability. This work presents a zero-shot, training-free hallucination detector that operates entirely within the transformer's own representations. The method hooks into the autoregressive generation process, extracts five mechanistic signals from cross-layer hidden states at each token, and fuses them through a CUSUM sequential change-point detector calibrated from the prompt itself. The key insight is that hallucination manifests as a phase transition in the spectral structure of layer-wise representations: when generation departs from the prompt's semantic structure, the dominant eigenvalues of the cross-layer covariance matrix shift relative to the Marchenko-Pastur noise floor. Modeling each token's hidden states as a spiked random matrix and running sequential hypothesis testing against a prompt-derived null distribution detects this transition without any learned parameters or external data.
 
-Hallucination is a phase transition in the spectral structure of cross-layer representations. We model each token's hidden states as a spiked random matrix, use the Marchenko-Pastur law to separate signal from noise eigenvalues, and run sequential hypothesis testing to detect when generation departs from the prompt baseline.
+## Signals
 
-### Signals
+For each generated token, hidden states across $L$ layers are stacked into $H \in \mathbb{R}^{L \times d}$ and the dual covariance $C = \frac{1}{d} H_c H_c^\top \in \mathbb{R}^{L \times L}$ is computed, exploiting the $d \gg L$ regime to make eigendecomposition tractable.
 
-For each token, stack hidden states across L layers into H in R^{L x d}. Compute the dual covariance C = (1/d) H H^T in R^{L x L}. This handles the d >> L regime (e.g., L=32, d=4096) where standard covariance is ill-conditioned.
+| Signal | Description | Computation |
+|--------|-------------|-------------|
+| **rho** | Spike excess above noise floor | $(\lambda_1 - \lambda_+) / \lambda_+$ where $\lambda_+$ is the Marchenko-Pastur edge |
+| **phi** | Layer-wise information flow regularity | $\|f\|_1 / (\|f\|_1 + \text{TV}(f))$ on the Fisher information profile |
+| **spf** | Alignment with prompt spectral structure | Variance fraction along prompt eigenvectors above the BBP threshold |
+| **mlp** | MLP revision magnitude | Mean Jensen-Shannon divergence between pre- and post-MLP logit distributions |
+| **ent** | Attention head specialization | $1 - \eta_{\text{Otsu}}$ on per-head normalized entropies |
 
-| Signal | What it measures | How |
-|--------|-----------------|-----|
-| **rho** (spike excess) | Semantic signal strength above noise floor | (lambda_1 - MP edge) / MP edge; BBP phase transition |
-| **phi** (info flow regularity) | Smoothness of layer-wise updates | L1 / (L1 + TV) on Fisher information profile |
-| **spf** (spectral projection fidelity) | Alignment with prompt's spectral structure | Variance fraction along prompt eigenvectors |
-| **mlp** (MLP divergence) | How much MLP revises attention output | Mean JSD between pre/post-MLP logits across layers |
-| **ent** (attention entropy) | Head specialization vs diffusion | Otsu coefficient on per-head normalized entropies |
+## Fusion
 
-### Fusion
-The 5 signals form a multivariate time series. Instead of scoring tokens independently, CUSUM accumulates evidence of distributional shift:
+The five signals form a multivariate time series over generated tokens. Rather than scoring tokens independently, evidence of distributional shift is accumulated via a CUSUM detector operating on Mahalanobis distances from the prompt-calibrated null:
 
-```
-d(t) = (s(t) - mu)^T Omega (s(t) - mu)    
-C(t) = max(0, C(t-1) + d(t) - tau)         
-risk(t) = C(t) / (C(t) + h)         
-```
+$$d(t) = (s(t) - \mu)^\top \Omega\, (s(t) - \mu)$$
 
-### Calibration
+$$C(t) = \max(0,\; C(t-1) + d(t) - \tau)$$
 
-Everything is prompt-anchored. No external data, no learned parameters:
-- **Window**: min(num_layers, prompt_length) tail tokens
-- **Reference spectrum**: Prompt eigenvectors above BBP threshold
-- **Precision matrix**: 5x5 Ledoit-Wolf shrinkage inverse covariance
-- **CUSUM thresholds**: tau = mean calibration distance, h = max calibration excursion
+$$\text{risk}(t) = C(t)\, /\, (C(t) + h)$$
+
+where $\mu$ and $\Omega$ (Ledoit-Wolf shrinkage precision) are estimated from prompt tail tokens, $\tau$ is the mean calibration distance, and $h$ is the maximum calibration excursion.
+
+## Calibration
+
+All parameters are prompt-anchored — no external data, no training:
+- **Window**: $\min(L,\, \text{prompt length})$ tail tokens
+- **Reference spectrum**: Prompt eigenvectors above the BBP phase transition threshold
+- **Precision matrix**: $5 \times 5$ Ledoit-Wolf shrinkage inverse covariance
+- **CUSUM thresholds**: $\tau$ from mean calibration distance, $h$ from maximum calibration CUSUM excursion
 
 ## Pipeline
 
 ```
 Prefill
   Hook all layers, forward pass, capture tail hidden states
-  Calibrate spectral analyzer + fit CUSUM null distribution
+  Calibrate spectral analyzer from prompt covariance eigenvectors
+  Fit CUSUM null distribution (mu, precision, tau, h)
 
 Generation (per token)
-  Dual covariance eigendecomposition -> rho, spf
-  Fisher information profile -> phi
-  Pre/post-MLP JSD -> mlp
-  Attention entropy bimodality -> ent
+  Dual covariance eigendecomposition  ->  rho, spf
+  Fisher information profile          ->  phi
+  Pre/post-MLP JSD via logit lens     ->  mlp
+  Attention entropy bimodality        ->  ent
   Accumulate Mahalanobis distance into CUSUM
 
 Post-processing
-  Map CUSUM to risk scores, extract spans, flag response
+  Map CUSUM to risk scores, extract risky spans, flag response
 ```
+
+## Evaluation
+
+Evaluation is conducted on TriviaQA and SQuAD v2 using adaptive Otsu thresholding on token-level F1 to define hallucination labels, reporting AUROC, AUPRC, FPR@95%TPR, AURC, E-AURC, ECE, and Brier score with BCa bootstrap confidence intervals. Leave-one-out signal ablation quantifies each signal's marginal contribution by replacing it with its calibration mean and recomputing CUSUM risks.

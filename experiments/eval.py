@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import argparse
 
 from experiments.common import load_model
@@ -8,7 +7,7 @@ from experiments.schema import ExperimentConfig
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AG-SAR Experiment Runner")
+    parser = argparse.ArgumentParser(description="Hallucination Detection Experiment Runner")
     parser.add_argument("--config", type=str, required=True)
     args = parser.parse_args()
 
