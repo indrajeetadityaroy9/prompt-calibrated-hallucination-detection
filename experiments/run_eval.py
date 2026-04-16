@@ -5,14 +5,14 @@ import numpy as np
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
+from src.config import SIGNAL_NAMES
 from src.detector import Detector
+from src.numerics import otsu
 
-from experiments.answer_matching import compute_adaptive_f1_threshold, max_f1_score
+from experiments.answer_matching import max_f1_score
 from experiments.common import PROMPT_TEMPLATE, load_samples, save_results
 from experiments.metrics import bootstrap_auroc_ci, compute_metrics
 from experiments.schema import ExperimentConfig
-
-_SIGNAL_NAMES = ("rho", "phi", "spf", "mlp", "ent")
 
 
 @dataclass
@@ -42,14 +42,14 @@ def _run_dataset(detector: Detector, dataset_name: str, samples: list[dict], con
         generated = result.generated_text.strip()
         f1 = max_f1_score(generated, sample["answers"])
 
-        means = {f"mean_{s}": float(np.mean([getattr(t, s) for t in result.token_signals])) for s in _SIGNAL_NAMES}
+        means = {f"mean_{s}": float(np.mean([getattr(t, s) for t in result.token_signals])) for s in SIGNAL_NAMES}
 
         results.append(SampleResult(question=sample["question"], generated_answer=generated, ground_truths=sample["answers"], f1=f1, is_hallucination=False, response_risk=result.response_risk, **means, n_tokens=result.num_tokens, is_flagged=result.is_flagged))
 
         if (i + 1) % print_interval == 0:
             print(f"  [{i+1}/{len(samples)}] avg_risk={np.mean([r.response_risk for r in results]):.3f}")
 
-    adaptive_threshold = compute_adaptive_f1_threshold([r.f1 for r in results])
+    adaptive_threshold = otsu([r.f1 for r in results])[0]
     print(f"  Adaptive F1 threshold: {adaptive_threshold:.3f}")
     for r in results:
         r.is_hallucination = r.f1 < adaptive_threshold
@@ -58,7 +58,7 @@ def _run_dataset(detector: Detector, dataset_name: str, samples: list[dict], con
     scores = [r.response_risk for r in results]
     metrics = compute_metrics(scores, labels)
 
-    sig_keys = [f"mean_{s}" for s in _SIGNAL_NAMES] + ["response_risk"]
+    sig_keys = [f"mean_{s}" for s in SIGNAL_NAMES] + ["response_risk"]
     signal_aurocs = {k: float(roc_auc_score(labels, [getattr(r, k) for r in results])) for k in sig_keys}
 
     ci_low, ci_high = bootstrap_auroc_ci(scores, labels, seed=config.evaluation.seed)

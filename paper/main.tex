@@ -171,7 +171,7 @@ where $\sigma_B^2$ is the maximum between-class variance from Otsu's method and 
 
 All detection parameters are derived from the prompt's own representations, requiring no external data or training. During the prefill phase, we compute the five signals on all prompt tokens, yielding a calibration matrix $S_{\text{cal}} \in \mathbb{R}^{P \times 5}$.
 
-The spectral analyzer is calibrated by computing the prompt's dual covariance eigenvectors that exceed the Marchenko--Pastur threshold, establishing the reference subspace $V_{\text{prompt}}$ for the spectral projection fidelity signal.
+The spectral analyzer is calibrated by computing the eigenbasis of the token-average per-token dual covariance $\bar{C} = \frac{1}{P} \sum_{t=1}^{P} C_t$, evaluated at the per-token Marchenko--Pastur aspect ratio $\gamma = L/d$. Eigenvectors whose eigenvalues exceed the threshold establish the reference subspace $V_{\text{prompt}}$ for the spectral projection fidelity signal. The first prompt token (BOS) is excluded from the per-token signal loops because its attention distribution over a single key is degenerate.
 
 From $S_{\text{cal}}$, we estimate:
 \begin{itemize}

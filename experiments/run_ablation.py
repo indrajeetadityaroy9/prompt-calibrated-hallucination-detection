@@ -1,17 +1,15 @@
-import copy
-
 import numpy as np
 from tqdm import tqdm
 
-from src.fusion import compute_cusum_risks
+from src.config import SIGNAL_NAMES
 from src.detector import Detector
+from src.fusion import calibrate_cusum, compute_cusum_risks
+from src.numerics import otsu
 
-from experiments.answer_matching import compute_adaptive_f1_threshold, max_f1_score
+from experiments.answer_matching import max_f1_score
 from experiments.common import PROMPT_TEMPLATE, load_samples, save_results
 from experiments.metrics import compute_metrics
 from experiments.schema import ExperimentConfig
-
-_SIGNAL_ORDER = ["rho", "phi", "spf", "mlp", "ent"]
 
 
 def _generate_baseline(detector: Detector, samples: list[dict], config: ExperimentConfig) -> list[dict]:
@@ -19,28 +17,25 @@ def _generate_baseline(detector: Detector, samples: list[dict], config: Experime
     for sample in tqdm(samples, desc="Generating baseline"):
         prompt = PROMPT_TEMPLATE.format(context=sample["context"], question=sample["question"])
         result = detector.detect(prompt=prompt, max_new_tokens=config.evaluation.max_new_tokens)
-        generated = result.generated_text.strip()
         cached.append({
-            "response_signals": {sig: np.array([getattr(s, sig) for s in result.token_signals]) for sig in _SIGNAL_ORDER},
-            "prompt_stats": copy.deepcopy(detector.prompt_stats),
+            "cal_matrix": detector.prompt_signals,
+            "resp_matrix": np.column_stack([[getattr(s, n) for s in result.token_signals] for n in SIGNAL_NAMES]),
             "response_risk": result.response_risk,
-            "f1": max_f1_score(generated, sample["answers"]),
+            "f1": max_f1_score(result.generated_text.strip(), sample["answers"]),
         })
     return cached
 
 
-def _evaluate_condition(cached: list[dict], labels: list[int], disabled_signals: set[str]) -> dict:
+def _evaluate_condition(cached: list[dict], labels: list[int], disabled: set[str]) -> dict:
+    kept = [i for i, s in enumerate(SIGNAL_NAMES) if s not in disabled]
     scores = []
     for c in cached:
-        if not disabled_signals:
+        if not disabled:
             scores.append(c["response_risk"])
-        else:
-            signal_matrix = np.column_stack([c["response_signals"][sig] for sig in _SIGNAL_ORDER])
-            for i, sig in enumerate(_SIGNAL_ORDER):
-                if sig in disabled_signals:
-                    signal_matrix[:, i] = c["prompt_stats"].mu[i]
-            _, _, risk, _, _ = compute_cusum_risks(signal_matrix, c["prompt_stats"])
-            scores.append(risk)
+            continue
+        stats = calibrate_cusum(c["cal_matrix"][:, kept])
+        _, _, risk, _, _ = compute_cusum_risks(c["resp_matrix"][:, kept], stats)
+        scores.append(risk)
     metrics = compute_metrics(scores, labels)
     return {"auroc": metrics.auroc, "auprc": metrics.auprc}
 
@@ -54,17 +49,17 @@ def run_ablation(model, tokenizer, config: ExperimentConfig) -> dict:
     print(f"\n{'='*65}\nGenerating baseline (all signals, single pass)...")
     cached = _generate_baseline(detector, samples, config)
 
-    threshold = compute_adaptive_f1_threshold([c["f1"] for c in cached])
+    threshold = otsu([c["f1"] for c in cached])[0]
     labels = [int(c["f1"] < threshold) for c in cached]
 
-    baseline = _evaluate_condition(cached, labels, disabled_signals=set())
+    baseline = _evaluate_condition(cached, labels, disabled=set())
     baseline_auroc = baseline["auroc"]
     print(f"Baseline AUROC: {baseline_auroc:.4f}")
 
     ablation_results = {"baseline": baseline}
     for signal in config.ablation_signals:
         print(f"\nAblating: {signal}...")
-        ablation_results[f"without_{signal}"] = _evaluate_condition(cached, labels, disabled_signals={signal})
+        ablation_results[f"without_{signal}"] = _evaluate_condition(cached, labels, disabled={signal})
 
     print(f"\n{'='*65}\n  Leave-One-Out Signal Ablation: {dataset_name.upper()}\n{'='*65}")
     print(f"  {'Condition':<25} {'AUROC':>8} {'Delta':>8}\n  {'-'*41}")

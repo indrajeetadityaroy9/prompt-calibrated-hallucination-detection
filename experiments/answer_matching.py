@@ -2,10 +2,6 @@ import re
 import string
 from collections import Counter
 
-import numpy as np
-
-from src.numerics import _otsu_internals
-
 _PUNC = set(string.punctuation)
 
 
@@ -33,12 +29,6 @@ def extract_short_answer(text: str) -> str:
                 text = text[:text.index(end) + 1].strip()
                 break
     return text
-
-
-def compute_adaptive_f1_threshold(f1_scores: list[float]) -> float:
-    values = np.asarray(f1_scores, dtype=float)
-    best_idx, sorted_vals, _, _ = _otsu_internals(values)
-    return float(0.5 * (sorted_vals[best_idx] + sorted_vals[best_idx + 1]))
 
 
 def max_f1_score(prediction: str, ground_truths: list[str]) -> float:

@@ -10,30 +10,25 @@ def marchenko_pastur_edge(sigma2: float, gamma: float) -> float:
 
 
 def information_flow_regularity(fi_profile: Tensor) -> float:
-    fi = fi_profile.float().clamp(min=torch.finfo(torch.float32).tiny)
+    fi = fi_profile.float()
     l1 = fi.sum()
     return float(l1 / (l1 + (fi[1:] - fi[:-1]).abs().sum()))
 
 
 def effective_rank(S: Tensor) -> int:
-    p = S.float().clamp(min=torch.finfo(torch.float32).tiny)
-    p = p / p.sum()
-    return math.ceil((-(p * p.log()).sum()).exp().item())
+    p = S.float() / S.float().sum()
+    return math.ceil((-torch.xlogy(p, p).sum()).exp().item())
 
 
-def _otsu_internals(values: np.ndarray) -> tuple[int, np.ndarray, np.ndarray, float]:
+def otsu(values: np.ndarray | list) -> tuple[float, float]:
+    values = np.asarray(values, dtype=float)
     sorted_vals = np.sort(values)
     n = len(sorted_vals)
     cumsum = np.cumsum(sorted_vals)
-    indices = np.arange(1, n)
-    w0 = indices / n
-    mu0 = cumsum[:-1] / indices
-    mu1 = (cumsum[-1] - cumsum[:-1]) / (n - indices)
-    between_var = w0 * (1.0 - w0) * (mu0 - mu1) ** 2
-    return int(np.argmax(between_var)), sorted_vals, between_var, float(np.var(values))
-
-
-def otsu_coefficient(values: np.ndarray | list) -> float:
-    values = np.asarray(values, dtype=float)
-    best_idx, _, between_var, total_var = _otsu_internals(values)
-    return float(between_var[best_idx] / (total_var + np.finfo(values.dtype).eps))
+    idx = np.arange(1, n)
+    w0 = idx / n
+    mu0 = cumsum[:-1] / idx
+    mu1 = (cumsum[-1] - cumsum[:-1]) / (n - idx)
+    between = w0 * (1.0 - w0) * (mu0 - mu1) ** 2
+    best = int(np.argmax(between))
+    return 0.5 * (sorted_vals[best] + sorted_vals[best + 1]), float(between[best] / np.var(values))

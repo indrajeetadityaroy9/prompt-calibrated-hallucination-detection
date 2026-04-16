@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 from torch import Tensor
 
+SIGNAL_NAMES = ("rho", "phi", "spf", "mlp", "ent")
+
 
 @dataclass
 class LayerHiddenStates:
