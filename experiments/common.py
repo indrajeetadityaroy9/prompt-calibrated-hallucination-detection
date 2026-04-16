@@ -11,10 +11,12 @@ from experiments.schema import ModelConfig
 
 PROMPT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
 
-DATASET_LOADERS = {
-    "triviaqa": load_triviaqa,
-    "squad": load_squad,
-}
+DATASET_LOADERS = {"triviaqa": load_triviaqa, "squad": load_squad}
+
+
+def load_samples(name: str, n_samples: int, max_context_chars: int) -> list[dict]:
+    loader = DATASET_LOADERS[name]
+    return loader(n_samples=n_samples, max_context_chars=max_context_chars)
 
 
 def load_model(config: ModelConfig, seed: int) -> tuple[AutoModelForCausalLM, AutoTokenizer]:
@@ -26,29 +28,16 @@ def load_model(config: ModelConfig, seed: int) -> tuple[AutoModelForCausalLM, Au
     torch.backends.cudnn.benchmark = False
 
     token = os.environ.get("HF_TOKEN")
-    dtype = getattr(torch, config.dtype)
-
     print(f"Loading model: {config.name}")
     t0 = time.time()
 
     tokenizer = AutoTokenizer.from_pretrained(config.name, token=token)
     tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        config.name,
-        dtype=dtype,
-        device_map="auto",
-        token=token,
-        attn_implementation=config.attn_implementation,
-    )
+    model = AutoModelForCausalLM.from_pretrained(config.name, dtype=getattr(torch, config.dtype), device_map="auto", token=token, attn_implementation=config.attn_implementation)
     model.eval()
     print(f"Model loaded in {time.time() - t0:.1f}s")
-
     return model, tokenizer
-
-
-def load_dataset(name: str, n_samples: int, max_context_chars: int) -> list[dict]:
-    return DATASET_LOADERS[name](n_samples=n_samples, max_context_chars=max_context_chars)
 
 
 def save_results(data: dict, path: str) -> None:

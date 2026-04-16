@@ -15,6 +15,11 @@ class CalibrationStats:
     h: float
 
 
+def _mahal_dists(signal_matrix: np.ndarray, mu: np.ndarray, precision: np.ndarray) -> np.ndarray:
+    diff = signal_matrix - mu
+    return np.sum((diff @ precision) * diff, axis=1)
+
+
 def _cusum(dists: np.ndarray, tau: float) -> np.ndarray:
     cusum = np.zeros(len(dists))
     for i in range(len(dists)):
@@ -24,18 +29,14 @@ def _cusum(dists: np.ndarray, tau: float) -> np.ndarray:
 
 def calibrate_cusum(signal_matrix: np.ndarray) -> CalibrationStats:
     mu = signal_matrix.mean(axis=0)
-    cov, _ = ledoit_wolf(signal_matrix)
-    precision = np.linalg.inv(cov)
-    diff = signal_matrix - mu
-    dists = np.sum((diff @ precision) * diff, axis=1)
+    precision = np.linalg.inv(ledoit_wolf(signal_matrix)[0])
+    dists = _mahal_dists(signal_matrix, mu, precision)
     tau = float(np.mean(dists))
-    cusum = _cusum(dists, tau)
-    return CalibrationStats(mu=mu, precision=precision, tau=tau, h=max(float(np.max(cusum)), float(EPS)))
+    return CalibrationStats(mu=mu, precision=precision, tau=tau, h=max(float(np.max(_cusum(dists, tau))), float(EPS)))
 
 
 def compute_cusum_risks(signal_matrix: np.ndarray, stats: CalibrationStats):
-    diff = signal_matrix - stats.mu
-    dists = np.sum((diff @ stats.precision) * diff, axis=1)
+    dists = _mahal_dists(signal_matrix, stats.mu, stats.precision)
     n = len(dists)
     cusum = _cusum(dists, stats.tau)
     token_risks = cusum / (cusum + stats.h)
@@ -49,14 +50,5 @@ def compute_cusum_risks(signal_matrix: np.ndarray, stats: CalibrationStats):
             starts = np.concatenate([[0], starts])
         if above[-1]:
             ends = np.concatenate([ends, [n]])
-        for s, e in zip(starts, ends):
-            spans.append(RiskySpan(
-                start=int(s), end=int(e), peak_cusum=float(cusum[s:e].max()),
-            ))
-    return (
-        token_risks.tolist(),
-        cusum.tolist(),
-        float(np.max(token_risks)),
-        bool(np.max(cusum) > stats.h),
-        spans,
-    )
+        spans = [RiskySpan(start=int(s), end=int(e), peak_cusum=float(cusum[s:e].max())) for s, e in zip(starts, ends)]
+    return token_risks.tolist(), cusum.tolist(), float(np.max(token_risks)), bool(np.max(cusum) > stats.h), spans

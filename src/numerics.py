@@ -12,33 +12,25 @@ def marchenko_pastur_edge(sigma2: float, gamma: float) -> float:
 def information_flow_regularity(fi_profile: Tensor) -> float:
     fi = fi_profile.float().clamp(min=EPS)
     l1 = fi.sum()
-    tv = (fi[1:] - fi[:-1]).abs().sum()
-    return float(l1 / (l1 + tv))
+    return float(l1 / (l1 + (fi[1:] - fi[:-1]).abs().sum()))
 
 
 def effective_rank(S: Tensor) -> int:
-    S = S.float().clamp(min=EPS)
-    p = S / S.sum()
-    H = -(p * p.log()).sum()
-    return round(H.exp().item())
+    p = S.float().clamp(min=EPS)
+    p = p / p.sum()
+    return round((-(p * p.log()).sum()).exp().item())
 
 
 def _otsu_internals(values: np.ndarray) -> tuple[int, np.ndarray, np.ndarray, float]:
     sorted_vals = np.sort(values)
     n = len(sorted_vals)
-
     cumsum = np.cumsum(sorted_vals)
-    total_sum = cumsum[-1]
-
     indices = np.arange(1, n)
     w0 = indices / n
-    w1 = 1.0 - w0
     mu0 = cumsum[:-1] / indices
-    mu1 = (total_sum - cumsum[:-1]) / (n - indices)
-    between_var = w0 * w1 * (mu0 - mu1) ** 2
-
-    best_idx = int(np.argmax(between_var))
-    return best_idx, sorted_vals, between_var, float(np.var(values))
+    mu1 = (cumsum[-1] - cumsum[:-1]) / (n - indices)
+    between_var = w0 * (1.0 - w0) * (mu0 - mu1) ** 2
+    return int(np.argmax(between_var)), sorted_vals, between_var, float(np.var(values))
 
 
 def otsu_coefficient(values: np.ndarray | list) -> float:

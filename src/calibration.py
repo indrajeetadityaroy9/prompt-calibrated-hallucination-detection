@@ -11,47 +11,28 @@ def self_calibrate(*, spectral_analyzer, lm_head, final_norm, tail_per_layer: di
     layer_keys = sorted(tail_per_layer.keys())
     n_tail = tail_per_layer[layer_keys[0]]["h_resid_mlp"].shape[0]
 
-    H_all = torch.stack(
-        [tail_per_layer[li]["h_resid_mlp"] for li in layer_keys], dim=1,
-    ).float()
+    H_all = torch.stack([tail_per_layer[li]["h_resid_mlp"] for li in layer_keys], dim=1).float()
 
-    rho_vals, spf_vals, phi_vals = [], [], []
-    for t in range(n_tail):
-        rho, spf = spectral_analyzer.compute(H_all[t])
-        rho_vals.append(rho)
-        spf_vals.append(spf)
+    rho_vals, spf_vals = zip(*(spectral_analyzer.compute(H_all[t]) for t in range(n_tail)))
 
-        fi = []
-        for i in range(1, len(layer_keys)):
-            prev, curr = H_all[t, i - 1], H_all[t, i]
-            fi.append(float(((curr - prev).norm() ** 2 / (prev.norm() ** 2 + EPS)).item()))
-        phi_vals.append(information_flow_regularity(torch.tensor(fi)))
+    diffs = H_all[:, 1:] - H_all[:, :-1]
+    fi_all = diffs.norm(dim=-1) ** 2 / (H_all[:, :-1].norm(dim=-1) ** 2 + EPS)
+    phi_vals = [information_flow_regularity(fi_all[t]) for t in range(n_tail)]
 
     h_final = tail_per_layer[max(layer_keys)]["h_resid_mlp"]
     with torch.no_grad():
-        all_logits = lm_head(
-            final_norm(h_final.unsqueeze(0).to(dtype=lm_head.weight.dtype))
-        ).squeeze(0)
+        all_logits = lm_head(final_norm(h_final.unsqueeze(0).to(dtype=lm_head.weight.dtype))).squeeze(0)
     all_probs = torch.softmax(all_logits.float(), dim=-1)
 
     mlp_vals = []
     for t in range(n_tail):
-        k = effective_rank(all_probs[t])
-        cand = torch.topk(all_logits[t], k).indices
-        states = {
-            li: LayerHiddenStates(
-                h_resid_attn=tail_per_layer[li]["h_resid_attn"][t],
-                h_resid_mlp=tail_per_layer[li]["h_resid_mlp"][t],
-            )
-            for li in layer_keys
-        }
+        cand = torch.topk(all_logits[t], effective_rank(all_probs[t])).indices
+        states = {li: LayerHiddenStates(h_resid_attn=tail_per_layer[li]["h_resid_attn"][t], h_resid_mlp=tail_per_layer[li]["h_resid_mlp"][t]) for li in layer_keys}
         mlp_vals.append(compute_mlp_jsd(states, cand, lm_head, final_norm))
 
     ent_vals = []
     for t in range(n_tail):
         t_abs = cal_tail_start + t
-        attn_t = torch.stack([a[0, :, t_abs, :t_abs + 1] for a in prefill_attentions])
-        ent_vals.append(compute_ent(attn_t, t_abs + 1))
+        ent_vals.append(compute_ent(torch.stack([a[0, :, t_abs, :t_abs + 1] for a in prefill_attentions]), t_abs + 1))
 
-    signal_matrix = np.column_stack([rho_vals, phi_vals, spf_vals, mlp_vals, ent_vals])
-    return calibrate_cusum(signal_matrix)
+    return calibrate_cusum(np.column_stack([rho_vals, phi_vals, spf_vals, mlp_vals, ent_vals]))
