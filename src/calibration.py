@@ -3,7 +3,7 @@ import torch
 
 from src.config import LayerHiddenStates
 from src.fusion import CalibrationStats, calibrate_cusum
-from src.numerics import EPS, effective_rank, information_flow_regularity
+from src.numerics import effective_rank, information_flow_regularity
 from src.signals import compute_ent, compute_mlp_jsd
 
 
@@ -16,7 +16,7 @@ def self_calibrate(*, spectral_analyzer, lm_head, final_norm, tail_per_layer: di
     rho_vals, spf_vals = zip(*(spectral_analyzer.compute(H_all[t]) for t in range(n_tail)))
 
     diffs = H_all[:, 1:] - H_all[:, :-1]
-    fi_all = diffs.norm(dim=-1) ** 2 / (H_all[:, :-1].norm(dim=-1) ** 2 + EPS)
+    fi_all = diffs.norm(dim=-1) ** 2 / (H_all[:, :-1].norm(dim=-1) ** 2 + torch.finfo(H_all.dtype).eps)
     phi_vals = [information_flow_regularity(fi_all[t]) for t in range(n_tail)]
 
     h_final = tail_per_layer[max(layer_keys)]["h_resid_mlp"]

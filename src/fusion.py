@@ -4,7 +4,6 @@ import numpy as np
 from sklearn.covariance import ledoit_wolf
 
 from src.config import RiskySpan
-from src.numerics import EPS
 
 
 @dataclass
@@ -32,7 +31,9 @@ def calibrate_cusum(signal_matrix: np.ndarray) -> CalibrationStats:
     precision = np.linalg.inv(ledoit_wolf(signal_matrix)[0])
     dists = _mahal_dists(signal_matrix, mu, precision)
     tau = float(np.mean(dists))
-    return CalibrationStats(mu=mu, precision=precision, tau=tau, h=max(float(np.max(_cusum(dists, tau))), float(EPS)))
+    h_raw = float(np.max(_cusum(dists, tau)))
+    h = max(h_raw, tau * np.finfo(dists.dtype).eps)
+    return CalibrationStats(mu=mu, precision=precision, tau=tau, h=h)
 
 
 def compute_cusum_risks(signal_matrix: np.ndarray, stats: CalibrationStats):

@@ -62,7 +62,7 @@ class LayerHooks:
         self._h_resid_attn = args[0]
 
     def _capture_resid_mlp_and_store(self, module, args, output):
-        self._store[self.layer_idx] = LayerHiddenStates(h_resid_attn=self._h_resid_attn[:, -1, :].detach().bfloat16(), h_resid_mlp=output[0][:, -1, :].detach().bfloat16())
+        self._store[self.layer_idx] = LayerHiddenStates(h_resid_attn=self._h_resid_attn[:, -1, :].detach(), h_resid_mlp=output[0][:, -1, :].detach())
         self._h_resid_attn = None
 
     def remove(self):

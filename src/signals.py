@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from src.config import LayerHiddenStates
-from src.numerics import EPS, marchenko_pastur_edge, otsu_coefficient
+from src.numerics import marchenko_pastur_edge, otsu_coefficient
 
 _LOG2 = math.log(2)
 
@@ -32,11 +32,12 @@ class SpectralAnalyzer:
         L, d = H_c.shape
         C = (H_c @ H_c.T) / d
         eigvals = torch.linalg.eigvalsh(C).flip(0)
+        eps = torch.finfo(eigvals.dtype).eps
         lam_plus = marchenko_pastur_edge(float(eigvals.median().item()), L / d)
-        rho = max(0.0, (float(eigvals[0].item()) - lam_plus) / (lam_plus + EPS))
+        rho = max(0.0, (float(eigvals[0].item()) - lam_plus) / (lam_plus + eps))
         total_var = float(C.trace().item())
         prompt_var = float((self._prompt_eigvecs @ C @ self._prompt_eigvecs.T).trace().item())
-        return rho, prompt_var / (total_var + EPS)
+        return rho, prompt_var / (total_var + eps)
 
 
 def compute_mlp_jsd(layer_states: dict[int, LayerHiddenStates], candidate_set: Tensor, lm_head: nn.Linear, final_norm: nn.Module) -> float:
@@ -57,6 +58,6 @@ def compute_mlp_jsd(layer_states: dict[int, LayerHiddenStates], candidate_set: T
 
 
 def compute_ent(attn_tensor: Tensor, seq_len: int) -> float:
-    a = attn_tensor.float().clamp(min=EPS)
+    a = attn_tensor.float().clamp(min=torch.finfo(torch.float32).tiny)
     H = -(a * a.log2()).sum(dim=-1) / math.log2(seq_len)
     return float(1.0 - otsu_coefficient(H.reshape(-1).cpu().numpy()))

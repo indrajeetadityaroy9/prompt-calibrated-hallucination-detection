@@ -7,7 +7,7 @@ from src.calibration import self_calibrate
 from src.config import LayerHiddenStates, TokenSignals, DetectionResult
 from src.fusion import CalibrationStats, compute_cusum_risks
 from src.hooks import LayerHooks, ModelAdapter
-from src.numerics import EPS, effective_rank, information_flow_regularity
+from src.numerics import effective_rank, information_flow_regularity
 from src.signals import SpectralAnalyzer, compute_ent, compute_mlp_jsd
 
 _SIGNAL_FIELDS = ("rho", "phi", "spf", "mlp", "ent")
@@ -30,14 +30,12 @@ class Detector:
         self._hooks: list[LayerHooks] = []
 
     def _prefill(self, input_ids: Tensor, prompt_len: int) -> tuple:
-        window_size = min(self.num_layers, prompt_len)
-
         for layer_idx in range(self.num_layers):
             hook = LayerHooks(layer_idx, self._layer_states, adapter=self.adapter)
             hook.install(self._layers[layer_idx])
             self._hooks.append(hook)
 
-        cal_tail_start = max(0, prompt_len - window_size)
+        cal_tail_start = 0
         tail_per_layer = {}
         _tail_attn_tmp = {}
 
@@ -79,7 +77,7 @@ class Detector:
         rho, spf = self.spectral_analyzer.compute(H_token)
 
         diffs = H_token[1:] - H_token[:-1]
-        fi = diffs.norm(dim=-1) ** 2 / (H_token[:-1].norm(dim=-1) ** 2 + EPS)
+        fi = diffs.norm(dim=-1) ** 2 / (H_token[:-1].norm(dim=-1) ** 2 + torch.finfo(H_token.dtype).eps)
         phi = information_flow_regularity(fi)
 
         probs = torch.softmax(logits.float(), dim=-1)
@@ -148,4 +146,3 @@ class Detector:
     def detect(self, prompt: str, max_new_tokens: int) -> DetectionResult:
         input_ids = torch.tensor([self.tokenizer.encode(prompt, add_special_tokens=True)], dtype=torch.long, device=self.device)
         return self._generation_loop(input_ids, max_new_tokens)
-
