@@ -27,12 +27,12 @@
 
 \printAffiliationsAndNotice{}
 
-% ============================================================================
+
 \begin{abstract}
 Large language models hallucinate---generating fluent text that is unfaithful to the provided context. Existing detection methods require either supervised training on labeled hallucination data or access to external knowledge bases, limiting their applicability. We present a zero-shot, training-free hallucination detector that operates entirely within the transformer's own representations. Our method hooks into the autoregressive generation process, extracts five mechanistic signals from cross-layer hidden states at each token, and fuses them through a CUSUM sequential change-point detector calibrated from the prompt itself. The key insight is that hallucination manifests as a \emph{phase transition} in the spectral structure of layer-wise representations: when generation departs from the prompt's semantic structure, the dominant eigenvalues of the cross-layer covariance matrix shift relative to the Marchenko--Pastur noise floor. By modeling each token's hidden states as a spiked random matrix and running sequential hypothesis testing against a prompt-derived null distribution, we detect this transition without any learned parameters or external data.
 \end{abstract}
 
-% ============================================================================
+
 \section{Introduction}
 \label{sec:intro}
 
@@ -48,7 +48,7 @@ Our contributions are:
     \item A model-agnostic hook-based architecture that works with any HuggingFace causal language model through automatic introspection, without hardcoded architecture assumptions.
 \end{enumerate}
 
-% ============================================================================
+
 \section{Method}
 \label{sec:method}
 
@@ -189,7 +189,7 @@ The detector is architecture-agnostic, using automatic introspection to discover
 \end{itemize}
 Forward hooks are registered on each layer to capture hidden states at the post-attention and post-MLP residual stream positions without modifying the model or its forward pass.
 
-% ============================================================================
+
 \section{Experimental Setup}
 \label{sec:experiments}
 
@@ -236,13 +236,13 @@ AUROC confidence intervals are computed via BCa bootstrap (1000 resamples). Per-
 
 We quantify each signal's marginal contribution via leave-one-out ablation: for each signal in $\{\rho, \phi, \xi, \mu, \eta\}$, we replace it with its calibration mean $\mu_i$ and recompute the CUSUM risks from the cached signal matrix, measuring the resulting $\Delta$AUROC relative to the full-signal baseline.
 
-% ============================================================================
+
 \section{Results}
 \label{sec:results}
 
 \emph{Results tables to be populated after running evaluation.}
 
-% ============================================================================
+
 \section{Related Work}
 \label{sec:related}
 
@@ -258,13 +258,13 @@ CUSUM detectors are well-established in sequential analysis~\citep{page1954conti
 \paragraph{Logit lens and mechanistic interpretability.}
 The logit lens~\citep{nostalgebraist2020logitlens} projects intermediate representations through the language model head to inspect token predictions at each layer. We adapt this idea into a quantitative signal by measuring the Jensen--Shannon divergence between pre- and post-MLP logit distributions, capturing how much each MLP layer revises the model's prediction.
 
-% ============================================================================
+
 \section{Conclusion}
 \label{sec:conclusion}
 
 We presented a zero-shot hallucination detector that requires no training data, no learned parameters, and no external knowledge---only access to the transformer's own hidden states during generation. By framing hallucination as a spectral phase transition detectable through random matrix theory and fusing five mechanistic signals via a prompt-calibrated CUSUM detector, the method provides a principled, model-agnostic approach to hallucination detection that adapts to each input through self-calibration.
 
-% ============================================================================
+
 \bibliography{references}
 \bibliographystyle{icml2024}
 
