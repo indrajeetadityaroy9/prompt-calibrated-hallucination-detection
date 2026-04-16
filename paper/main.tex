@@ -36,11 +36,36 @@ Large language models hallucinate---generating fluent text that is unfaithful to
 \section{Introduction}
 \label{sec:intro}
 
-Large language models (LLMs) produce fluent, confident text that can diverge from the provided context without any surface-level indication of error. Detecting such hallucinations is critical for deploying LLMs in knowledge-grounded tasks, yet current approaches face a fundamental limitation: they either require supervised training on hallucination-labeled corpora or depend on external knowledge bases for verification.
+Large language models (LLMs) produce fluent, confident text that can diverge from the provided context without any surface-level indication of error. Detecting such hallucinations is critical for deploying LLMs in knowledge-grounded tasks, yet current approaches rest on one of three crutches, each with a fundamental limitation:
 
-We propose a fundamentally different approach that requires \emph{neither learned parameters nor external data}. Our method exploits the internal geometry of the transformer's own hidden states during generation. The central observation is that hallucination induces a detectable \emph{spectral phase transition} in the cross-layer covariance structure of hidden representations. When a model generates tokens faithful to the prompt, the layer-wise hidden states maintain a stable spectral signature aligned with the prompt's eigenvector structure. When generation drifts into hallucination, this alignment breaks down in a manner that is detectable through random matrix theory.
+\begin{enumerate}
+    \item \textbf{Sampling and consistency methods}~\citep{manakul2023selfcheckgpt} query the model multiple times and flag disagreement across samples. This is computationally expensive---requiring ${\sim}10\times$ the inference cost---and provides no mechanistic insight into \emph{why} the model failed.
+    \item \textbf{Supervised probes}~\citep{azaria2023internal, burns2022discovering} train a secondary classifier on labeled examples of faithful and hallucinated text. These require domain-specific training data and do not generalize across tasks or models without retraining.
+    \item \textbf{External verification} retrieves evidence from a knowledge base and compares it against the output. This is prone to retrieval and parsing errors, and fundamentally cannot detect hallucinations in domains where no external corpus exists.
+\end{enumerate}
 
-Our contributions are:
+We discard all three. Instead, we observe that hallucination is not a surface-level text error but a \emph{structural, geometric breakdown} inside the model's own representation space---one that is detectable in real time from a single forward pass, without any external data or learned parameters.
+
+\subsection{The Geometric Intuition}
+\label{sec:intuition}
+
+Consider an LLM with $L$ transformer layers. When the model generates a single token, that token's representation passes through all $L$ layers, producing $L$ vectors in a high-dimensional space. The geometric arrangement of these vectors encodes how information flows through the network.
+
+\paragraph{The faithful geometry.}
+When the model generates text grounded in the prompt, the $L$ layer-wise vectors for each token tightly align with the geometry established during the prompt's own processing. Topologically, these vectors form a highly directional structure---a tight, elongated shape dominated by a single principal direction. There is a clear, coherent information flow from layer~1 to layer~$L$, anchored to the prompt's representational subspace.
+
+\paragraph{The hallucination geometry.}
+When the model stops attending to the prompt and begins generating from its own prior biases, this geometric anchor dissolves. Two characteristic failure modes emerge:
+\begin{itemize}
+    \item \textbf{Collapse to noise.} The directional structure dissolves into a diffuse, isotropic cloud. The model is effectively guessing, and the layer-wise information flow becomes incoherent.
+    \item \textbf{Rogue confidence.} The vectors form a \emph{new} dominant direction, but one that is orthogonal to the prompt's subspace. The model generates confidently, but its internal geometry is entirely ungrounded from the input context.
+\end{itemize}
+
+\paragraph{The phase transition.}
+In physics, a phase transition is a sharp, measurable boundary---water becoming ice, not a gradual cooling. Hallucination triggers an analogous mathematical phase transition in the model's representation space. Using random matrix theory (specifically the Marchenko--Pastur law), we compute the exact \emph{noise floor} of the cross-layer covariance spectrum. When the dominant eigenvalue---the tip of the directional ``spear''---drops below this floor, or when it spikes in a direction orthogonal to the prompt's eigenvectors, the geometric link to the prompt is severed. The model has crossed the phase transition into hallucination. Our detector tracks this geometry token by token; the exact point where the spectral structure breaks, the system flags.
+
+\subsection{Contributions}
+
 \begin{enumerate}
     \item A suite of five mechanistic signals extracted from transformer internals during autoregressive generation, grounded in spectral theory, information geometry, and attention analysis.
     \item A prompt-anchored calibration procedure that derives all detection thresholds from the prompt's own spectral structure, eliminating the need for external training data.
