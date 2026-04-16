@@ -3,8 +3,6 @@ from typing import Literal
 
 import yaml
 
-VALID_DATASETS = ("triviaqa", "squad")
-
 
 @dataclass
 class ModelConfig:
@@ -34,10 +32,6 @@ class ExperimentConfig:
     def from_yaml(cls, path: str) -> "ExperimentConfig":
         with open(path) as f:
             raw = yaml.safe_load(f)
-        datasets = raw["evaluation"]["datasets"]
-        for d in datasets:
-            if d not in VALID_DATASETS:
-                raise ValueError(f"Unknown dataset '{d}'. Valid: {VALID_DATASETS}")
         return cls(
             mode=raw["run"]["mode"],
             model=ModelConfig(**raw["model"]),

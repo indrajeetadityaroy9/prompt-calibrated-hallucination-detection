@@ -1,0 +1,271 @@
+\documentclass{article}
+
+\usepackage{icml2024}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{bm}
+
+\icmltitlerunning{Prompt-Calibrated Spectral Signals for Zero-Shot Hallucination Detection}
+
+\begin{document}
+
+\twocolumn[
+\icmltitle{Prompt-Calibrated Spectral Signals for\\Zero-Shot Hallucination Detection in Language Models}
+
+\begin{icmlauthorlist}
+\icmlauthor{Anonymous Author(s)}{}
+\end{icmlauthorlist}
+
+\vskip 0.3in
+]
+
+\printAffiliationsAndNotice{}
+
+% ============================================================================
+\begin{abstract}
+Large language models hallucinate---generating fluent text that is unfaithful to the provided context. Existing detection methods require either supervised training on labeled hallucination data or access to external knowledge bases, limiting their applicability. We present a zero-shot, training-free hallucination detector that operates entirely within the transformer's own representations. Our method hooks into the autoregressive generation process, extracts five mechanistic signals from cross-layer hidden states at each token, and fuses them through a CUSUM sequential change-point detector calibrated from the prompt itself. The key insight is that hallucination manifests as a \emph{phase transition} in the spectral structure of layer-wise representations: when generation departs from the prompt's semantic structure, the dominant eigenvalues of the cross-layer covariance matrix shift relative to the Marchenko--Pastur noise floor. By modeling each token's hidden states as a spiked random matrix and running sequential hypothesis testing against a prompt-derived null distribution, we detect this transition without any learned parameters or external data.
+\end{abstract}
+
+% ============================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Large language models (LLMs) produce fluent, confident text that can diverge from the provided context without any surface-level indication of error. Detecting such hallucinations is critical for deploying LLMs in knowledge-grounded tasks, yet current approaches face a fundamental limitation: they either require supervised training on hallucination-labeled corpora or depend on external knowledge bases for verification.
+
+We propose a fundamentally different approach that requires \emph{neither learned parameters nor external data}. Our method exploits the internal geometry of the transformer's own hidden states during generation. The central observation is that hallucination induces a detectable \emph{spectral phase transition} in the cross-layer covariance structure of hidden representations. When a model generates tokens faithful to the prompt, the layer-wise hidden states maintain a stable spectral signature aligned with the prompt's eigenvector structure. When generation drifts into hallucination, this alignment breaks down in a manner that is detectable through random matrix theory.
+
+Our contributions are:
+\begin{enumerate}
+    \item A suite of five mechanistic signals extracted from transformer internals during autoregressive generation, grounded in spectral theory, information geometry, and attention analysis.
+    \item A prompt-anchored calibration procedure that derives all detection thresholds from the prompt's own spectral structure, eliminating the need for external training data.
+    \item A CUSUM sequential change-point detector that accumulates evidence of distributional shift over generated tokens, catching gradual drift that per-token scoring methods miss.
+    \item A model-agnostic hook-based architecture that works with any HuggingFace causal language model through automatic introspection, without hardcoded architecture assumptions.
+\end{enumerate}
+
+% ============================================================================
+\section{Method}
+\label{sec:method}
+
+\subsection{Overview}
+
+Given a prompt $x_{1:P}$ of length $P$ and a language model with $L$ transformer layers of hidden dimension $d$, our detector operates in three phases: (1)~\emph{prefill}, where we forward the prompt and calibrate the detector from tail token representations; (2)~\emph{generation}, where we extract five spectral signals per token during autoregressive decoding; and (3)~\emph{fusion}, where a CUSUM change-point detector accumulates signal evidence and maps it to per-token risk scores.
+
+At each generated token $t$, we collect hidden states from all $L$ layers at both the post-attention and post-MLP residual stream positions, yielding two vectors per layer. These are stacked into a matrix $H_t \in \mathbb{R}^{L \times d}$ from which we extract five signals $\bm{s}(t) = (\rho_t, \phi_t, \xi_t, \mu_t, \eta_t)$.
+
+\subsection{Dual Covariance and the Spiked Model}
+
+A central design choice is to work with the \emph{dual covariance} matrix rather than the standard $d \times d$ covariance. Given centered hidden states $H_c = H_t - \bar{H}_t$, we compute:
+\begin{equation}
+    C = \frac{1}{d} H_c H_c^\top \in \mathbb{R}^{L \times L}
+    \label{eq:dual-cov}
+\end{equation}
+Since $L \ll d$ (typically $L \approx 32$ while $d \approx 4096$), eigendecomposition of $C$ is tractable and well-conditioned. The eigenvalues of $C$ are proportional to those of the standard covariance $\frac{1}{d} H_c^\top H_c$ (up to $d - L$ zero eigenvalues), so no spectral information is lost.
+
+Under the null hypothesis that layer activations are unstructured, the eigenvalue distribution of $C$ follows the Marchenko--Pastur law with upper edge:
+\begin{equation}
+    \lambda_+ = \sigma^2 \left(1 + \sqrt{\gamma}\right)^2
+    \label{eq:mp-edge}
+\end{equation}
+where $\sigma^2$ is the median eigenvalue (a robust noise variance estimate) and $\gamma = L/d$ is the aspect ratio. Eigenvalues exceeding $\lambda_+$ indicate signal components that rise above the noise bulk---the BBP (Baik--Ben~Arous--P\'{e}ch\'{e}) phase transition.
+
+\subsection{Signal Extraction}
+\label{sec:signals}
+
+\paragraph{Spike Excess Ratio ($\rho$).}
+The spike excess ratio measures how far the dominant eigenvalue of the current token's dual covariance exceeds the noise floor:
+\begin{equation}
+    \rho_t = \max\!\left(0,\; \frac{\lambda_1(C_t) - \lambda_+}{\lambda_+}\right)
+    \label{eq:rho}
+\end{equation}
+When the model generates tokens consistent with the context, the spectral structure is predictable and $\rho$ remains near its prompt-calibrated baseline. Hallucination disrupts the layer-wise coherence, causing $\lambda_1$ to either spike (novel structure) or collapse (loss of structure) relative to the noise floor.
+
+\paragraph{Spectral Projection Fidelity ($\xi$).}
+During calibration, we compute the prompt's principal eigenvectors $V_{\text{prompt}}$ (those above the MP threshold). For each generated token, we measure the fraction of total variance captured by projecting onto the prompt subspace:
+\begin{equation}
+    \xi_t = \frac{\operatorname{tr}(V_{\text{prompt}}\, C_t\, V_{\text{prompt}}^\top)}{\operatorname{tr}(C_t)}
+    \label{eq:spf}
+\end{equation}
+High fidelity indicates that the token's cross-layer structure aligns with the prompt's spectral geometry; a drop signals departure from the prompt's representational manifold.
+
+\paragraph{Information Flow Regularity ($\phi$).}
+We compute the Fisher information profile across consecutive layers:
+\begin{equation}
+    f_\ell = \frac{\|h_t^{(\ell)} - h_t^{(\ell-1)}\|^2}{\|h_t^{(\ell-1)}\|^2}, \quad \ell = 2, \ldots, L
+    \label{eq:fi-profile}
+\end{equation}
+and then measure the smoothness of this profile via the ratio of its $\ell_1$ norm to its $\ell_1$ norm plus total variation:
+\begin{equation}
+    \phi_t = \frac{\|f\|_1}{\|f\|_1 + \operatorname{TV}(f)}
+    \label{eq:phi}
+\end{equation}
+where $\operatorname{TV}(f) = \sum_\ell |f_{\ell+1} - f_\ell|$. Smooth information flow ($\phi \approx 1$) indicates regular processing; irregular spikes in the profile suggest the model is struggling to reconcile conflicting representations across layers.
+
+\paragraph{MLP Revision Magnitude ($\mu$).}
+At each layer $\ell$, we project the pre-MLP and post-MLP residual stream states through the final layer norm and language model head to obtain logit distributions over a candidate token set $\mathcal{K}$:
+\begin{equation}
+    p_{\text{pre}}^{(\ell)} = \operatorname{softmax}\!\left(W_{\mathcal{K}}\, \operatorname{LN}(h_{\text{attn}}^{(\ell)})\right)
+    \label{eq:logit-lens-pre}
+\end{equation}
+\begin{equation}
+    p_{\text{post}}^{(\ell)} = \operatorname{softmax}\!\left(W_{\mathcal{K}}\, \operatorname{LN}(h_{\text{mlp}}^{(\ell)})\right)
+    \label{eq:logit-lens-post}
+\end{equation}
+where $W_{\mathcal{K}}$ is the language model head restricted to the top-$k$ candidates (with $k$ set to the effective rank of the output distribution), and $\operatorname{LN}$ is the final layer normalization. The signal is the mean Jensen--Shannon divergence across layers:
+\begin{equation}
+    \mu_t = \frac{1}{L} \sum_{\ell=1}^{L} \operatorname{JSD}\!\left(p_{\text{pre}}^{(\ell)} \,\|\, p_{\text{post}}^{(\ell)}\right)
+    \label{eq:mlp-jsd}
+\end{equation}
+The candidate set size $k$ is determined by the effective rank:
+\begin{equation}
+    k = \left\lceil \exp\!\left(-\sum_i p_i \log p_i\right) \right\rceil
+    \label{eq:effective-rank}
+\end{equation}
+where $p$ is the softmax distribution over the full vocabulary. This adapts the candidate set to the model's predictive entropy.
+
+\paragraph{Attention Entropy Bimodality ($\eta$).}
+For each attention head $j$ at each layer $\ell$, we compute the normalized entropy of the attention distribution over the current sequence:
+\begin{equation}
+    \mathcal{H}_{\ell,j} = -\frac{\sum_i a_{\ell,j,i} \log_2 a_{\ell,j,i}}{\log_2 n}
+    \label{eq:attn-entropy}
+\end{equation}
+where $a_{\ell,j,i}$ are the attention weights and $n$ is the sequence length. We then quantify the bimodality of the entropy distribution across all layer-head pairs using the Otsu coefficient:
+\begin{equation}
+    \eta_t = 1 - \frac{\sigma_B^2}{\sigma_T^2}
+    \label{eq:ent}
+\end{equation}
+where $\sigma_B^2$ is the maximum between-class variance from Otsu's method and $\sigma_T^2$ is the total variance. Low $\eta$ (high bimodality) indicates a mixture of sharply focused and diffuse heads, which is characteristic of well-structured processing. High $\eta$ (low bimodality) suggests uniformly entropic attention, indicating the model lacks confident contextual grounding.
+
+\subsection{Prompt-Anchored Calibration}
+\label{sec:calibration}
+
+All detection parameters are derived from the prompt's own representations, requiring no external data or training. During the prefill phase, we compute the five signals on all prompt tokens, yielding a calibration matrix $S_{\text{cal}} \in \mathbb{R}^{P \times 5}$.
+
+The spectral analyzer is calibrated by computing the prompt's dual covariance eigenvectors that exceed the Marchenko--Pastur threshold, establishing the reference subspace $V_{\text{prompt}}$ for the spectral projection fidelity signal.
+
+From $S_{\text{cal}}$, we estimate:
+\begin{itemize}
+    \item The mean signal vector: $\bm{\mu} = \frac{1}{P} \sum_{t=1}^{P} \bm{s}(t)$
+    \item The precision matrix: $\Omega = \hat{\Sigma}_{\text{LW}}^{-1}$, using the Ledoit--Wolf shrinkage estimator~\citep{ledoit2004well} to handle the $P \ll d$ regime
+    \item The CUSUM drift: $\tau = \frac{1}{P} \sum_{t=1}^{P} d(t)$, where $d(t)$ is the Mahalanobis distance of the $t$-th calibration token
+    \item The alarm threshold: $h = \max_t C_{\text{cal}}(t)$, the maximum CUSUM excursion on calibration data
+\end{itemize}
+
+\subsection{CUSUM Fusion}
+\label{sec:fusion}
+
+Rather than scoring tokens independently, we accumulate evidence of distributional shift via a CUSUM (cumulative sum) sequential change-point detector operating on the Mahalanobis distance from the calibrated null:
+\begin{equation}
+    d(t) = (\bm{s}(t) - \bm{\mu})^\top \Omega\, (\bm{s}(t) - \bm{\mu})
+    \label{eq:mahal}
+\end{equation}
+\begin{equation}
+    C(t) = \max\!\left(0,\; C(t-1) + d(t) - \tau\right)
+    \label{eq:cusum}
+\end{equation}
+\begin{equation}
+    \operatorname{risk}(t) = \frac{C(t)}{C(t) + h}
+    \label{eq:risk}
+\end{equation}
+
+The CUSUM statistic $C(t)$ resets to zero when the signal returns to baseline and grows when the Mahalanobis distance consistently exceeds the drift $\tau$. This sequential accumulation is critical: it catches \emph{gradual} drift that per-token anomaly scoring would miss, as the cumulative evidence builds even when individual token distances are only marginally elevated.
+
+The response-level hallucination flag is raised when $\max_t C(t) > h$, and the overall response risk is $\max_t \operatorname{risk}(t)$. Contiguous spans where $C(t) > h$ are reported as risky regions.
+
+\subsection{Model-Agnostic Architecture}
+\label{sec:architecture}
+
+The detector is architecture-agnostic, using automatic introspection to discover model components. Given any HuggingFace \texttt{AutoModelForCausalLM}, the system identifies:
+\begin{itemize}
+    \item The transformer layers (largest \texttt{ModuleList})
+    \item The final layer normalization (last norm child of the layers' parent module)
+    \item The language model head (via \texttt{get\_output\_embeddings})
+    \item The post-attention normalization within each block (second norm child, standard for pre-LN architectures)
+\end{itemize}
+Forward hooks are registered on each layer to capture hidden states at the post-attention and post-MLP residual stream positions without modifying the model or its forward pass.
+
+% ============================================================================
+\section{Experimental Setup}
+\label{sec:experiments}
+
+\subsection{Datasets and Labeling}
+
+We evaluate on two extractive question-answering benchmarks:
+\begin{itemize}
+    \item \textbf{TriviaQA}~\citep{joshi2017triviaqa}: Reading comprehension subset (validation split), using search result or entity page context passages truncated to 2000 characters.
+    \item \textbf{SQuAD v2}~\citep{rajpurkar2018know}: Validation split, filtering to answerable questions only.
+\end{itemize}
+
+Both datasets are loaded via the HuggingFace Datasets library and normalized to a common schema: \texttt{\{question, answers, context\}}. We evaluate 200 samples per dataset with greedy decoding, generating up to 64 tokens per response.
+
+Since neither dataset provides ground-truth hallucination labels, we derive binary labels from token-level F1 scores between generated answers and ground-truth references. Following SQuAD evaluation conventions, answers are normalized (lowercased, articles and punctuation removed) and F1 is computed via token overlap, taking the maximum across all reference answers. An adaptive Otsu threshold on the F1 distribution separates hallucinated from correct responses.
+
+\subsection{Prompt Format}
+
+All samples use the template:
+\begin{quote}
+\texttt{Context: \{context\}}\\[2pt]
+\texttt{Question: \{question\}}\\[2pt]
+\texttt{Answer:}
+\end{quote}
+
+\subsection{Model}
+
+We use Llama-3.1-8B-Instruct~\citep{dubey2024llama} in \texttt{bfloat16} precision with eager attention (required for full attention weight access via hooks). Model placement uses \texttt{device\_map="auto"} across available GPUs.
+
+\subsection{Metrics}
+
+We report:
+\begin{itemize}
+    \item \textbf{AUROC}: Area under the receiver operating characteristic curve.
+    \item \textbf{AUPRC}: Area under the precision-recall curve.
+    \item \textbf{FPR@95\%TPR}: False positive rate at 95\% true positive rate.
+    \item \textbf{F1 (Youden)}: Optimal F1 at the Youden's $J$-statistic threshold.
+    \item \textbf{AURC / E-AURC}: Area under the risk-coverage curve and its excess over the oracle~\citep{geifman2017selective}.
+    \item \textbf{ECE}: Expected calibration error (10 bins, $L_1$ norm).
+    \item \textbf{Brier}: Brier score for probabilistic calibration.
+\end{itemize}
+AUROC confidence intervals are computed via BCa bootstrap (1000 resamples). Per-signal AUROC is also reported to assess individual signal discriminability.
+
+\subsection{Ablation Protocol}
+
+We quantify each signal's marginal contribution via leave-one-out ablation: for each signal in $\{\rho, \phi, \xi, \mu, \eta\}$, we replace it with its calibration mean $\mu_i$ and recompute the CUSUM risks from the cached signal matrix, measuring the resulting $\Delta$AUROC relative to the full-signal baseline.
+
+% ============================================================================
+\section{Results}
+\label{sec:results}
+
+\emph{Results tables to be populated after running evaluation.}
+
+% ============================================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Hallucination detection.}
+Existing approaches to hallucination detection fall into three categories: (1)~\emph{supervised} methods that train classifiers on hallucination-labeled data~\citep{manakul2023selfcheckgpt}; (2)~\emph{consistency-based} methods that sample multiple outputs and measure agreement~\citep{kuhn2023semantic}; and (3)~\emph{internal-state} methods that probe hidden representations for uncertainty signals~\citep{azaria2023internal, burns2022discovering}. Our method belongs to the third category but differs fundamentally: we require no training, no multiple samples, and no probing classifier---all parameters are derived from the prompt itself.
+
+\paragraph{Spectral methods and random matrix theory.}
+Random matrix theory has been applied to analyze neural network weight matrices~\citep{martin2021implicit} and training dynamics~\citep{papyan2020prevalence}, but its application to runtime hidden state analysis for hallucination detection is novel. The Marchenko--Pastur law and the BBP phase transition provide a principled noise floor against which signal components can be identified without arbitrary thresholds.
+
+\paragraph{Change-point detection.}
+CUSUM detectors are well-established in sequential analysis~\citep{page1954continuous} and have been applied to distribution shift detection in machine learning~\citep{rabanser2019failing}. Our contribution is the application of CUSUM to multivariate spectral signals from transformer internals, calibrated against a prompt-derived null distribution.
+
+\paragraph{Logit lens and mechanistic interpretability.}
+The logit lens~\citep{nostalgebraist2020logitlens} projects intermediate representations through the language model head to inspect token predictions at each layer. We adapt this idea into a quantitative signal by measuring the Jensen--Shannon divergence between pre- and post-MLP logit distributions, capturing how much each MLP layer revises the model's prediction.
+
+% ============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented a zero-shot hallucination detector that requires no training data, no learned parameters, and no external knowledge---only access to the transformer's own hidden states during generation. By framing hallucination as a spectral phase transition detectable through random matrix theory and fusing five mechanistic signals via a prompt-calibrated CUSUM detector, the method provides a principled, model-agnostic approach to hallucination detection that adapts to each input through self-calibration.
+
+% ============================================================================
+\bibliography{references}
+\bibliographystyle{icml2024}
+
+\end{document}

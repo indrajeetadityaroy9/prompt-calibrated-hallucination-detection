@@ -34,7 +34,7 @@ class SampleResult:
 
 def _run_dataset(detector: Detector, dataset_name: str, samples: list[dict], config: ExperimentConfig) -> tuple[list[SampleResult], dict]:
     results: list[SampleResult] = []
-    print_interval = max(1, config.evaluation.n_samples // 4)
+    print_interval = config.evaluation.n_samples // 4
 
     for i, sample in enumerate(tqdm(samples, desc=f"Eval ({dataset_name})")):
         prompt = PROMPT_TEMPLATE.format(context=sample["context"], question=sample["question"])

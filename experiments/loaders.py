@@ -1,55 +1,46 @@
-from datasets import load_dataset, Dataset
+from functools import partial
+
+from datasets import load_dataset
+
+_SCHEMA = {"question", "answers", "context"}
 
 
-def _extract_triviaqa_context(item: dict, max_chars: int) -> str:
+def _triviaqa_context(item, max_chars):
     for key, subkey in [("search_results", "search_context"), ("entity_pages", "wiki_context")]:
-        ctx_list = (item.get(key) or {}).get(subkey)
-        if ctx_list and ctx_list[0]:
-            return ctx_list[0][:max_chars]
+        ctx = (item.get(key) or {}).get(subkey)
+        if ctx and ctx[0]:
+            return ctx[0][:max_chars]
     return ""
 
 
-def _normalize_triviaqa(ds: Dataset, max_context_chars: int) -> list[dict]:
-    return [
-        {
-            "question": row["question"],
-            "answers": list(set(row["answer"]["aliases"] + [row["answer"]["value"]])),
-            "context": _extract_triviaqa_context(row, max_context_chars),
-        }
-        for row in ds
-    ]
+def _map_triviaqa(example, max_chars):
+    return {"question": example["question"], "answers": list(set(example["answer"]["aliases"] + [example["answer"]["value"]])), "context": _triviaqa_context(example, max_chars)}
 
 
-def _normalize_squad(ds: Dataset) -> list[dict]:
-    return [
-        {
-            "question": row["question"],
-            "answers": list(set(row["answers"]["text"])),
-            "context": row["context"],
-        }
-        for row in ds
-    ]
+def _map_squad(example):
+    return {"question": example["question"], "answers": list(set(example["answers"]["text"])), "context": example["context"]}
 
 
-def load_triviaqa(n_samples: int, max_context_chars: int) -> list[dict]:
-    print("Loading TriviaQA...")
-    ds = load_dataset("trivia_qa", "rc", split="validation")
-    ds = ds.filter(lambda x: _extract_triviaqa_context(x, max_context_chars) != "")
-    if len(ds) > n_samples:
+def load_samples(name, n_samples, max_context_chars, streaming=False):
+    print(f"Loading {name}...")
+    if name == "triviaqa":
+        ds = load_dataset("trivia_qa", "rc", split="validation", streaming=streaming)
+        ds = ds.filter(lambda x: _triviaqa_context(x, max_context_chars) != "")
+        map_fn = partial(_map_triviaqa, max_chars=max_context_chars)
+    else:
+        ds = load_dataset("squad_v2", split="validation", streaming=streaming)
+        ds = ds.filter(lambda x: len(x["answers"]["text"]) > 0)
+        map_fn = _map_squad
+
+    drop = [c for c in ds.column_names if c not in _SCHEMA]
+
+    if streaming:
+        ds = ds.map(map_fn, remove_columns=drop)
+        samples = list(ds.take(n_samples))
+    else:
         ds = ds.select(range(n_samples))
-    samples = _normalize_triviaqa(ds, max_context_chars)
-    del ds
-    print(f"Loaded {len(samples)} TriviaQA samples")
-    return samples
+        ds = ds.map(map_fn, remove_columns=drop)
+        samples = list(ds)
 
-
-def load_squad(n_samples: int, max_context_chars: int) -> list[dict]:
-    print("Loading SQuAD v2...")
-    ds = load_dataset("squad_v2", split="validation")
-    ds = ds.filter(lambda x: len(x["answers"]["text"]) > 0)
-    if len(ds) > n_samples:
-        ds = ds.select(range(n_samples))
-    samples = _normalize_squad(ds)
-    del ds
-    print(f"Loaded {len(samples)} SQuAD samples")
+    print(f"Loaded {len(samples)} {name} samples")
     return samples

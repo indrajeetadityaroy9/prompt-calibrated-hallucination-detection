@@ -6,17 +6,10 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from experiments.loaders import load_triviaqa, load_squad
+from experiments.loaders import load_samples
 from experiments.schema import ModelConfig
 
 PROMPT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
-
-DATASET_LOADERS = {"triviaqa": load_triviaqa, "squad": load_squad}
-
-
-def load_samples(name: str, n_samples: int, max_context_chars: int) -> list[dict]:
-    loader = DATASET_LOADERS[name]
-    return loader(n_samples=n_samples, max_context_chars=max_context_chars)
 
 
 def load_model(config: ModelConfig, seed: int) -> tuple[AutoModelForCausalLM, AutoTokenizer]:
